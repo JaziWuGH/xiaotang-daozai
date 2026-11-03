@@ -12,8 +12,6 @@ mod diagnostics;
 struct Shell {
     app: App,
     t0: Instant,
-    #[cfg(windows)]
-    frame_at: Instant,
     media: smtc::Shared,
     seek_rx: Option<std::sync::mpsc::Receiver<bool>>,
     media_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -99,8 +97,6 @@ impl Shell {
         Self {
             app,
             t0: Instant::now(),
-            #[cfg(windows)]
-            frame_at: Instant::now(),
             media,
             seek_rx: None,
             media_enabled,
@@ -191,7 +187,10 @@ impl Shell {
             date,
             battery: self.sys.0,
             charging: self.sys.1,
-            network: Some(self.system_state.network),
+            network: {
+                #[cfg(windows)] { Some(self.system_state.network) }
+                #[cfg(not(windows))] { None }
+            },
             cursor,
             idle_seconds: {
                 #[cfg(windows)] {Some(daozai::system::idle_seconds())}
@@ -202,7 +201,10 @@ impl Shell {
                 #[cfg(not(windows))] {None}
             },
             media: self.media.lock().map(|m| m.clone()).unwrap_or_default(),
-            volume: self.system_state.volume,
+            volume: {
+                #[cfg(windows)] { self.system_state.volume }
+                #[cfg(not(windows))] { None }
+            },
             bt: self.bt.clone(),
             bt_ready: self.bt_ready,
         }
@@ -216,13 +218,10 @@ impl eframe::App for Shell {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
-        #[cfg(windows)]
-        {
-            // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
-            let delay=Duration::from_secs_f64(1.0/60.0).saturating_sub(self.frame_at.elapsed());
-            if !delay.is_zero(){std::thread::sleep(delay);}
-            self.frame_at=Instant::now();
-        }
+        // 帧率上限在事件循环里推迟重绘（vendor/eframe `MIN_REDRAW_GAP`），
+        // 不在这里 sleep。界面线程一旦睡着，Windows 就派不出 WM_NCHITTEST，
+        // 鼠标停在刘海上时命中测试会跟着掉帧。Intel 驱动的垂直同步忙等仍由
+        // 事件循环的最小重绘间隔和 Windows 上关闭 vsync 避开。
         #[cfg(windows)]
         self.poll_tray();
         #[cfg(windows)]

@@ -183,7 +183,8 @@ unsafe fn apply_style(hwnd: HWND, editing: bool, raise: bool) {
         // 每次展开重新抬高实际层级；标记存在时仍可能被别的窗口盖住。
         let mut flags=SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
         // 输入状态只切换激活权限，避免重画无边框窗口的非客户区。
-        if frame_changed {flags|=SWP_FRAMECHANGED;}
+        // 展开时只抬高层级，不再让 SetWindowPos 同步重画一整帧。
+        if frame_changed {flags|=SWP_FRAMECHANGED;} else {flags|=SWP_NOREDRAW;}
         let _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -283,7 +284,9 @@ impl Window {
         if self.region != r {
             unsafe {
                 let rgn = CreateRectRgn(r.0, r.1, r.2, r.3);
-                if SetWindowRgn(self.hwnd, rgn, true) != 0 {
+                // bRedraw=false：区域变化后的像素由紧接着的 GL present 更新。
+                // true 会让 GDI 同步擦除并重画透明窗口，展开时就是一帧卡顿。
+                if SetWindowRgn(self.hwnd, rgn, false) != 0 {
                     self.region = r;
                 } else {
                     let _ = DeleteObject(rgn);

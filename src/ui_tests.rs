@@ -386,6 +386,9 @@ impl H {
     fn wheel(&mut self,delta:f32) {
         self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(0.0,delta),modifiers:Default::default()}]);
     }
+    fn swipe(&mut self,delta_x:f32) {
+        self.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(delta_x,0.0),modifiers:Default::default()}]);
+    }
     fn picker_frame(&mut self,events:Vec<egui::Event>){
         self.frame(events);
     }
@@ -1286,6 +1289,67 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
     h.hover(H::local(210.0,18.0),0.3);
     for _ in 0..5 {h.wheel(-40.0);}
     assert_eq!(h.app.page,2,"一次连续滚动不能瞬间跳过多个页面");
+}
+
+#[test]
+fn trackpad_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(210.0,18.0),0.3);
+    for _ in 0..4 {h.swipe(5.0);}
+    assert_eq!(h.app.page,0,"不到 24 点的横向抖动不能翻页");
+    h.swipe(5.0);
+    assert_eq!(h.app.page,1,"手指向左（正的横向增量）应到下一页");
+    h.hover(H::local(210.0,18.0),0.3);
+    for _ in 0..5 {h.swipe(40.0);}
+    assert_eq!(h.app.page,2,"一次连续左滑不能跳过多个页面");
+    h.hover(H::local(210.0,18.0),0.3);
+    h.swipe(-40.0);
+    assert_eq!(h.app.page,1,"手指向右应回到上一页");
+    h.hover(H::local(210.0,18.0),0.3);
+    h.frame(vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:Vec2::new(3.0,-40.0),modifiers:Default::default()}]);
+    assert_eq!(h.app.page,2,"竖向滚轮仍向下翻页，少量横向分量不能抢走这次滚动");
+}
+
+#[test]
+fn horizontal_swipe_changes_pages_over_a_list_without_scrolling_it(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.shelf.items=(0..6).map(|i|std::path::PathBuf::from(format!("swipe-shelf-{i}.txt"))).collect();
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),1.0);
+    h.swipe(40.0);
+    assert_eq!(h.app.page,4,"列表上的左右滑应直接翻页");
+    assert_eq!(h.app.shelf_first,0,"左右滑不能把置物架当成竖向滚动");
+    h.app.show_page(3);h.hover(H::local(300.0,60.0),0.3);h.wheel(-40.0);
+    assert_eq!(h.app.page,3,"同一位置的竖向滚轮仍然先滚列表");
+    assert_eq!(h.app.shelf_first,1);
+}
+
+#[test]
+fn click_still_changes_pages_after_a_small_swipe(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.swipe(4.0);
+    h.hover(H::local(300.0,60.0),0.2);
+    h.click(H::local(398.0,68.0));
+    assert_eq!(h.app.page,1,"轻微滑动之后点击下一页仍然有效");
+}
+
+#[test]
+fn expand_region_stays_put_through_the_overshoot(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),0.12);
+    assert!(!h.app.open,"0.12 秒仍在意图缓冲内");
+    assert!(h.region.height()<60.0,"鼠标刚停上刘海时不应把原生区域撑成整页，height={}",h.region.height());
+    h.hover(Pos2::new(WIN_W/2.0,12.0),0.45);
+    assert!(h.app.progress()>0.9);
+    let settled=h.region;
+    assert!(settled.height()>100.0,"展开后的区域应盖住面板");
+    let mut changes=0;
+    let mut prev=settled;
+    for _ in 0..40 {
+        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0/60.0);
+        if h.region!=prev {changes+=1;prev=h.region;}
+    }
+    assert_eq!(changes,0,"过冲和回落期间窗口区域必须不变，否则每帧都会 SetWindowRgn");
 }
 
 #[test]
