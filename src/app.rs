@@ -328,6 +328,10 @@ pub struct App {
     /// 横向滑动的累计位移。正值是下一页（手指向左），负值是上一页（手指向右）。
     swipe_delta: f32,
     swipe_at: f64,
+    /// 触摸屏上的主接触点。第二根手指只计数，避免和触控板双指滚轮各翻一次。
+    touch_primary: Option<(egui::TouchId, Pos2)>,
+    touch_extra: u32,
+    touch_moved: bool,
 
     // 拖入
     pub(crate) drag_hot: bool,
@@ -470,6 +474,9 @@ impl App {
             wheel_page_at: -1.0,
             swipe_delta: 0.0,
             swipe_at: -1.0,
+            touch_primary: None,
+            touch_extra: 0,
+            touch_moved: false,
             drag_hot: false,
             drag_a: 0.0,
             drag_saved: None,
@@ -990,13 +997,13 @@ impl App {
         }
     }
 
-    /// 触控板双指左右滑，或 Shift+滚轮被 egui 转成的横向滚动。
+    /// 触控板双指左右滑，Shift+滚轮被 egui 转成的横向滚动，以及触摸屏单指横滑。
     ///
-    /// 方向跟 Windows 触控板的手指一致。winit 会把 `WM_MOUSEHWHEEL` 取反
-    /// （rust-windowing/winit#2105），所以到这里时：
+    /// 方向跟手指一致，当前页被推向手指的方向。触控板走 `WM_MOUSEHWHEEL`，
+    /// winit 会把该消息取反（rust-windowing/winit#2105），所以到这里时：
     /// 手指向左 → `delta > 0` → 下一页；手指向右 → `delta < 0` → 上一页。
-    /// 也就是把当前页推向手指的方向。系统里如果打开了「反转滚动方向」，符号会跟着反，
-    /// 这时左右滑和用户自己的滚动习惯一致。
+    /// 系统里如果打开了「反转滚动方向」，触控板的符号会跟着反。
+    /// 触摸屏的点坐标没有这层取反，调用前先把位移反过来。
     /// 横向滑动不滚动列表，也不吃点击。
     fn consume_horizontal_swipe(&mut self, delta: f32, ctx: &egui::Context) {
         self.wheel_delta=0.0;
@@ -1012,6 +1019,67 @@ impl App {
             }
             ctx.input_mut(|i|{i.raw_scroll_delta=Vec2::ZERO;i.smooth_scroll_delta=Vec2::ZERO;});
         }
+    }
+
+    /// 这一帧的单指触摸位移，以及「移动过的手指已经抬起」。
+    ///
+    /// Windows 触摸屏的滑动不是滚轮。winit 把 `WM_POINTER*` / `WM_TOUCH` 收成
+    /// `WindowEvent::Touch`，egui-winit 再变成 `Event::Touch`，同时仿一份鼠标给点击用。
+    /// 这里只看触摸点，普通鼠标拖动不会翻页。第二根手指按下时丢掉位移，
+    /// 免得触控板双指（若也被收成触摸）和横向滚轮各翻一次。
+    fn ingest_touch(&mut self, ctx: &egui::Context) -> (Vec<(Pos2, Vec2)>, bool) {
+        let events: Vec<egui::Event> = ctx.input(|i| i.events.clone());
+        let mut samples = Vec::new();
+        let mut lifted = false;
+        for event in events {
+            let egui::Event::Touch { id, phase, pos, .. } = event else { continue };
+            match phase {
+                egui::TouchPhase::Start => {
+                    let same = self.touch_primary.as_ref().is_some_and(|(pid, _)| *pid == id);
+                    if self.touch_primary.is_none() || same {
+                        if self.touch_primary.is_none() { self.touch_moved = false; }
+                        self.touch_primary = Some((id, pos));
+                    } else {
+                        self.touch_extra = self.touch_extra.saturating_add(1);
+                        samples.clear();
+                        self.swipe_delta = 0.0;
+                        self.wheel_delta = 0.0;
+                    }
+                }
+                egui::TouchPhase::Move => {
+                    if self.touch_extra == 0 {
+                        if let Some((pid, prev)) = self.touch_primary {
+                            if pid == id {
+                                let delta = pos - prev;
+                                self.touch_primary = Some((id, pos));
+                                if delta != Vec2::ZERO {
+                                    samples.push((pos, delta));
+                                    self.touch_moved = true;
+                                }
+                            }
+                        } else {
+                            self.touch_primary = Some((id, pos));
+                        }
+                    } else if self.touch_primary.as_ref().is_some_and(|(pid, _)| *pid == id) {
+                        self.touch_primary = Some((id, pos));
+                        samples.clear();
+                    }
+                }
+                egui::TouchPhase::End | egui::TouchPhase::Cancel => {
+                    if self.touch_primary.as_ref().is_some_and(|(pid, _)| *pid == id) {
+                        let moved = self.touch_moved;
+                        self.touch_primary = None;
+                        self.touch_moved = false;
+                        if phase == egui::TouchPhase::Cancel { samples.clear(); }
+                        if self.touch_extra == 0 && moved { lifted = true; }
+                    } else if self.touch_extra > 0 {
+                        self.touch_extra -= 1;
+                    }
+                }
+            }
+        }
+        if self.touch_extra > 0 { samples.clear(); }
+        (samples, lifted)
     }
 
     /// 竖向滚轮：列表内部先滚动，到边或落在顶栏才翻页。向下（delta < 0）是下一页。
@@ -1281,7 +1349,11 @@ impl App {
         // ---------- 输入：悬停 ----------
         let p_prev = self.progress();
         let hit = self.hit_rect(cx, top, p_prev);
-        let inside = env.cursor.is_some_and(|c| hit.contains(c));
+        // 触摸屏的手指不一定会带动 GetCursorPos。接触点落在岛上时，跟光标一样算「在里面」。
+        let (touch_samples, touch_lifted) = self.ingest_touch(&ctx);
+        let inside = env.cursor.is_some_and(|c| hit.contains(c))
+            || self.touch_primary.as_ref().is_some_and(|(_, pos)| hit.contains(*pos))
+            || touch_samples.iter().any(|(pos, _)| hit.contains(*pos));
         let on_notice=env.cursor.is_some_and(|c|self.notice_rect(cx,top).is_some_and(|r|r.contains(c))||self.notice_details_rect(cx,top).is_some_and(|r|r.contains(c)));
         if !inside {
             self.hover_lock = false;
@@ -1303,15 +1375,35 @@ impl App {
                 self.swipe_delta=0.0;
                 self.navigate_page(right);
             } else if scroll!=Vec2::ZERO {
-                let cursor=env.cursor.unwrap()-Vec2::new(cx-PW/2.0,top);
+                let pointer=env.cursor.or_else(||self.touch_primary.map(|(_,pos)|pos)).unwrap_or(Pos2::ZERO);
+                let cursor=pointer-Vec2::new(cx-PW/2.0,top);
                 // 同一帧里谁的绝对值大，谁说了算。竖滑时带一点横向抖动不会翻页，
                 // 左右滑时带一点竖向抖动也不会去滚列表。
+                // 这一帧已经有滚轮时不再叠加触摸位移，触控板双指仍只走这里。
                 if scroll.x.abs()>scroll.y.abs() {
                     self.consume_horizontal_swipe(scroll.x, &ctx);
                 } else {
                     self.swipe_delta=0.0;
                     self.consume_vertical_wheel(scroll.y, cursor, &ctx);
                 }
+            } else if !touch_samples.is_empty() {
+                for (pos, delta) in touch_samples {
+                    // 用这一截位移的起点做列表命中。滚轮的光标不动；手指会走出列表，
+                    // 起点仍在列表里就该滚列表，而不是因为落到顶栏就改翻页。
+                    let cursor = (pos - delta) - Vec2::new(cx - PW / 2.0, top);
+                    if delta.x.abs() > delta.y.abs() {
+                        // 点坐标跟着手指走，和取反后的 WM_MOUSEHWHEEL 符号相反。
+                        self.consume_horizontal_swipe(-delta.x, &ctx);
+                    } else {
+                        self.swipe_delta = 0.0;
+                        self.consume_vertical_wheel(delta.y, cursor, &ctx);
+                    }
+                }
+            }
+            // 松手丢掉没过线的余量，轻点或下一次滑动不会把上一笔的抖动加进去。
+            if touch_lifted && scroll == Vec2::ZERO {
+                self.swipe_delta = 0.0;
+                self.wheel_delta = 0.0;
             }
         } else {self.wheel_delta=0.0; self.swipe_delta=0.0;}
         let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);

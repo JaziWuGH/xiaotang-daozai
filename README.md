@@ -132,7 +132,7 @@ Copy-Item -Force .\target\release\daozai.exe "$env:LOCALAPPDATA\Programs\Daozai\
 
 **展开掉帧。** 鼠标移进刘海时，每一次 `CursorMoved` 都会要求立刻重绘。原先在界面线程里 `sleep` 把帧率压到 60，这段睡眠发生在窗口过程里，Windows 派不出 `WM_NCHITTEST`，光标停在刘海上就会一顿一顿。与此同时，展开弹簧的过冲让窗口区域高度每帧都变，`SetWindowRgn(..., redraw=true)` 会同步擦除透明窗口。现在帧间隔改由事件循环推迟下一次重绘（仍然大约 60 帧，OpenGL 垂直同步保持关闭，避开部分 Intel 驱动在 `wglSwapBuffers` 里的忙等）；区域在形体真正长过收起裁剪区之后一次性放到目标尺寸，过冲期间不再改，并且不再要求 GDI 同步重画。
 
-**触控板。** 展开并且面板基本到位之后，双指左右滑走横向滚轮（Windows 的 `WM_MOUSEHWHEEL`）。手指向左是下一页，向右是上一页；winit 对该消息取反，所以正的横向增量对应向左。累计大约 24 点才翻一页，停顿或反向会丢掉余量，连续滑动 0.2 秒内只翻一页。同一帧里竖向分量更大时仍走原来的滚轮：列表内部先滚动，顶栏或列表到边才翻页。点击和左右方向键不变。若在 Windows 触控板设置里打开了「反转滚动方向」，左右滑会跟着那项设置反过来。
+**触控板和触摸屏。** 展开并且面板基本到位之后可以左右滑切页。触控板双指走横向滚轮（Windows 的 `WM_MOUSEHWHEEL`）；触摸屏单指走指针接触（`WM_POINTER` / `WM_TOUCH` → egui 的 `Event::Touch`），不依赖滚轮。手指向左是下一页，向右是上一页。winit 会把触控板的横向滚轮取反，所以正的滚轮增量对应向左；触摸点没有这层取反，按手指实际移动的方向翻页。累计大约 24 点才翻一页，停顿、松手或反向会丢掉余量，连续滑动 0.2 秒内只翻一页。同一帧里竖向分量更大时仍走原来的滚轮：列表内部先滚动，顶栏或列表到边才翻页。点击、轻点和左右方向键不变；普通鼠标拖动不翻页。手指按在岛上时，即使系统光标还停在别处，岛也保持展开。若在 Windows 触控板设置里打开了「反转滚动方向」，触控板左右滑会跟着那项设置反过来，触摸屏仍跟手指。同一帧里如果已经有滚轮，就只走滚轮，避免双指触控板和触摸各翻一次。
 
 ### 怎么验证
 
@@ -142,11 +142,11 @@ Linux 上可以编译并跑逻辑测试（不包含 Windows 窗口本身）：
 cargo test --locked --all-targets --features record -- --test-threads=1
 ```
 
-相关用例：`expand_region_stays_put_through_the_overshoot`、`trackpad_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter`、`horizontal_swipe_changes_pages_over_a_list_without_scrolling_it`、`click_still_changes_pages_after_a_small_swipe`，以及原有的 `wheel_*` 滚轮用例。
+相关用例：`expand_region_stays_put_through_the_overshoot`、`trackpad_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter`、`horizontal_swipe_changes_pages_over_a_list_without_scrolling_it`、`click_still_changes_pages_after_a_small_swipe`、`touch_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter`、`touch_swipe_changes_pages_over_a_list_without_scrolling_it`、`click_still_changes_pages_after_a_small_touch_swipe`、`touch_lift_discards_partial_swipe_and_mouse_drag_does_not_turn_pages`、`touch_swipe_keeps_the_island_open_when_the_mouse_cursor_is_elsewhere`，以及原有的 `wheel_*` 滚轮用例。
 
 `mail_report_save_and_failure_paths` 在 Linux 上会失败：非 Windows 的凭据保存直接返回「仅 Windows 支持凭据管理器」，账号不会写入。这是上游行为，不是这次改动引入的。其余库测试在 Linux 上通过。
 
-Windows 上替换安装后看这几件事：鼠标移上刘海再停住，展开过程应连续，桌面光标不该跟着一卡一卡；展开后双指左滑到下一页、右滑回上一页；在置物架或待办列表上，上下滑仍滚动列表，左右滑才翻页；点底部圆点仍然能切页。本环境是 Linux，没有在真机 Windows 笔记本上录到帧时间。
+Windows 上替换安装后看这几件事：鼠标移上刘海再停住，展开过程应连续，桌面光标不该跟着一卡一卡；展开后触控板双指左滑到下一页、右滑回上一页；触摸屏单指同样左滑到下一页、右滑回上一页，竖着滑仍滚动列表；点底部圆点仍然能切页。本环境是 Linux，没有在真机 Windows 笔记本上录到帧时间，触摸这条靠注入 `Event::Touch` 的用例覆盖。
 
 运行测试及打包：
 
