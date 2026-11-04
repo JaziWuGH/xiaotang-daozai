@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::{
     application::ApplicationHandler,
@@ -68,19 +68,37 @@ fn with_event_loop<R>(
 /// some events, but otherwise forwards events to the [`WinitApp`].
 struct WinitAppWrapper<T: WinitApp> {
     windows_next_repaint_times: HashMap<WindowId, Instant>,
+    /// When a redraw was last *issued*. Used to keep a minimum gap between frames
+    /// without sleeping inside the window procedure.
+    last_redraw_issued: HashMap<WindowId, Instant>,
     winit_app: T,
     return_result: Result<(), crate::Error>,
     run_and_return: bool,
 }
 
+/// Floor on how soon the next redraw may run.
+///
+/// `CursorMoved` asks egui to repaint immediately. Sleeping inside `App::update`
+/// to cap that rate blocks the window thread, so Windows cannot deliver
+/// `WM_NCHITTEST` and the cursor stalls while the pointer is on the window.
+/// Postponing the redraw here lets the event loop wait in `WaitUntil`, which
+/// still dispatches sent input. OpenGL vsync stays off: some Intel laptop
+/// drivers busy-wait inside `wglSwapBuffers`.
+const MIN_REDRAW_GAP: Duration = Duration::from_nanos(1_000_000_000 / 60);
+
 impl<T: WinitApp> WinitAppWrapper<T> {
     fn new(winit_app: T, run_and_return: bool) -> Self {
         Self {
             windows_next_repaint_times: HashMap::default(),
+            last_redraw_issued: HashMap::default(),
             winit_app,
             return_result: Ok(()),
             run_and_return,
         }
+    }
+
+    fn note_redraw_issued(&mut self, window_id: WindowId) {
+        self.last_redraw_issued.insert(window_id, Instant::now());
     }
 
     fn handle_event_result(
@@ -104,6 +122,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
 
                     if cfg!(target_os = "windows") {
                         // Fix flickering on Windows, see https://github.com/emilk/egui/pull/2280
+                        self.note_redraw_issued(window_id);
                         self.winit_app.run_ui_and_paint(event_loop, window_id)
                     } else {
                         // Fix for https://github.com/emilk/egui/issues/2425
@@ -172,6 +191,12 @@ impl<T: WinitApp> WinitAppWrapper<T> {
 
         self.windows_next_repaint_times
             .retain(|window_id, repaint_time| {
+                if let Some(last) = self.last_redraw_issued.get(window_id) {
+                    let not_before = *last + MIN_REDRAW_GAP;
+                    if *repaint_time < not_before {
+                        *repaint_time = not_before;
+                    }
+                }
                 if now < *repaint_time {
                     return true; // not yet ready
                 };
@@ -180,6 +205,7 @@ impl<T: WinitApp> WinitAppWrapper<T> {
 
                 if let Some(window) = self.winit_app.window(*window_id) {
                     log::trace!("request_redraw for {window_id:?}");
+                    self.last_redraw_issued.insert(*window_id, now);
                     window.request_redraw();
                 } else {
                     log::trace!("No window found for {window_id:?}");

@@ -22,6 +22,8 @@ Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI
 
 岛仔贴在屏幕顶部，收起时是一条小刘海。鼠标靠近时展开，离开时收起；需要处理的信息出现时再提醒你。它由 Rust 和 egui 构建，不依赖 Electron。
 
+展开后，触控板双指左右滑动可以翻页：手指向左是下一页，向右是上一页。竖向滚轮和点击保持原来的行为。
+
 | 功能 | 可以做什么 |
 | --- | --- |
 | 桌面伙伴 | 会眨眼、打盹、喝水，也会拿起麦克风跟着音乐唱；可切换极简模式 |
@@ -107,6 +109,45 @@ cargo build --locked --release --bin daozai
 .\target\release\daozai.exe
 ```
 
+### 用这份构建替换已经安装的岛仔
+
+默认安装位置是 `%LOCALAPPDATA%\Programs\Daozai\daozai.exe`（也就是 `C:\Users\<用户名>\AppData\Local\Programs\Daozai\daozai.exe`）。如果安装时改过目录，以「设置 → 应用 → 已安装的应用 → 岛仔」里的安装位置为准。设置和记录在 `%APPDATA%\Daozai`，替换程序不会动它们。
+
+1. 托盘图标上退出岛仔。程序有单实例互斥体，不退出就覆盖，新文件可能写不进去，旧进程也不会换成新的。
+2. 在本仓库执行上面的 `cargo build --locked --release --bin daozai`。
+3. 把 `target\release\daozai.exe` 复制到安装目录，覆盖原来的 `daozai.exe`。PowerShell 示例（安装在默认位置时）：
+
+```powershell
+Copy-Item -Force .\target\release\daozai.exe "$env:LOCALAPPDATA\Programs\Daozai\daozai.exe"
+& "$env:LOCALAPPDATA\Programs\Daozai\daozai.exe"
+```
+
+免安装 ZIP 则覆盖解压目录里的 `daozai.exe`。不要只复制 exe 却丢掉它旁边的安装器脚本；日常替换运行中的程序，只覆盖 `daozai.exe` 即可。
+
+「设置 → 关于」里的检查更新仍指向上游 [Renly1994/xiaotang-daozai](https://github.com/Renly1994/xiaotang-daozai)。从那里下载安装包会覆盖这份 exe。要用这次的展开、触控板翻页和播放控制改动，就保留这里编出来的 `daozai.exe`。
+
+## 展开卡顿与触控板翻页
+
+这两处是相对上游 v0.6.50 的改动。同一分支还带上播放控制：后台切换播放模式、音乐卡片热区、开关式激活、播放器音量滑条，以及没在放歌时点封面启动本机播放器。
+
+**展开掉帧。** 鼠标移进刘海时，每一次 `CursorMoved` 都会要求立刻重绘。原先在界面线程里 `sleep` 把帧率压到 60，这段睡眠发生在窗口过程里，Windows 派不出 `WM_NCHITTEST`，光标停在刘海上就会一顿一顿。与此同时，展开弹簧的过冲让窗口区域高度每帧都变，`SetWindowRgn(..., redraw=true)` 会同步擦除透明窗口。现在帧间隔改由事件循环推迟下一次重绘（仍然大约 60 帧，OpenGL 垂直同步保持关闭，避开部分 Intel 驱动在 `wglSwapBuffers` 里的忙等）；区域在形体真正长过收起裁剪区之后一次性放到目标尺寸，过冲期间不再改，并且不再要求 GDI 同步重画。
+
+**触控板和触摸屏。** 展开并且面板基本到位之后可以左右滑切页。触控板双指走横向滚轮（Windows 的 `WM_MOUSEHWHEEL`）；触摸屏单指走指针接触（`WM_POINTER` / `WM_TOUCH` → egui 的 `Event::Touch`），不依赖滚轮。手指向左是下一页，向右是上一页。winit 会把触控板的横向滚轮取反，所以正的滚轮增量对应向左；触摸点没有这层取反，按手指实际移动的方向翻页。累计大约 24 点才翻一页，停顿、松手或反向会丢掉余量，连续滑动 0.2 秒内只翻一页。同一帧里竖向分量更大时仍走原来的滚轮：列表内部先滚动，顶栏或列表到边才翻页。点击、轻点和左右方向键不变；普通鼠标拖动不翻页。手指按在岛上时，即使系统光标还停在别处，岛也保持展开。若在 Windows 触控板设置里打开了「反转滚动方向」，触控板左右滑会跟着那项设置反过来，触摸屏仍跟手指。同一帧里如果已经有滚轮，就只走滚轮，避免双指触控板和触摸各翻一次。
+
+### 怎么验证
+
+Linux 上可以编译并跑逻辑测试（不包含 Windows 窗口本身）：
+
+```bash
+cargo test --locked --all-targets --features record -- --test-threads=1
+```
+
+相关用例：`expand_region_stays_put_through_the_overshoot`、`trackpad_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter`、`horizontal_swipe_changes_pages_over_a_list_without_scrolling_it`、`click_still_changes_pages_after_a_small_swipe`、`touch_swipe_turns_pages_in_the_finger_direction_and_ignores_jitter`、`touch_swipe_changes_pages_over_a_list_without_scrolling_it`、`click_still_changes_pages_after_a_small_touch_swipe`、`touch_lift_discards_partial_swipe_and_mouse_drag_does_not_turn_pages`、`touch_swipe_keeps_the_island_open_when_the_mouse_cursor_is_elsewhere`，以及原有的 `wheel_*` 滚轮用例。
+
+`mail_report_save_and_failure_paths` 在 Linux 上会失败：非 Windows 的凭据保存直接返回「仅 Windows 支持凭据管理器」，账号不会写入。这是上游行为，不是这次改动引入的。其余库测试在 Linux 上通过。
+
+Windows 上替换安装后看这几件事：鼠标移上刘海再停住，展开过程应连续，桌面光标不该跟着一卡一卡；展开后触控板双指左滑到下一页、右滑回上一页；触摸屏单指同样左滑到下一页、右滑回上一页，竖着滑仍滚动列表；点底部圆点仍然能切页。本环境是 Linux，没有在真机 Windows 笔记本上录到帧时间，触摸这条靠注入 `Event::Touch` 的用例覆盖。
+
 运行测试及打包：
 
 ```powershell
@@ -120,6 +161,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\package.ps1
 
 ## 开源与致谢
 
-岛仔原创代码采用 [MIT License](LICENSE)。Rust 依赖、vendored 代码、第三方图标及品牌标识沿用各自的许可或权利声明；MIT 不授予这些服务的商标使用权，也不代表官方合作或认证。详见 [第三方声明](THIRD_PARTY_NOTICES.txt) 和 [依赖说明](docs/DEPENDENCIES.md)。
+本仓库的代码从上游 [Renly1994/xiaotang-daozai](https://github.com/Renly1994/xiaotang-daozai) v0.6.50（`b93dd84fc9bdb95978fef72ffb7068bdf47ac5a9`）导入，岛仔原创代码仍采用 [MIT License](LICENSE)。Rust 依赖、vendored 代码、第三方图标及品牌标识沿用各自的许可或权利声明；MIT 不授予这些服务的商标使用权，也不代表官方合作或认证。详见 [第三方声明](THIRD_PARTY_NOTICES.txt) 和 [依赖说明](docs/DEPENDENCIES.md)。
 
 感谢 egui／eframe、Rust 社区，以及提供参考与素材的开源项目。
