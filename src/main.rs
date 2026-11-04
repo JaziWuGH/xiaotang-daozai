@@ -332,6 +332,7 @@ impl eframe::App for Shell {
         }
         #[cfg(windows)]
         {
+            if let Some(message)=smtc::take_mode_error(){self.app.say(message);}
             while let Ok(observation)=self.system_rx.try_recv(){
                 let next=observation.input;
                 let manual=next.is_some_and(|state|self.input_keys.as_ref().is_some_and(|keys|keys.allows(state.context)));
@@ -493,6 +494,8 @@ impl eframe::App for Shell {
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
+                    // 定位进度条会顺带触发一次前台事件，别让它把面板收走，否则没法连续拖动。
+                    if matches!(t,smtc::Transport::Seek(_)) {self.app.keep_open(1.2);}
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
                     match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(t,source)){
@@ -520,6 +523,25 @@ impl eframe::App for Shell {
                         }
                         Err(error)=>self.app.say(error),
                     }
+                }
+                Cmd::ActivatePlayer(source)=>{
+                    // 切窗口/收起都会带来一次前台事件，别让面板顺手收走，否则没法连着点第二下。
+                    self.app.keep_open(1.2);
+                    let message=smtc::activate(&source);
+                    self.app.say(message);
+                }
+                Cmd::CyclePlayMode=>{
+                    // 点网易云底栏的模式按钮会顺带触发一次前台事件，别让它把面板收走。
+                    self.app.keep_open(1.2);
+                    let ctx=ctx.clone();
+                    std::thread::spawn(move||{
+                        if smtc::cycle_play_mode() {
+                            // 图标已在后台就地前移，主动重绘一次，不用等下一轮轮询。
+                            ctx.request_repaint();
+                        }else{
+                            smtc::set_mode_error("没能切换播放模式，请确认网易云正在播放");
+                        }
+                    });
                 }
                 Cmd::Open(p) => {if let Err(e)=open_path(&p){self.app.say(e);}},
                 Cmd::OpenUrl(url)=>{
@@ -570,6 +592,23 @@ impl eframe::App for Shell {
                     #[cfg(windows)] daozai::system::toggle_mute();
                     self.volume_quiet=PollClock::now();
                 },
+                Cmd::SetPlayerVolume(percent)=>{
+                    let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    let exe=daozai::smtc::player_exe(&source);
+                    // 优先改客户端自己的音频会话；客户端没有会话时退回系统音量，按钮不至于失效。
+                    match daozai::appaudio::set_for(&exe,percent) {
+                        Some(volume)=>self.app.set_player_volume(&source,volume),
+                        None=>self.app.say("这台机器的音频设备暂时读不到，调不了音量"),
+                    }
+                }
+                Cmd::TogglePlayerMute=>{
+                    let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
+                    let exe=daozai::smtc::player_exe(&source);
+                    match daozai::appaudio::toggle_mute_for(&exe) {
+                        Some(volume)=>self.app.set_player_volume(&source,volume),
+                        None=>self.app.say("这台机器的音频设备暂时读不到，调不了静音"),
+                    }
+                }
                 Cmd::Copy(text)=>{ctx.copy_text(text);self.app.say("已复制");},
                 Cmd::Notify(title,body)=>{
                     #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body,self.app.settings.sound);}

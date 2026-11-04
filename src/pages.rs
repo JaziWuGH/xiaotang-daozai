@@ -18,6 +18,15 @@ fn mmss(secs: f64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+/// 音乐页音量滑条：喇叭正上方的一整条竖向热区（贴右缘、避开歌词文本）。
+const VOL_BAR:(f32,f32,f32,f32)=(348.0,34.0,30.0,72.0);
+/// 竖向轨道上下端（y 越小音量越大）。
+const VOL_BAR_TOP:f32=44.0;
+const VOL_BAR_BOTTOM:f32=100.0;
+/// 「喇叭 + 竖条」整体热区：光标进来就浮出滑条，离开后这点时间再收（防抖）。
+const VOL_HOVER:(f32,f32,f32,f32)=(342.0,30.0,40.0,102.0);
+const VOL_POP_HOLD:f64=0.35;
+
 /// 由标题生成稳定的封面渐变色。
 fn cover_colors(title: &str) -> (Color32, Color32) {
     let mut h: u64 = 1469598103934665603;
@@ -44,6 +53,17 @@ impl App {
         let playing_t=ctx.animate_bool_with_time(egui::Id::new("np-playing"),np.playing,0.22);
         let art_size=if with_lyrics {44.0}else{62.0};
         let art_y=if with_lyrics {23.0}else{13.0};
+        // 音量弹层浮在最上面：光标落在它里面时，底下的封面/标题/进度条都不该响应。
+        let popup_open=has && self.volume_popup_open();
+        // 用裸指针位置判断「在不在喇叭/滑条这一列」：不掺和可交互控件谁压谁的层级问题。
+        let over_volume=c.ui.ctx().input(|i|i.pointer.latest_pos())
+            .is_some_and(|p|c.rect(VOL_HOVER.0,VOL_HOVER.1,VOL_HOVER.2,VOL_HOVER.3).contains(p));
+        // 封面 + 曲名整块可点：切回正在播放的客户端（没运行就拉起）。
+        // 拆成两块：封面在左侧，可以顶到卡片上沿；文字区必须从日期/时钟那一行下面开始，
+        // 否则卡片关掉歌词撑大后，热区会盖住顶部时间。宽度都跟着内容走，不做悬停高亮。
+        let art_open=has.then(||c.hit(40.0,art_y-1.0,art_size+2.0,art_size+2.0,"m-open-art"));
+        let (text_x,text_w)=if with_lyrics {(99.0,127.0)}else{(121.0,220.0)};
+        let text_open=has.then(||c.hit(text_x,30.0,text_w,if with_lyrics {40.0}else{49.0},"m-open-app"));
         if let Some((image,texture))=&self.music_artwork {
             let [w,h]=image.size;
             let (uw,vh)=if w>h {(h as f32/w as f32,1.0)}else{(1.0,w as f32/h as f32)};
@@ -102,7 +122,7 @@ impl App {
         if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}
         if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
         }
-        if bar.clicked() || bar.drag_stopped() {
+        if has && (bar.clicked() || bar.drag_stopped()) && !over_volume {
             if let Some(position)=seek_position {cmds.push(Cmd::Media(Transport::Seek(position)));}
         }
 
@@ -116,19 +136,45 @@ impl App {
         };
         let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr");
         lyrics_card.text(74.0,y+5.0,"词",14.0,W::Semibold,if !has {ic}else if self.show_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
+        // 播放模式：能读到的客户端显示当前模式，网易云即使还没读到也先显示入口。
+        let mode_known=np.play_mode!=crate::smtc::PlayMode::Unknown;
+        if has && (mode_known || crate::smtc::supports_play_mode(&np.source)) {
+            let (mode_button,mode_card)=btn(118.0,26.0,"m-mode");
+            paint::play_mode(&mode_card,118.0,y,np.play_mode,if mode_known {ic}else{theme::GRAY});
+            let hint=if mode_known {format!("{}（点击切换）",np.play_mode.label())}else{"播放模式（点击切换）".into()};
+            if mode_button.on_hover_text(hint).clicked() {
+                cmds.push(Cmd::CyclePlayMode);
+            }
+        }
         let (previous,previous_card)=btn(162.0,30.0,"m-prev");
         paint::skip(&previous_card,162.0,y,-1.0,ic);
         let (play,play_card)=btn(210.5,30.0,"m-play");
         paint::play_pause(&play_card,211.0,y,15.0,playing_t,ic);
         let (next,next_card)=btn(258.0,30.0,"m-next");
         paint::skip(&next_card,258.0,y,1.0,ic);
+        // 音量：跟网易云一样，鼠标移到喇叭上就浮出竖条；点喇叭本身是静音。
         let (volume_button,volume_card)=btn(367.0,26.0,"m-volume");
-        let (volume,muted)=self.volume_ui.unwrap_or((0,false));
+        let player_volume=self.player_volume_of(&np.source);
+        let muted=player_volume.is_some_and(|v|v.muted);
         paint::speaker(&volume_card,367.0,y,muted,ic);
-        if self.volume_ui.is_some() && volume_button.on_hover_text(if muted {"取消静音"}else{"静音"}).clicked() {
-            self.volume_ui=Some((volume,!muted));
-            self.volume_quiet_until=self.t+0.9;
-            cmds.push(Cmd::ToggleMute);
+        if has {
+            if over_volume {
+                let was_open=self.volume_popup_open();
+                if !was_open {
+                    // 刚浮出来时先把真实音量读回来，竖条的位置才对。
+                    if let Some(volume)=crate::appaudio::read_for(&crate::smtc::player_exe(&np.source)) {
+                        self.set_player_volume(&np.source,volume);
+                    }
+                }
+                self.open_volume_popup(VOL_POP_HOLD);
+                if !was_open {ctx.request_repaint();}
+            } else if popup_open {
+                // 已经移开：安排一帧把它收掉，否则没有鼠标事件就再也画不动了。
+                ctx.request_repaint_after(std::time::Duration::from_millis(420));
+            }
+            if volume_button.on_hover_text(if muted {"取消静音"}else{"静音"}).clicked() {
+                cmds.push(Cmd::TogglePlayerMute);
+            }
         }
         if has {
             if previous.clicked() {cmds.push(Cmd::Media(Transport::Prev));}
@@ -152,6 +198,64 @@ impl App {
                 self.settings.save();
             }
         }
+        if has {
+            let label=crate::smtc::app_label(&np.source);
+            let mut activate=false;
+            for open in [art_open,text_open].into_iter().flatten() {
+                let response=open.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("打开/收起{label}"));
+                activate|=!over_volume && response.clicked();
+            }
+            if activate {cmds.push(Cmd::ActivatePlayer(np.source.clone()));}
+        }
+        if popup_open {
+            self.draw_volume_slider(c,&np.source,cmds);
+        }
+    }
+
+    /// 音乐页音量滑条：竖直一根，贴在喇叭正上方；不显示百分比，静置一会儿自己收。
+    fn draw_volume_slider(&mut self,c:&Card,source:&str,cmds:&mut Vec<Cmd>) {
+        let (hx,hy,hw,hh)=VOL_BAR;
+        let cx=hx+hw/2.0;
+        let (percent,muted)=self.player_volume_of(source).map(|v|(v.percent,v.muted)).unwrap_or((0,false));
+        let bar=c.hit_drag(hx,hy,hw,hh,"m-vol-slider");
+        let (hover,_pressed)=c.hover_t(&bar);
+        // 薄薄一层底，压在歌词上也看得清轨道。
+        c.fill(cx-9.0,hy,18.0,hh,9.0,Color32::from_black_alpha(if hover>0.5 {150}else{110}));
+        let width=if hover>0.5 {8.0}else{6.0};
+        let span=VOL_BAR_BOTTOM-VOL_BAR_TOP;
+        c.fill(cx-width/2.0,VOL_BAR_TOP,width,span,width/2.0,Color32::from_white_alpha(48));
+        let mut want=None;
+        if bar.dragged() || bar.clicked() {
+            if let Some(p)=bar.interact_pointer_pos() {
+                let y=c.to_local(p).y;
+                want=Some(crate::appaudio::percent_from_fraction((VOL_BAR_BOTTOM-y)/span));
+            }
+        } else if bar.hovered() {
+            // 停在滑条上滚滚轮也能微调，不用非得拖动。
+            let dy=c.ui.ctx().input(|i|i.raw_scroll_delta.y);
+            if dy.abs()>0.5 {want=Some(crate::appaudio::shift_percent(percent,dy/120.0));}
+        }
+        if let Some(value)=want {
+            if value!=percent || muted {
+                self.set_player_volume(source,crate::appaudio::AppVolume::new(value,false));
+                cmds.push(Cmd::SetPlayerVolume(value));
+                self.open_volume_popup(VOL_POP_HOLD);
+            }
+        }
+        let (percent,muted)=self.player_volume_of(source).map(|v|(v.percent,v.muted)).unwrap_or((percent,muted));
+        let color=if muted {Color32::from_gray(160)}else{theme::WHITE};
+        let fraction=if muted {0.0}else{percent as f32/100.0};
+        let knob_y=VOL_BAR_BOTTOM-span*fraction;
+        if fraction>0.0 {
+            c.fill(cx-width/2.0,knob_y,width,VOL_BAR_BOTTOM-knob_y,width/2.0,color);
+        }
+        // 一直画着圆点：一眼能看出当前音量落在哪。
+        c.circle(cx,knob_y,if hover>0.5 {5.5}else{4.5},color);
+        if bar.dragged() || bar.is_pointer_button_down_on() {
+            // 拖着的时候别让它半路消失。
+            self.open_volume_popup(VOL_POP_HOLD);
+        }
+        bar.on_hover_text("拖动调节音量");
     }
 
     fn draw_music_lyrics(&mut self,c:&Card) {
