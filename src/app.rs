@@ -111,6 +111,8 @@ pub enum Cmd {
     Media(Transport),
     /// 把正在播放的客户端切到前台（没运行就尽量启动）。
     ActivatePlayer(String),
+    /// 启动清单里选中的播放器：显示名 + 可执行文件路径。
+    LaunchPlayer(String, PathBuf),
     /// 切到下一个播放模式（目前支持网易云）。
     CyclePlayMode,
     Open(PathBuf),
@@ -426,6 +428,12 @@ pub struct App {
     pub(crate) player_volume_for: String,
     /// 音量滑条弹层的关闭时刻：每次交互都往后推，静置一会儿自己收。
     pub(crate) volume_popup_until: f64,
+    /// 「暂无音乐」时点封面弹出的播放器清单：打开时刻（`None` 表示收起）。
+    pub(crate) player_menu: Option<f64>,
+    /// 清单滚动量（装了很多客户端时只显示前几行）。
+    pub(crate) player_menu_scroll: f32,
+    /// 最近一次扫出来的本机播放器，打开清单时刷新。
+    pub(crate) players: Vec<crate::players::Player>,
     /// 上一次看到的蓝牙设备，用来只在连接/断开时提示一次。
     pub(crate) bt_shown: Vec<crate::bt::Device>,
     bt_initialized: bool,
@@ -527,6 +535,9 @@ impl App {
             player_volume: None,
             player_volume_for: String::new(),
             volume_popup_until: 0.0,
+            player_menu: None,
+            player_menu_scroll: 0.0,
+            players: Vec::new(),
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
@@ -987,6 +998,15 @@ impl App {
     /// 打开或续期音量弹层。
     pub fn open_volume_popup(&mut self,seconds:f64) {self.volume_popup_until=self.t+seconds;}
     pub fn close_volume_popup(&mut self) {self.volume_popup_until=0.0;}
+    /// 「暂无音乐」时的播放器清单是否开着。
+    pub fn player_menu_open(&self)->bool {self.player_menu.is_some()}
+    /// 打开清单：顺手重扫一遍，刚装好的客户端不用重启就能出现在里面。
+    pub fn open_player_menu(&mut self) {
+        self.players=crate::players::scan();
+        self.player_menu_scroll=0.0;
+        self.player_menu=Some(self.t);
+    }
+    pub fn close_player_menu(&mut self) {self.player_menu=None;}
     pub fn open_settings(&mut self){        self.settings_open=true;        self.settings_focus_requested=true;
     }
     pub fn open_settings_category(&mut self,category:usize){

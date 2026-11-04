@@ -365,6 +365,13 @@ impl eframe::App for Shell {
                     let message=smtc::activate(&source);
                     self.app.say(message);
                 }
+                Cmd::LaunchPlayer(name,path)=>{
+                    self.app.keep_open(1.2);
+                    match daozai::players::launch(&path) {
+                        Ok(())=>self.app.say(format!("正在启动{name}")),
+                        Err(error)=>self.app.say(format!("启动{name}失败：{error}")),
+                    }
+                }
                 Cmd::CyclePlayMode=>{
                     // 点网易云底栏的模式按钮会顺带触发一次前台事件，别让它把面板收走。
                     self.app.keep_open(1.2);

@@ -3814,6 +3814,42 @@ fn clicking_music_cover_switches_to_source_player(){
 }
 
 #[test]
+fn empty_music_cover_lists_installed_players_and_launches_the_picked_one(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=Default::default();
+    h.hover(H::local(300.0,60.0),0.8);
+    assert!(h.app.open,"悬停后应展开面板");
+    assert!(!h.app.player_menu_open(),"清单默认是收起的");
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(60.0,40.0));
+    assert!(h.app.player_menu_open(),"没有歌曲时点封面应弹出播放器清单");
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::LaunchPlayer(..))),"只是打开清单，不该顺手启动播放器");
+    // 用两个确定的候选项替换本机扫描结果，点击坐标才有意义。
+    h.app.players=vec![
+        crate::players::Player{name:"网易云音乐".into(),exe:"cloudmusic.exe".into(),path:r"C:\fake\cloudmusic.exe".into()},
+        crate::players::Player{name:"QQ音乐".into(),exe:"QQMusic.exe".into(),path:r"C:\fake\QQMusic.exe".into()},
+    ];
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(200.0,42.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::LaunchPlayer(name,path)
+        if name=="网易云音乐" && path.to_string_lossy()==r"C:\fake\cloudmusic.exe")),"点第一行应启动对应的播放器");
+    assert!(!h.app.player_menu_open(),"选完就收起清单");
+    // 点封面可以反复开关，方便挑错再来一次。
+    h.frame(vec![]);h.cmds.clear();h.click(H::local(60.0,40.0));
+    assert!(h.app.player_menu_open(),"收起后应能再次打开");
+    h.frame(vec![]);h.click(H::local(60.0,40.0));
+    assert!(!h.app.player_menu_open(),"再点一次封面收起清单");
+    // 一旦有歌在放，清单让位给曲目信息。
+    h.click(H::local(60.0,40.0));
+    assert!(h.app.player_menu_open());
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"在云端".into(),artist:"郭顶".into(),duration:221.0,..Default::default()};
+    h.frame(vec![]);
+    assert!(!h.app.player_menu_open(),"开始播放后清单必须自动收起");
+}
+
+#[test]
 fn source_app_label_reads_naturally(){
     use crate::smtc::app_label;
     assert_eq!(app_label("cloudmusic.exe"),"网易云音乐");
@@ -4285,4 +4321,42 @@ fn bluetooth_switch_clears_notices_and_restarts_with_fresh_baseline(){
     assert!(h.app.notice.as_ref().is_none_or(|a|a.title!="蓝牙设备"));
     h.bt.clear();h.frame(vec![]);
     assert!(h.app.notice.as_ref().is_some_and(|a|a.title=="蓝牙设备") || h.app.alerts.iter().any(|a|a.title=="蓝牙设备"));
+}
+
+/// 手动出图：无音乐时点封面弹出的播放器清单长什么样。
+/// `DAOZAI_PICK_PREVIEW=<png 路径>` 时生成，便于改完坐标先看一眼再实机验证。
+#[test]
+#[ignore = "只在需要出预览图时手动跑"]
+fn render_player_menu_preview(){
+    let Ok(dest)=std::env::var("DAOZAI_PICK_PREVIEW") else{return};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=Default::default();
+    h.app.open_player_menu();
+    h.app.players=vec![
+        crate::players::Player{name:"网易云音乐".into(),exe:"cloudmusic.exe".into(),path:r"C:\Program Files\NetEase\CloudMusic\cloudmusic.exe".into()},
+        crate::players::Player{name:"QQ音乐".into(),exe:"QQMusic.exe".into(),path:r"C:\Program Files (x86)\Tencent\QQMusic\QQMusic.exe".into()},
+        crate::players::Player{name:"酷狗音乐".into(),exe:"KuGou.exe".into(),path:r"C:\Program Files (x86)\KuGou\KuGou.exe".into()},
+    ];
+    h.cursor=Some(H::local(200.0,42.0));
+    let mut raster=crate::preview_raster::Raster::new(1280,380);
+    for frame in 0..150 {
+        let t=frame as f64/60.0;
+        let env=Env{t,clock:"09:41:00".into(),today:"2026-11-04".into(),date:"11月4日 周三".into(),cursor:h.cursor,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+        let output=h.ctx.run(raw,|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+        });
+        raster.update_textures(&output.textures_delta);
+        if frame==149 {
+            raster.buf.fill([0.10,0.10,0.12,1.0]);
+            raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            let image=image::RgbaImage::from_raw(1280,380,rgba).unwrap();
+            image::imageops::crop_imm(&image,200,0,880,290).to_image().save(&dest).unwrap();
+        }
+        raster.free_textures(&output.textures_delta);
+    }
 }
