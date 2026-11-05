@@ -424,10 +424,6 @@ fn artist_rank_parts(parts:&[String],target_parts:&[String])->Option<u8> {
     (subset(parts,target_parts)||subset(target_parts,parts)).then_some(1)
 }
 
-fn artist_rank(candidate:&str,target_parts:&[String])->Option<u8> {
-    artist_rank_parts(&artist_set(candidate),target_parts)
-}
-
 fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration:f64)->Vec<u64> {
     let title=normalized(track);
     let identity=song_identity(track,artist);
