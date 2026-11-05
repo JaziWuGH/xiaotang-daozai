@@ -76,6 +76,8 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    /// 进程无声消失时用来界定「死前最后一刻」的节流时钟。
+    heartbeat_at: PollClock,
 }
 
 impl Shell {
@@ -167,6 +169,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            heartbeat_at: PollClock::default(),
         }
     }
 
@@ -270,6 +273,11 @@ impl eframe::App for Shell {
         [0.0; 4]
     }
 
+    /// 事件循环正常结束（窗口被销毁或收到退出命令）时调用；被外力终止不会走到这里。
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        diagnostics::note("last-exit.log",&format!("事件循环正常结束，共运行 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.resource_at.ready(Duration::from_secs(30)){
             let (count,bytes)={let textures=ctx.tex_manager();let textures=textures.read();(textures.num_allocated(),textures.allocated().map(|(_,info)|info.bytes_used()).sum())};
@@ -277,6 +285,12 @@ impl eframe::App for Shell {
             daozai::resources::TEXTURE_BYTES.store(bytes,std::sync::atomic::Ordering::Relaxed);
             daozai::resources::GALLEYS.store(ctx.fonts(|fonts|fonts.num_galleys_in_cache()),std::sync::atomic::Ordering::Relaxed);
             self.resource_at=PollClock::now();
+        }
+        // 每 30 秒留一个时间戳：进程无声消失时，对比心跳与退出记录即可区分
+        // 「事件循环正常结束」和「被外力终止」。
+        if self.heartbeat_at.ready(Duration::from_secs(30)) {
+            self.heartbeat_at=PollClock::now();
+            diagnostics::note("heartbeat.log",&format!("运行中，已启动 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
         }
         let guarded=daozai::resources::GUARD.tripped();
         if guarded && !self.guard_notified {
@@ -854,5 +868,9 @@ fn run() -> eframe::Result<()> {
         .with_always_on_top()
         .with_visible(false);
     let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
-    graphics::run(opts,|opts|eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc))))))
+    graphics::run(opts,|opts|{
+        let result=eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc)))));
+        if result.is_ok() {diagnostics::note("last-exit.log","run_native 正常返回（所有窗口已关闭）");}
+        result
+    })
 }
