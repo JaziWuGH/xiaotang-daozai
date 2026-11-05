@@ -57,6 +57,8 @@ struct Shell {
     quota: daozai::quota::Service,
     quota_sig: Option<(bool,Vec<daozai::quota::Account>)>,
     quota_at: PollClock,
+    /// 进程无声消失时用来界定「死前最后一刻」的节流时钟。
+    heartbeat_at: PollClock,
 }
 
 impl Shell {
@@ -134,6 +136,7 @@ impl Shell {
             cal: daozai::calendar::Service::start(),
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
+            heartbeat_at: PollClock::default(),
         }
     }
 
@@ -214,8 +217,19 @@ impl eframe::App for Shell {
         [0.0; 4]
     }
 
+    /// 事件循环正常结束（窗口被销毁或收到退出命令）时调用；被外力终止不会走到这里。
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        diagnostics::note("last-exit.log",&format!("事件循环正常结束，共运行 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.media_enabled.store(self.app.settings.visible_pages[0],std::sync::atomic::Ordering::Relaxed);
+        // 每 30 秒留一个时间戳：进程无声消失时，对比心跳与退出记录即可区分
+        // 「事件循环正常结束」和「被外力终止」。
+        if self.heartbeat_at.ready(Duration::from_secs(30)) {
+            self.heartbeat_at=PollClock::now();
+            diagnostics::note("heartbeat.log",&format!("运行中，已启动 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
+        }
         #[cfg(windows)]
         {
             // 用帧间隔限制刷新，绕过部分 Intel 驱动在垂直同步中的忙等待。
@@ -618,5 +632,7 @@ fn run() -> eframe::Result<()> {
         .with_always_on_top()
         .with_visible(false);
     let opts = eframe::NativeOptions { viewport, vsync: !cfg!(windows), ..Default::default() };
-    eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc)))))
+    let result = eframe::run_native("岛仔", opts, Box::new(|cc| Ok(Box::new(Shell::new(cc)))));
+    if result.is_ok() {diagnostics::note("last-exit.log","run_native 正常返回（所有窗口已关闭）");}
+    result
 }
