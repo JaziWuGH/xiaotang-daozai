@@ -1134,6 +1134,9 @@ mod tests {
                 let mut paths=Vec::new();
                 while stop_rx.try_recv().is_err() {
                     let Ok((mut stream,_))=listener.accept() else {std::thread::sleep(Duration::from_millis(5));continue;};
+                    // Windows 下从非阻塞监听套接字 accept 出来的连接也带非阻塞标记，
+                    // 直接 read 会在请求还没到时返回 WouldBlock。
+                    stream.set_nonblocking(false).unwrap();
                     stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
                     let mut request=String::new();
                     while !request.contains("\r\n\r\n") {
