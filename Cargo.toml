@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.49"
+version = "0.6.61"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -26,12 +26,14 @@ record = []
 
 [patch.crates-io]
 imap = { path = "vendor/imap" }
+imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
 
 [dependencies]
-eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
-egui_extras = { version = "0.31", default-features = false, features = ["svg"] }
+eframe = { version = "0.31", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
+egui_extras = { version = "0.31", default-features = false, features = ["svg", "image"] }
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
 flate2 = "1"
@@ -51,11 +53,15 @@ rrule = "0.14.0"
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+clipboard-win = "5.4.3"
+wgpu = { version = "24", default-features = false, features = ["dx12"] }
 memmap2 = "0.9.12"
 windows = { version = "0.58", features = [
   "Win32_Foundation",
   "Win32_Graphics_Gdi",
+  "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
   "Win32_System_Com",
   "Win32_System_DataExchange",
   "Win32_Security",
@@ -68,6 +74,7 @@ windows = { version = "0.58", features = [
   "Win32_UI_Input_KeyboardAndMouse",
   "Win32_UI_Input_Ime", "Win32_UI_TextServices",
   "Win32_UI_Accessibility",
+  "Win32_UI_HiDpi",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
   "Media_Control",
@@ -77,6 +84,7 @@ windows = { version = "0.58", features = [
   "Win32_Media_Audio_Endpoints",
   "Win32_Media_Audio",
   "Win32_System_WinRT",
+  "Win32_System_WinRT_Composition", "UI_Composition", "UI_Composition_Desktop", "System", "Foundation_Numerics",
   "UI_Notifications_Management",
   "UI_Notifications", "ApplicationModel",
   "Win32_System_Ole", "Win32_UI_Shell_Common", "Networking_Connectivity",
@@ -87,6 +95,7 @@ windows = { version = "0.58", features = [
 ] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"
+imap-proto = "0.10.2"
 native-tls = "0.2"
 keyring = { version = "3", features = ["windows-native"] }
 

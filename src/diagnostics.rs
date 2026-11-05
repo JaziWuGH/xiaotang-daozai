@@ -34,6 +34,40 @@ pub fn report(title: &str, details: &str) {
     eprintln!("{text}");
 }
 
+/// 仅记录最近一次启动停留的阶段，不记录账号或用户内容。
+pub fn startup(stage:&str) {
+    let directory=daozai::model::config_dir().join("diagnostics");
+    if std::fs::create_dir_all(&directory).is_ok() {
+        let _=std::fs::write(directory.join("last-startup.log"),format!(
+            "岛仔 {}\n进程：{}\n启动阶段：{stage}\n",env!("CARGO_PKG_VERSION"),std::process::id()));
+    }
+}
+
+/// 轻量生命周期日志：心跳与退出记录共用。文件名由调用方指定，避免互相覆盖。
+///
+/// 进程无声消失时区分三种可能：有退出记录 = 事件循环正常结束；
+/// 有心跳无退出记录且无错误报告 = 被外力终止（或 native 崩溃，需配合系统 dump）。
+pub fn note(file:&str,details:&str) {
+    let directory=daozai::model::config_dir().join("diagnostics");
+    if std::fs::create_dir_all(&directory).is_ok() {
+        let timestamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+        let _=std::fs::write(directory.join(file),format!(
+            "岛仔 {}\n进程：{}\n时间（Unix 秒）：{timestamp}\n{details}\n",env!("CARGO_PKG_VERSION"),std::process::id()));
+    }
+}
+
+/// 记录实际使用的图形设备，避免把电脑里的显卡列表误当作当前渲染设备。
+pub fn graphics(cc:&eframe::CreationContext<'_>) {
+    use eframe::glow::HasContext;
+    let details=if let Some(gl)=&cc.gl {unsafe{format!("厂商：{}\n渲染器：{}\nOpenGL：{}\n",
+        gl.get_parameter_string(eframe::glow::VENDOR),gl.get_parameter_string(eframe::glow::RENDERER),gl.get_parameter_string(eframe::glow::VERSION))}}
+    else if let Some(state)=&cc.wgpu_render_state {
+        let info=state.adapter.get_info();format!("渲染器：{}\n图形后端：{:?}\n设备类型：{:?}\n",info.name,info.backend,info.device_type)
+    }else{return;};
+    let directory=daozai::model::config_dir().join("diagnostics");
+    if std::fs::create_dir_all(&directory).is_ok(){let _=std::fs::write(directory.join("last-graphics.log"),details);}
+}
+
 pub fn install() {
     std::panic::set_hook(Box::new(|info| {
         // 不写入 panic 的数据载荷，避免把邮件、凭据或登录信息带进日志。

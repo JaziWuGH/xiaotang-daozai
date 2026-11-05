@@ -10,9 +10,32 @@ use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Pos2, Rect};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
+/// 剪贴板分栏一屏显示的条数。
+pub(crate) const CLIP_ROWS: usize = 4;
+
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
     format!("{:02}:{:02}", s / 60, s % 60)
+}
+
+/// 音乐页音量滑条：喇叭正上方的一整条竖向热区（贴右缘、避开歌词文本）。
+const VOL_BAR:(f32,f32,f32,f32)=(348.0,34.0,30.0,72.0);
+/// 竖向轨道上下端（y 越小音量越大）。
+const VOL_BAR_TOP:f32=44.0;
+const VOL_BAR_BOTTOM:f32=100.0;
+/// 「喇叭 + 竖条」整体热区：光标进来就浮出滑条，离开后这点时间再收（防抖）。
+const VOL_HOVER:(f32,f32,f32,f32)=(342.0,30.0,40.0,102.0);
+const VOL_POP_HOLD:f64=0.35;
+/// 「暂无音乐」时点封面弹出的播放器清单：左上角与宽度（贴在封面右侧，别盖住封面本身）。
+/// y 从 25 起，避开顶部日期/时钟那一行。
+const PICK_MENU:(f32,f32,f32)=(112.0,25.0,208.0);
+/// 一行的高度和最多显示几行（再多就靠滚轮翻）。
+const PICK_ROW:f32=25.0;
+const PICK_ROWS:usize=4;
+
+/// 播放器清单的高度：列出几个就多高；空列表也留一行放提示。
+fn pick_menu_height(players:usize)->f32 {
+    players.clamp(1,PICK_ROWS) as f32*PICK_ROW+8.0
 }
 
 /// 由标题生成稳定的封面渐变色。
@@ -41,6 +64,21 @@ impl App {
         let playing_t=ctx.animate_bool_with_time(egui::Id::new("np-playing"),np.playing,0.22);
         let art_size=if with_lyrics {44.0}else{62.0};
         let art_y=if with_lyrics {23.0}else{13.0};
+        // 音量弹层浮在最上面：光标落在它里面时，底下的封面/标题/进度条都不该响应。
+        let popup_open=has && self.volume_popup_open();
+        // 用裸指针位置判断「在不在喇叭/滑条这一列」：不掺和可交互控件谁压谁的层级问题。
+        let over_volume=c.ui.ctx().input(|i|i.pointer.latest_pos())
+            .is_some_and(|p|c.rect(VOL_HOVER.0,VOL_HOVER.1,VOL_HOVER.2,VOL_HOVER.3).contains(p));
+        // 播放器清单浮在最上面：压在它底下的标题/进度条/按钮都不该抢点击。
+        let menu_open=!has && self.player_menu_open();
+        let over_menu=menu_open && c.ui.ctx().input(|i|i.pointer.latest_pos())
+            .is_some_and(|p|c.rect(PICK_MENU.0,PICK_MENU.1,PICK_MENU.2,pick_menu_height(self.players.len())).contains(p));
+        // 封面 + 曲名整块可点：切回正在播放的客户端（没运行就拉起）。
+        // 拆成两块：封面在左侧，可以顶到卡片上沿；文字区必须从日期/时钟那一行下面开始，
+        // 否则卡片关掉歌词撑大后，热区会盖住顶部时间。宽度都跟着内容走，不做悬停高亮。
+        let art_open=has.then(||c.hit(40.0,art_y-1.0,art_size+2.0,art_size+2.0,"m-open-art"));
+        let (text_x,text_w)=if with_lyrics {(99.0,127.0)}else{(121.0,220.0)};
+        let text_open=has.then(||c.hit(text_x,30.0,text_w,if with_lyrics {40.0}else{49.0},"m-open-app"));
         if let Some((image,texture))=&self.music_artwork {
             let [w,h]=image.size;
             let (uw,vh)=if w>h {(h as f32/w as f32,1.0)}else{(1.0,w as f32/h as f32)};
@@ -58,6 +96,12 @@ impl App {
 
         if !has {
             c.text(121.0,47.0,"暂无音乐",14.0,W::Bold,theme::WHITE,H::Left);
+            // 没音乐时封面不是「打开正在播放的客户端」，而是把装好的播放器列出来挑一个。
+            c.text(121.0,68.0,"点封面启动播放器",10.0,W::Regular,Color32::from_gray(112),H::Left);
+            let pick=c.hit(39.0,11.0,72.0,66.0,"m-pick-player");
+            if pick.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("选择播放器").clicked() && !over_menu {
+                if menu_open {self.close_player_menu();} else {self.open_player_menu();}
+            }
         } else {
             let text_x=if with_lyrics {99.0}else{121.0};
             let text_width=if with_lyrics {123.0}else{220.0};
@@ -67,24 +111,40 @@ impl App {
             if with_lyrics {self.draw_music_lyrics(c);}
         }
 
-        let frac=if np.duration>0.0 {(np.position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let tc=if has {theme::WHITE}else{Color32::from_rgb(78,78,82)};
         let (bx,bw,by)=if with_lyrics {(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
-        let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
-        c.text(44.0,time_y,&mmss(np.position),time_size,W::Regular,tc,H::Left);
-        c.text(right,time_y,&format!("-{}",mmss((np.duration-np.position).max(0.0))),time_size,W::Regular,tc,H::Right);
         let bar=c.hit_drag(bx-4.0,by-7.0,bw+8.0,14.0,"m-seek");
+        let seek_position=if has && np.duration>0.0 && (bar.is_pointer_button_down_on() || bar.clicked() || bar.drag_stopped()) {
+            bar.interact_pointer_pos().or_else(||ctx.input(|i|i.pointer.interact_pos()))
+                .map(|pointer|((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64*np.duration)
+        }else{None};
+        let position=seek_position.unwrap_or(np.position);
+        let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
+        let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
+        c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
+        let remaining=if has && np.duration<=0.0{"--:--".into()}else{format!("-{}",mmss((np.duration-position).max(0.0)))};
+        c.text(right,time_y,&remaining,time_size,W::Regular,tc,H::Right);
         let (bh,_)=c.hover_t(&bar);
         let bh=if has {bh}else{0.0};
         let th=lerp(3.5,5.0,bh);
         c.fill(bx,by-th/2.0,bw,th,th/2.0,if has {Color32::from_gray(90)}else{theme::TRACK});
+        if self.settings.skin==crate::model::Skin::Fluid {
+            let head=bx+bw*frac;
+            let hot=if bar.is_pointer_button_down_on(){1.0}else if np.playing{0.62}else{0.45};
+            if has && frac>0.0 {
+                c.fill(bx,by-th/2.0,bw*frac,th,th/2.0,self.fluid.tint_color(0.78));
+                paint::chase(c,bx,head,by,th,self.fluid.tint_color(0.30),hot);
+            }
+            if c.live {
+                let pos=c.pos(head,by)-self.fluid_origin;
+                self.fluid.set_seek((has && frac>0.0).then_some((pos.x,pos.y)),hot);
+            }
+        }else{
         if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}
         if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
-        if (bar.clicked() || bar.drag_stopped()) && has && np.duration>0.0 {
-            if let Some(pointer)=bar.interact_pointer_pos() {
-                let fraction=((c.to_local(pointer).x-bx)/bw).clamp(0.0,1.0) as f64;
-                cmds.push(Cmd::Media(Transport::Seek(fraction*np.duration)));
-            }
+        }
+        if (bar.clicked() || bar.drag_stopped()) && !over_volume {
+            if let Some(position)=seek_position {cmds.push(Cmd::Media(Transport::Seek(position)));}
         }
 
         let y=118.0;
@@ -97,26 +157,52 @@ impl App {
         };
         let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr");
         lyrics_card.text(74.0,y+5.0,"词",14.0,W::Semibold,if !has {ic}else if self.show_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
+        // 播放模式：能读到的客户端显示当前模式，网易云即使还没读到也先显示入口。
+        let mode_known=np.play_mode!=crate::smtc::PlayMode::Unknown;
+        if has && (mode_known || crate::smtc::supports_play_mode(&np.source)) {
+            let (mode_button,mode_card)=btn(118.0,26.0,"m-mode");
+            paint::play_mode(&mode_card,118.0,y,np.play_mode,if mode_known {ic}else{theme::GRAY});
+            let hint=if mode_known {format!("{}（点击切换）",np.play_mode.label())}else{"播放模式（点击切换）".into()};
+            if mode_button.on_hover_text(hint).clicked() {
+                cmds.push(Cmd::CyclePlayMode);
+            }
+        }
         let (previous,previous_card)=btn(162.0,30.0,"m-prev");
         paint::skip(&previous_card,162.0,y,-1.0,ic);
         let (play,play_card)=btn(210.5,30.0,"m-play");
         paint::play_pause(&play_card,211.0,y,15.0,playing_t,ic);
         let (next,next_card)=btn(258.0,30.0,"m-next");
         paint::skip(&next_card,258.0,y,1.0,ic);
+        // 音量：跟网易云一样，鼠标移到喇叭上就浮出竖条；点喇叭本身是静音。
         let (volume_button,volume_card)=btn(367.0,26.0,"m-volume");
-        let (volume,muted)=self.volume_ui.unwrap_or((0,false));
+        let player_volume=self.player_volume_of(&np.source);
+        let muted=player_volume.is_some_and(|v|v.muted);
         paint::speaker(&volume_card,367.0,y,muted,ic);
-        if self.volume_ui.is_some() && volume_button.on_hover_text(if muted {"取消静音"}else{"静音"}).clicked() {
-            self.volume_ui=Some((volume,!muted));
-            self.volume_quiet_until=self.t+0.9;
-            cmds.push(Cmd::ToggleMute);
+        if has {
+            if over_volume {
+                let was_open=self.volume_popup_open();
+                if !was_open {
+                    // 刚浮出来时先把真实音量读回来，竖条的位置才对。
+                    if let Some(volume)=crate::appaudio::read_for(&crate::smtc::player_exe(&np.source)) {
+                        self.set_player_volume(&np.source,volume);
+                    }
+                }
+                self.open_volume_popup(VOL_POP_HOLD);
+                if !was_open {ctx.request_repaint();}
+            } else if popup_open {
+                // 已经移开：安排一帧把它收掉，否则没有鼠标事件就再也画不动了。
+                ctx.request_repaint_after(std::time::Duration::from_millis(420));
+            }
+            if volume_button.on_hover_text(if muted {"取消静音"}else{"静音"}).clicked() {
+                cmds.push(Cmd::TogglePlayerMute);
+            }
         }
         if has {
             if previous.clicked() {cmds.push(Cmd::Media(Transport::Prev));}
             if play.clicked() {cmds.push(Cmd::Media(Transport::Toggle));}
             if next.clicked() {cmds.push(Cmd::Media(Transport::Next));}
         }
-        if lyrics_button.on_hover_text(if self.show_lyrics {"隐藏歌词"}else{"显示歌词"}).clicked() {
+        if lyrics_button.on_hover_text(if self.show_lyrics {"隐藏歌词"}else{"显示歌词"}).clicked() && !over_menu {
             if !has {self.say("先放一首歌吧");}
             else {
                 self.show_lyrics=!self.show_lyrics;
@@ -124,7 +210,8 @@ impl App {
                 self.settings.save();
             }
         }
-        if has {
+        // 岛上歌词是横向的，只在顶部停靠时提供。
+        if has && !self.side() {
             let (button,button_card)=capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",if self.settings.island_lyrics {Color32::from_gray(39)}else{Color32::from_gray(22)},Color32::from_gray(47));
             button_card.text(313.0,122.0,"岛上歌词",10.0,W::Semibold,if self.settings.island_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
             if button.on_hover_text(if self.settings.island_lyrics {"关闭收起时的歌词"}else{"收起时显示当前歌词"}).clicked() {
@@ -132,6 +219,113 @@ impl App {
                 self.settings.save();
             }
         }
+        if has {
+            let label=crate::smtc::app_label(&np.source);
+            let mut activate=false;
+            for open in [art_open,text_open].into_iter().flatten() {
+                let response=open.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(format!("打开/收起{label}"));
+                activate|=!over_volume && response.clicked();
+            }
+            if activate {cmds.push(Cmd::ActivatePlayer(np.source.clone()));}
+        }
+        if popup_open {
+            self.draw_volume_slider(c,&np.source,cmds);
+        }
+        // 有歌了就自动收起清单，别挡着曲目信息。
+        if has && self.player_menu_open() {self.close_player_menu();}
+        if self.player_menu_open() && !has {self.draw_player_menu(c,cmds);}
+    }
+
+    /// 「暂无音乐」时的播放器清单：点封面弹出，选一个就启动。
+    fn draw_player_menu(&mut self,c:&Card,cmds:&mut Vec<Cmd>) {
+        let (x,y,w)=PICK_MENU;
+        let total=self.players.len();
+        let h=pick_menu_height(total);
+        let ctx=c.ui.ctx().clone();
+        // 底板比卡片再深一层、外面描一圈浅灰，压在标题和进度条上也看得出是浮层。
+        c.fill(x-1.0,y-1.0,w+2.0,h+2.0,13.0,Color32::from_rgb(54,54,58));
+        c.fill(x,y,w,h,12.0,Color32::from_rgb(23,23,25));
+        let pointer=ctx.input(|i|i.pointer.latest_pos());
+        let inside=pointer.is_some_and(|p|c.rect(x,y,w,h).contains(p));
+        if inside && total>PICK_ROWS {
+            let delta=ctx.input(|i|i.raw_scroll_delta.y);
+            if delta.abs()>0.5 {
+                let max=(total-PICK_ROWS) as f32;
+                self.player_menu_scroll=(self.player_menu_scroll-delta/120.0).clamp(0.0,max);
+            }
+        }
+        if total==0 {
+            c.text(x+12.0,y+23.0,"未检测到已安装的播放器",10.5,W::Regular,Color32::from_gray(140),H::Left);
+        }
+        let first=self.player_menu_scroll.round() as usize;
+        let mut launch=None;
+        for (slot,(_,player)) in self.players.iter().enumerate().skip(first).take(PICK_ROWS).enumerate() {
+            let row_y=y+4.0+slot as f32*PICK_ROW;
+            let response=c.hit(x+4.0,row_y,w-8.0,PICK_ROW,("m-pick",slot));
+            let (hover,_)=c.hover_t(&response);
+            if hover>0.01 {c.fill(x+4.0,row_y,w-8.0,PICK_ROW,8.0,Color32::from_white_alpha((26.0*hover) as u8));}
+            c.text(x+14.0,row_y+17.5,&c.fit(&player.name,11.0,W::Semibold,w-28.0),11.0,W::Semibold,theme::WHITE,H::Left);
+            if response.on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(player.path.display().to_string()).clicked() {
+                launch=Some((player.name.clone(),player.path.clone()));
+            }
+        }
+        if let Some((name,path))=launch {
+            self.close_player_menu();
+            cmds.push(Cmd::LaunchPlayer(name,path));
+        }
+        // Esc 或点别处收起；刚打开的那一下不能算「点别处」。
+        let grace=self.player_menu.is_some_and(|at|self.t-at>0.18);
+        let escaped=ctx.input(|i|i.key_pressed(egui::Key::Escape));
+        if escaped || (grace && !inside && ctx.input(|i|i.pointer.any_pressed())) {
+            self.close_player_menu();
+        }
+    }
+
+    /// 音乐页音量滑条：竖直一根，贴在喇叭正上方；不显示百分比，静置一会儿自己收。
+    fn draw_volume_slider(&mut self,c:&Card,source:&str,cmds:&mut Vec<Cmd>) {
+        let (hx,hy,hw,hh)=VOL_BAR;
+        let cx=hx+hw/2.0;
+        let (percent,muted)=self.player_volume_of(source).map(|v|(v.percent,v.muted)).unwrap_or((0,false));
+        let bar=c.hit_drag(hx,hy,hw,hh,"m-vol-slider");
+        let (hover,_pressed)=c.hover_t(&bar);
+        // 薄薄一层底，压在歌词上也看得清轨道。
+        c.fill(cx-9.0,hy,18.0,hh,9.0,Color32::from_black_alpha(if hover>0.5 {150}else{110}));
+        let width=if hover>0.5 {8.0}else{6.0};
+        let span=VOL_BAR_BOTTOM-VOL_BAR_TOP;
+        c.fill(cx-width/2.0,VOL_BAR_TOP,width,span,width/2.0,Color32::from_white_alpha(48));
+        let mut want=None;
+        if bar.dragged() || bar.clicked() {
+            if let Some(p)=bar.interact_pointer_pos() {
+                let y=c.to_local(p).y;
+                want=Some(crate::appaudio::percent_from_fraction((VOL_BAR_BOTTOM-y)/span));
+            }
+        } else if bar.hovered() {
+            // 停在滑条上滚滚轮也能微调，不用非得拖动。
+            let dy=c.ui.ctx().input(|i|i.raw_scroll_delta.y);
+            if dy.abs()>0.5 {want=Some(crate::appaudio::shift_percent(percent,dy/120.0));}
+        }
+        if let Some(value)=want {
+            if value!=percent || muted {
+                self.set_player_volume(source,crate::appaudio::AppVolume::new(value,false));
+                cmds.push(Cmd::SetPlayerVolume(value));
+                self.open_volume_popup(VOL_POP_HOLD);
+            }
+        }
+        let (percent,muted)=self.player_volume_of(source).map(|v|(v.percent,v.muted)).unwrap_or((percent,muted));
+        let color=if muted {Color32::from_gray(160)}else{theme::WHITE};
+        let fraction=if muted {0.0}else{percent as f32/100.0};
+        let knob_y=VOL_BAR_BOTTOM-span*fraction;
+        if fraction>0.0 {
+            c.fill(cx-width/2.0,knob_y,width,VOL_BAR_BOTTOM-knob_y,width/2.0,color);
+        }
+        // 一直画着圆点：一眼能看出当前音量落在哪。
+        c.circle(cx,knob_y,if hover>0.5 {5.5}else{4.5},color);
+        if bar.dragged() || bar.is_pointer_button_down_on() {
+            // 拖着的时候别让它半路消失。
+            self.open_volume_popup(VOL_POP_HOLD);
+        }
+        bar.on_hover_text("拖动调节音量");
     }
 
     fn draw_music_lyrics(&mut self,c:&Card) {
@@ -140,7 +334,12 @@ impl App {
         if let Some(lyrics)=&self.ly.lyrics {
             let current=if lyrics.synced {lyrics.index_at(self.lyric_position())}else{Some(0)};
             let target=current.unwrap_or(0);
-            let position=c.ui.ctx().animate_value_with_time(egui::Id::new(("music-lyrics-scroll",&self.ly.key)),target as f32,0.3);
+            let id=egui::Id::new("music-lyrics-scroll");
+            if !self.ly.scroll_animation_started {
+                c.ui.ctx().animate_value_with_time(id,target as f32,0.0);
+                self.ly.scroll_animation_started=true;
+            }
+            let position=c.ui.ctx().animate_value_with_time(id,target as f32,0.3);
             let first=(position.floor() as usize).saturating_sub(2);
             for (index,line) in lyrics.lines.iter().enumerate().skip(first).take(6) {
                 let distance=index as f32-position;
@@ -394,23 +593,62 @@ impl App {
     }
 
     // ================= 置物架 =================
-    pub(crate) fn page_shelf(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
+    /// 标题旁的「文件 | 剪贴板」分栏，返回分栏右边缘。
+    /// 页面标题处的「置物架 | 剪贴板」分栏，返回分栏右边缘。
+    fn shelf_tabs(&mut self, c: &Card, x: f32) -> f32 {
+        let labels = ["置物架", "剪贴板"];
+        let font = 12.0;
+        let widths: Vec<f32> = labels.iter().map(|l| c.text_w(l, font, W::Bold) + 14.0).collect();
+        let total = widths.iter().sum::<f32>() + 4.0;
+        c.fill(x, 9.5, total, 21.0, 10.5, theme::BTN);
+        let mut left = x + 2.0;
+        for (i, (label, w)) in labels.iter().zip(&widths).enumerate() {
+            let selected = self.shelf_tab == i;
+            let r = c.hit(left, 9.5, *w, 21.0, ("shelf-tab", i));
+            let (h, _) = c.hover_t(&r);
+            if selected {
+                c.fill(left, 11.5, *w, 17.0, 8.5, Color32::from_gray(88));
+            } else if h > 0.01 {
+                c.fill(left, 11.5, *w, 17.0, 8.5, Color32::from_white_alpha((18.0 * h) as u8));
+            }
+            c.text(left + w / 2.0, 24.3, label, font, W::Bold, if selected { theme::WHITE } else { theme::GRAY }, H::Center);
+            if r.clicked() && !selected {
+                self.shelf_tab = i;
+                self.confirm_clear = None;
+                self.clip_confirm_clear = None;
+            }
+            left += w;
+        }
+        x + total
+    }
+
+    pub(crate) fn page_shelf(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let n = self.shelf.items.len();
         let drag = self.drag_a;
-        let title_w = c.text_w("置物架", size::TITLE, W::Bold);
+        // 拖文件进来时回到「文件」分栏。
+        if drag > 0.002 { self.shelf_tab = 0; }
+        self.shelf_tabs(c, 13.0);
+        if self.shelf_tab == 1 {
+            self.page_clipboard(c, env, cmds);
+            return;
+        }
         c.text(344.0,23.0,"添加",size::SMALL,W::Regular,theme::GRAY,H::Right);
         if c.hit(311.0,8.0,38.0,22.0,"shelf-add").on_hover_text("从电脑选择文件").clicked(){cmds.push(Cmd::AddFiles);}
         if n>5 {c.text(209.5,121.0,&format!("{}–{} / {n} · 滚轮查看",self.shelf_first+1,(self.shelf_first+5).min(n)),10.5,W::Regular,theme::DIM,H::Center);}
 
         if n > 0 {
-            // 标题旁的「清空」：第一次点变红，3 秒内再点才真正清空
+            // 「添加」左边的「清空」：第一次点变红，3 秒内再点才真正清空。
+            // 「确认」与「清空」同宽，不会挤到顶栏时间。
             let confirming = self.confirm_clear.is_some();
-            let label = if confirming { "确认清空" } else { "清空" };
-            let lw = c.text_w(label, size::SMALL, W::Regular) + 16.0;
+            let label = if confirming { "确认" } else { "清空" };
+            let lw = c.text_w("清空", size::SMALL, W::Regular) + 16.0;
             let base = if confirming { Color32::from_rgb(120, 28, 36) } else { theme::BTN };
             let hover = if confirming { Color32::from_rgb(150, 34, 44) } else { theme::BTN_HOVER };
-            let (r, bc) = capsule(&c.faded(1.0 - drag), 15.0 + title_w + 8.0, 11.5, lw, 17.0, "shelf-clear", base, hover);
-            bc.text(15.0 + title_w + 8.0 + lw / 2.0, 23.5, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
+            // 放在右下角：顶栏中间是日期时间，宽度随 12 小时制等设置变化。
+            let (x, y) = (377.0 - lw, 109.0);
+            let (r, bc) = capsule(&c.faded(1.0 - drag), x, y, lw, 17.0, "shelf-clear", base, hover);
+            let r = if confirming { r.on_hover_text("再点一次清空置物架（文件本身不动）") } else { r.on_hover_text("清空置物架") };
+            bc.text(x + lw / 2.0, y + 12.0, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
             if r.clicked() {
                 if confirming {
                     self.shelf.clear();
@@ -476,7 +714,8 @@ impl App {
                 continue;
             }
             let r = row.hit_drag(x - 31.0, 30.0, 62.0, 78.0, ("shelf", p));
-            r.clone().on_hover_text(p.display().to_string());
+            let show_hint=self.shelf_menu_rect.is_none() && !r.context_menu_opened() && !r.secondary_clicked();
+            if show_hint {r.clone().on_hover_text(p.display().to_string());}
             let (h, pr) = row.hover_t(&r);
             let cc = row.faded(a).scaled(x, 66.0, 1.0 - 0.04 * pr);
             if h > 0.01 {
@@ -494,15 +733,115 @@ impl App {
             let remove_card=row.faded(a);
             remove_card.circle(x+23.5,39.0,7.5,Color32::from_rgb(55,40,46));
             paint::close(&remove_card,x+23.5,39.0,2.4,theme::WHITE);
-            let mut delete=remove.on_hover_text("从置物架移除，保留原文件").clicked();
+            let mut delete=remove.clicked();
+            if show_hint {remove.on_hover_text("从置物架移除，保留原文件");}
             r.context_menu(|ui|{
                 if ui.button("打开").clicked(){if p.exists(){cmds.push(Cmd::Open(p.clone()));}ui.close_menu();}
                 if ui.button("在文件夹中显示").clicked(){cmds.push(Cmd::Reveal(p.clone()));ui.close_menu();}
                 if ui.button("复制完整路径").clicked(){cmds.push(Cmd::Copy(p.display().to_string()));ui.close_menu();}
                 if ui.button("从置物架移除").clicked(){delete=true;ui.close_menu();}
+                self.shelf_menu_rect=Some(egui::Frame::menu(ui.style()).widget_rect(ui.min_rect()));
             });
             if delete { self.shelf.remove(p); self.icons.remove(p); self.shelf_x.remove(p); self.shelf_born.remove(p); self.shelf_first=self.shelf_first.min(self.shelf.items.len().saturating_sub(5)); }
             else if r.clicked() { if p.exists(){cmds.push(Cmd::Open(p.clone()));} else {self.say("文件已移动或删除，可从置物架移除");} }
+        }
+    }
+
+    // ================= 剪贴板（置物架第二个分栏） =================
+    fn page_clipboard(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
+        if !self.settings.clipboard_history {
+            c.dashed(42.0, 32.0, 335.0, 91.0, 12.0, 1.2, Color32::from_gray(70), 0.0);
+            c.text(209.5, 66.0, "剪贴板记录已关闭", 12.0, W::Semibold, theme::WHITE, H::Center);
+            c.text(209.5, 82.0, "开启后，最近复制的文字会出现在这里", size::TINY, W::Regular, theme::GRAY, H::Center);
+            let (r, bc) = capsule(c, 179.5, 92.0, 60.0, 20.0, "clip-enable", theme::BTN, theme::BTN_HOVER);
+            bc.centered_text(209.5, 102.0, "开启", size::SMALL, W::Semibold, theme::WHITE, H::Center);
+            if r.clicked() { self.settings.clipboard_history = true; self.clipboard.set_enabled(true); self.settings.save(); }
+            return;
+        }
+        let items = self.clipboard.lock().items.clone();
+        let n = items.len();
+        let recent = items.iter().filter(|clip| !clip.pinned).count();
+        self.clip_first = self.clip_first.min(n.saturating_sub(CLIP_ROWS));
+
+        // 右上：条数与「清空」（只清未固定的）。
+        if recent > 0 {
+            let confirming = self.clip_confirm_clear.is_some_and(|at| self.t - at < 3.0);
+            if !confirming { self.clip_confirm_clear = None; }
+            let label = if confirming { "确认" } else { "清空" };
+            let lw = c.text_w("清空", size::SMALL, W::Regular) + 16.0;
+            let base = if confirming { Color32::from_rgb(120, 28, 36) } else { theme::BTN };
+            let hover = if confirming { Color32::from_rgb(150, 34, 44) } else { theme::BTN_HOVER };
+            let x = 351.0 - lw;
+            let (r, bc) = capsule(c, x, 11.5, lw, 17.0, "clip-clear", base, hover);
+            bc.text(x + lw / 2.0, 23.5, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
+            let r = r.on_hover_text(if confirming { "再点一次清空未固定的记录" } else { "清空未固定的记录" });
+            if r.clicked() {
+                if confirming {
+                    self.clipboard.lock().clear_recent();
+                    self.clip_first = 0;
+                    self.clip_confirm_clear = None;
+                    self.say("剪贴板记录已清空（固定的保留）");
+                } else {
+                    self.clip_confirm_clear = Some(self.t);
+                }
+            }
+        }
+
+        if n == 0 {
+            c.dashed(42.0, 32.0, 335.0, 91.0, 12.0, 1.2, Color32::from_gray(70), 0.0);
+            paint::clipboard_glyph(c, 209.5, 58.0, 22.0, Color32::from_gray(200), Color32::from_gray(80));
+            c.text(209.5, 93.0, "复制的文字会出现在这里", 12.0, W::Semibold, theme::WHITE, H::Center);
+            c.text(209.5, 108.0, "记录保存在本机，重新打开仍可查看", size::TINY, W::Regular, theme::GRAY, H::Center);
+            return;
+        }
+
+        c.fill(42.0, 31.0, 335.0, 93.0, 12.0, theme::CARD);
+        // 超过一屏时右侧细滚动条，滚轮查看。
+        if n > CLIP_ROWS {
+            let (top, track) = (38.0, 79.0);
+            let thumb = (track * CLIP_ROWS as f32 / n as f32).max(12.0);
+            let y = top + (track - thumb) * self.clip_first as f32 / (n - CLIP_ROWS) as f32;
+            c.fill(371.0, top, 2.5, track, 1.25, Color32::from_white_alpha(14));
+            c.fill(371.0, y, 2.5, thumb, 1.25, Color32::from_white_alpha(70));
+        }
+        let mut action: Option<(usize, u8)> = None; // 0 复制 1 固定 2 删除
+        for (row, (index, clip)) in items.iter().enumerate().skip(self.clip_first).take(CLIP_ROWS).enumerate() {
+            let y = 44.0 + row as f32 * 22.5;
+            let r = c.hit(48.0, y - 10.0, 323.0, 20.0, ("clip", index, clip.text.len(), clip.at.as_str()));
+            let (h, _) = c.hover_t(&r);
+            if h > 0.01 {
+                c.fill(48.0, y - 10.0, 323.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * h) as u8));
+            }
+            if clip.pinned {
+                paint::pin(c, 58.0, y, 9.0, theme::BLUE);
+            } else {
+                c.circle(58.0, y, 2.2, Color32::from_gray(110));
+            }
+            let text = c.fit(&crate::clipboard::preview(&clip.text), size::BODY, W::Regular, 210.0);
+            c.text(68.0, y + 3.8, &text, size::BODY, W::Regular, Color32::from_gray(235), H::Left);
+            c.text(318.0, y + 3.5, &clip.at, size::TINY, W::Regular, theme::DIM, H::Right);
+            let tip: String = clip.text.chars().take(400).collect();
+            let r = r.on_hover_text(format!("{tip}{}\n点击复制", if clip.text.chars().count() > 400 { "…" } else { "" }));
+            let pin = c.hit(323.0, y - 9.0, 18.0, 18.0, ("clip-pin", index)).on_hover_text(if clip.pinned { "取消固定" } else { "固定（清空时保留）" });
+            paint::pin(c, 332.0, y, 9.0, if clip.pinned || pin.hovered() { theme::BLUE } else { theme::GRAY });
+            let delete = c.hit(345.0, y - 9.0, 17.0, 18.0, ("clip-delete", index)).on_hover_text("删除这条记录");
+            paint::close(c, 353.5, y, 2.4, theme::GRAY);
+            if delete.clicked() { action = Some((index, 2)); }
+            else if pin.clicked() { action = Some((index, 1)); }
+            else if r.clicked() { action = Some((index, 0)); }
+        }
+        match action {
+            Some((index, 0)) => {
+                #[cfg(windows)]
+                self.say(if crate::clipboard::copy_history(&items[index].text) { "已复制" } else { "复制失败，请重试" });
+                #[cfg(not(windows))]
+                _cmds.push(Cmd::Copy(items[index].text.clone()));
+            }
+            Some((index, 1)) => {
+                if !self.clipboard.lock().toggle_pin(index) { self.say(format!("最多固定 {} 条", crate::clipboard::MAX_PINNED)); }
+            }
+            Some((index, _)) => { self.clipboard.lock().remove(index); }
+            None => {}
         }
     }
 
@@ -535,8 +874,10 @@ impl App {
 
     // ================= 待办 =================
     pub(crate) fn page_todo(&mut self, c: &Card, env: &Env, _cmds: &mut Vec<Cmd>) {
-        let done = self.todos.items.iter().filter(|t|t.done_on.is_some()).count();
-        let total = self.todos.items.len();
+        // 今天要做的在前；不在今天的每周重复待办排在后面，变暗显示、不能勾选。
+        let (done, total) = self.todos.progress(&env.today);
+        let order = self.todos.display_order(&env.today);
+        let count = order.len();
         let pop = self.todo_pop.pos.abs().min(0.4);
         let hc = c.scaled(60.0, 50.0, 1.0 + pop * 0.25);
         let w = hc.text(42.0, 61.0, &format!("{done}"), size::HERO, W::Bold, if done > 0 && done == total { theme::GREEN } else { theme::WHITE }, H::Left);
@@ -546,7 +887,7 @@ impl App {
         let (add, ac) = capsule(c, 41.0, 96.0, 74.0, 26.0, "t-add", theme::BTN, theme::BTN_HOVER);
         paint::plus(&ac, 56.0, 109.0, 6.2, theme::WHITE, Color32::BLACK);
         ac.text(67.0, 112.5, "加一个", size::BODY, W::Regular, theme::WHITE, H::Left);
-        let can_edit = self.todos.items.iter().any(|t| t.done_on.is_none());
+        let can_edit = self.todos.items.iter().any(|t| !t.done_for(&env.today));
         let ec = if can_edit { c.clone() } else { c.faded(0.45) };
         let (edit, edc) = capsule(&ec, 121.0, 96.0, 68.0, 26.0, "t-edit", theme::BTN, if can_edit { theme::BTN_HOVER } else { theme::BTN });
         paint::pencil(&edc, 135.0, 109.0, 11.0, theme::WHITE);
@@ -554,7 +895,7 @@ impl App {
 
         c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
         let editing = self.adding || self.editing.is_some();
-        if total == 0 && !editing {
+        if count == 0 && !editing {
             paint::checklist(c, 286.5, 64.0, 32.0, Color32::from_gray(150), Color32::from_rgb(52, 54, 58));
             c.text(286.5, 99.0, "今天还没有安排", size::SMALL, W::Regular, theme::GRAY, H::Center);
         } else {
@@ -575,7 +916,7 @@ impl App {
             let ctx = c.ui.ctx().clone();
             let cap = if editing { 2 } else { 3 };
             let mut shown = 0;
-            for i in self.todo_first.min(total.saturating_sub(1))..total {
+            for &i in order.iter().skip(self.todo_first.min(count.saturating_sub(1))) {
                 if shown >= cap {
                     break;
                 }
@@ -583,29 +924,38 @@ impl App {
                     continue;
                 }
                 let item = self.todos.items[i].clone();
+                let today_item = item.scheduled_on(&env.today);
                 let y = row_y(row);
                 let r = c.hit(202.0, y - 10.0, 169.0, 20.0, ("todo", i, item.text.as_str()));
                 let (h, _) = c.hover_t(&r);
                 if h > 0.01 {
                     c.fill(202.0, y - 10.0, 169.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * h) as u8));
                 }
-                let checked = item.done_on.is_some();
+                let checked = item.done_for(&env.today);
                 let ct = ctx.animate_bool_with_time(egui::Id::new(("todo-check", item.text.as_str())), checked, 0.28);
-                c.ring(212.0, y, 5.2, 1.3, paint::alpha(Color32::from_gray(120), 1.0 - ct));
+                let rc = if today_item { c.clone() } else { c.faded(0.45) };
+                rc.ring(212.0, y, 5.2, 1.3, paint::alpha(Color32::from_gray(120), 1.0 - ct));
                 if ct > 0.0 {
                     c.circle(212.0, y, 6.0 * anim::ease_out_cubic(ct.min(1.0) / 0.6).min(1.0), theme::GREEN);
                     paint::check(c, 212.0, y, 6.0, smoothstep(0.3, 1.0, ct), 1.4, Color32::BLACK);
                 }
-                let text = c.fit(&item.text, size::BODY, W::Regular, 104.0);
-                r.clone().on_hover_text(format!("{}{}",item.text,item.due.as_ref().map(|d|format!("\n提醒：{d}")).unwrap_or_default()));
+                // 每周重复：文字右侧小标签（周一三五 / 工作日 / 每天）。
+                let tag = crate::model::repeat_tag(item.repeat);
+                let tag_w = if tag.is_empty() { 0.0 } else { c.text_w(&tag, size::TINY, W::Regular) + 6.0 };
+                let text = c.fit(&item.text, size::BODY, W::Regular, 104.0 - tag_w);
+                let repeat_hint = if item.is_repeating() { format!("\n{}{}", crate::model::repeat_label(item.repeat), if today_item { "" } else { " · 今天不用做" }) } else { String::new() };
+                r.clone().on_hover_text(format!("{}{}{}",item.text,repeat_hint,item.reminder_text().map(|d|format!("\n提醒：{d}")).unwrap_or_default()));
                 let tcol = mix(Color32::from_gray(235), Color32::from_gray(110), ct);
-                let tw = c.text(223.0, y + 3.8, &text, size::BODY, W::Regular, tcol, H::Left);
+                let tw = rc.text(223.0, y + 3.8, &text, size::BODY, W::Regular, tcol, H::Left);
+                if !tag.is_empty() {
+                    rc.text(223.0 + tw + 5.0, y + 3.2, &tag, size::TINY, W::Regular, if today_item { theme::BLUE } else { theme::GRAY }, H::Left);
+                }
                 if ct > 0.0 {
                     c.fill(223.0, y + 0.2, tw * smoothstep(0.2, 1.0, ct), 1.0, 0.5, Color32::from_gray(110));
                 }
                 let delete=c.hit(353.0,y-9.0,17.0,18.0,("todo-delete",i)).on_hover_text("删除待办").clicked();
                 paint::close(c,361.5,y,2.4,theme::GRAY);
-                let reminder=c.hit(333.0,y-9.0,18.0,18.0,("todo-reminder",i)).on_hover_text(item.due.as_ref().map(|due|format!("提醒：{due} · 点击修改")).unwrap_or_else(||"设置提醒（可选）".into()));
+                let reminder=c.hit(333.0,y-9.0,18.0,18.0,("todo-reminder",i)).on_hover_text(item.reminder_text().map(|due|format!("提醒：{due} · 点击修改")).unwrap_or_else(||"设置提醒与每周重复（可选）".into()));
                 let reminder_clicked=reminder.clicked();
                 let ink=if item.due.is_some()||reminder.hovered(){theme::BLUE}else{theme::GRAY};
                 c.ring(342.0,y,4.7,1.1,ink);
@@ -618,9 +968,11 @@ impl App {
                 });
                 if edit_this {self.open_task_dialog(i);}
                 if delete {self.todos.items.remove(i);self.todos.save();self.todo_first=self.todo_first.min(self.todos.items.len().saturating_sub(3));break;}
-                if r.clicked() && !edit_this && !reminder_clicked {
-                    let now = self.todos.items[i].done_on.is_some();
-                    self.todos.items[i].done_on = if now { None } else { Some(env.today.clone()) };
+                if r.clicked() && !edit_this && !reminder_clicked && !today_item {
+                    self.say(format!("{}的待办，今天不用做", crate::model::repeat_label(item.repeat)));
+                } else if r.clicked() && !edit_this && !reminder_clicked {
+                    let now = self.todos.items[i].done_for(&env.today);
+                    self.todos.items[i].toggle(&env.today);
                     self.todos.save();
                     if !now {
                         self.todo_pop.vel += 5.0;
@@ -630,9 +982,9 @@ impl App {
                 row += 1;
                 shown += 1;
             }
-            let rest = total.saturating_sub(shown + self.editing.map(|_|1).unwrap_or(0));
+            let rest = count.saturating_sub(shown + self.editing.map(|_|1).unwrap_or(0));
             if rest > 0 {
-                c.text(370.0, 120.0, &format!("共 {total} 项 · 滚轮查看"), size::TINY, W::Regular, theme::DIM, H::Right);
+                c.text(370.0, 120.0, &format!("共 {count} 项 · 滚轮查看"), size::TINY, W::Regular, theme::DIM, H::Right);
             }
         }
 
@@ -644,7 +996,7 @@ impl App {
             self.todo_input_focused=false;
         }
         if edit.clicked() && can_edit {
-            if let Some(i) = self.todos.items.iter().position(|t| t.done_on.is_none()) {
+            if let Some(i) = self.todos.items.iter().position(|t| !t.done_for(&env.today)) {
                 self.editing = Some(i);
                 self.adding = false;
                 self.buf = self.todos.items[i].text.clone();
@@ -654,8 +1006,15 @@ impl App {
     }
 
     // ---------------------------------------------------------------
-    // 邮件（v0.5.5）：左侧验证码 / 连接状态，右侧最近三封。
+    // 邮件：有验证码大卡时分栏，否则显示紧凑单行列表。
     // ---------------------------------------------------------------
+    fn visible_mail_code(&self)->Option<&mail::Item> {
+        self.mail.code_item().filter(|item|self.settings.mail_code && !self.mail_code_hidden(item))
+    }
+    pub(crate) fn mail_list_bounds(&self)->Rect {
+        let left=if self.visible_mail_code().is_some(){182.0}else{36.0};
+        Rect::from_min_max(Pos2::new(left,36.0),Pos2::new(380.0,122.0))
+    }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         if self.mail.accounts.is_empty() {
             c.text(42.0, 60.0, "还没有邮箱", 13.0, W::Bold, theme::WHITE, H::Left);
@@ -685,55 +1044,60 @@ impl App {
                 None => self.mail.open_uid = None,
             }
         }
-        c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
-        let code=self.mail.code_item().filter(|_|self.settings.mail_code).cloned();
-        if let Some(item)=&code {
-            let value=item.code.as_deref().unwrap_or_default();
+        let code=self.visible_mail_code().cloned();
+        if let Some(raw)=&code {
+            c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
+            let hidden=self.mail_code_hidden(raw);
+            let item=self.display_mail(raw);
+            let value=item.code.as_deref().unwrap_or("••••••");
             c.text(46.0,51.0,"验证码",10.5,W::Regular,theme::GRAY,H::Left);
             c.text(166.0,51.0,&c.fit(&item.from,10.5,W::Semibold,78.0),10.5,W::Semibold,theme::WHITE,H::Right);
             c.text(46.0,75.0,value,23.0,W::Bold,theme::GREEN,H::Left);
             c.text(46.0,91.0,&c.fit(&item.subject,10.5,W::Regular,120.0),10.5,W::Regular,Color32::from_gray(190),H::Left);
-            c.text(46.0,108.0,"点击复制",10.5,W::Regular,theme::DIM,H::Left);
+            c.text(46.0,108.0,if hidden{"已隐藏 · 点击查看"}else{"点击复制"},10.5,W::Regular,theme::DIM,H::Left);
             c.text(166.0,108.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,theme::GRAY,H::Right);
             c.hit(42.0,38.0,128.0,16.0,"mail-code-source").on_hover_text(format!("来自：{}\n{}\n收件邮箱：{}\n{}",item.from,item.subject,item.account,item.time));
-            if c.hit(40.0,56.0,132.0,38.0,("mail-code",item.uid)).on_hover_text(format!("复制 {} 的验证码",item.from)).clicked(){cmds.push(Cmd::Copy(value.to_string()));self.code_copied(value);}
-        } else {
-            c.text(46.0,51.0,"邮件提醒",10.5,W::Regular,theme::GRAY,H::Left);
-            let w=c.text(46.0,75.0,&self.mail.recent.len().to_string(),21.0,W::Bold,theme::WHITE,H::Left);
-            c.text(48.0+w,75.0,"封",10.5,W::Regular,theme::GRAY,H::Left);
-            c.text(46.0,91.0,"最近收到",10.5,W::Regular,theme::GRAY,H::Left);
-            let ready=self.mail.accounts.iter().filter(|a|self.mail.status_of(&a.email).ok()).count();
-            let total=self.mail.accounts.len();
-            let status=if total==1 {
-                if !self.mail.accounts[0].enabled {"邮箱已暂停".into()}
-                else{match self.mail.status_of(&self.mail.accounts[0].email){
-                    mail::Status::Ready=>"邮箱已连接".into(),mail::Status::Connecting=>"正在连接…".into(),
-                    mail::Status::Auth(_)=>"需要授权码".into(),mail::Status::Failed(_)=>"连接失败".into(),mail::Status::Idle=>"等待连接".into(),
-                }}
-            }else if ready==total{format!("{total} 个邮箱已连接")}else if ready==0{"邮箱未连接".into()}else{"部分邮箱未连接".into()};
-            let color=if ready==total&&self.mail.accounts.iter().all(|a|a.enabled){theme::GREEN}else{theme::GRAY};
-            c.text(46.0,108.0,&c.fit(&status,10.5,W::Regular,120.0),10.5,W::Regular,color,H::Left);
+            if c.hit(40.0,56.0,132.0,38.0,("mail-code",item.uid)).on_hover_text(format!("复制 {} 的验证码",item.from)).clicked(){if hidden{self.reveal_mail_code(raw);}else{cmds.push(Cmd::Copy(value.to_string()));self.code_copied(value);}}
         }
-        if self.mail.recent.is_empty(){c.text(186.0,66.0,"还没有收到邮件",11.0,W::Regular,theme::GRAY,H::Left);return;}
+        let list_bounds=self.mail_list_bounds();
+        let list_x=list_bounds.left();
+        let list_w=list_bounds.width();
+        let row_w=list_w-12.0;
+        let compact=code.is_none();
+        let row_h=if compact {21.5}else{34.0};
+        if self.mail.recent.is_empty(){c.text(list_x+6.0,66.0,"还没有收到邮件",11.0,W::Regular,theme::GRAY,H::Left);return;}
         let mut content=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("mail-list",c.live)),
-            egui::UiBuilder::new().max_rect(c.rect(182.0,36.0,198.0,86.0)).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
-        content.set_clip_rect(c.rect(182.0,36.0,198.0,86.0).intersect(c.painter.clip_rect()));
+            egui::UiBuilder::new().max_rect(c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height())).layer_id(c.painter.layer_id()).style(c.ui.style().clone()));
+        content.set_clip_rect(c.rect(list_bounds.left(),list_bounds.top(),list_bounds.width(),list_bounds.height()).intersect(c.painter.clip_rect()));
         content.set_opacity(c.painter.opacity());if !c.live{content.disable();}
         content.spacing_mut().item_spacing.y=0.0;
         content.spacing_mut().scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         content.visuals_mut().widgets.inactive.bg_fill=Color32::from_gray(80);
-        egui::ScrollArea::vertical().id_salt("mail-list-scroll").max_height(86.0*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,34.0*c.s,self.mail.recent.len(),|ui,range|{
-            for item in &self.mail.recent[range] {
-                let (rect,_)=ui.allocate_exact_size(egui::vec2(186.0*c.s,34.0*c.s),egui::Sense::hover());
+        egui::ScrollArea::vertical().id_salt("mail-list-scroll").max_height(list_bounds.height()*c.s).auto_shrink([false,false]).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show_rows(&mut content,row_h*c.s,self.mail.recent.len(),|ui,range|{
+            let rows:Vec<_>=self.mail.recent[range].iter().map(|item|(self.mail_code_hidden(item),self.display_mail(item))).collect();
+            for (hidden,item) in &rows {
+                let (rect,_)=ui.allocate_exact_size(egui::vec2(row_w*c.s,row_h*c.s),egui::Sense::hover());
                 let mut row=Card::new(ui,rect.min,ui.clip_rect());row.s=c.s;row.live=c.live;
-                let hit=row.hit(0.0,0.0,186.0,33.0,("mail-row",item.uid,item.account.as_str()));
+                let hit=row.hit(0.0,0.0,row_w,row_h-1.0,("mail-row",item.uid,item.account.as_str()));
                 let selected=code.as_ref().is_some_and(|m|m.uid==item.uid&&m.account.eq_ignore_ascii_case(&item.account));
-                if hit.hovered()||selected{row.fill(0.0,0.0,186.0,32.0,6.0,Color32::from_gray(if hit.hovered(){27}else{17}));}
+                if hit.hovered()||selected{row.fill(0.0,0.0,row_w,row_h-2.0,6.0,Color32::from_gray(if hit.hovered(){27}else{17}));}
                 if selected{row.fill(0.0,6.0,2.0,20.0,1.0,theme::GREEN);}
-                row.text(6.0,12.0,&row.fit(&item.from,11.5,W::Semibold,132.0),11.5,W::Semibold,theme::WHITE,H::Left);
-                row.text(180.0,12.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
-                row.text(6.0,27.0,&row.fit(&item.subject,10.5,W::Regular,174.0),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                if compact {
+                    row.text(6.0,14.0,&row.fit(&item.from,11.0,W::Semibold,62.0),11.0,W::Semibold,theme::WHITE,H::Left);
+                    let subject_w=row_w-118.0-if *hidden {34.0}else{0.0};
+                    let width=row.text(74.0,14.0,&row.fit(&item.subject,10.5,W::Regular,subject_w),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                    if *hidden {
+                        row.fill(78.0+width,5.0,30.0,12.0,3.0,theme::BTN);
+                        row.text(93.0+width,14.0,"已隐藏",8.5,W::Regular,theme::GRAY,H::Center);
+                    }
+                    row.text(row_w-6.0,14.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
+                    row.seg((6.0,row_h-0.5),(row_w-6.0,row_h-0.5),0.5,Color32::from_gray(40));
+                } else {
+                row.text(6.0,12.0,&row.fit(&item.from,11.5,W::Semibold,row_w-54.0),11.5,W::Semibold,theme::WHITE,H::Left);
+                row.text(row_w-6.0,12.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,Color32::from_gray(170),H::Right);
+                row.text(6.0,27.0,&row.fit(&item.subject,10.5,W::Regular,row_w-12.0),10.5,W::Regular,Color32::from_gray(200),H::Left);
+                }
                 hit.clone().on_hover_text(format!("{}\n{}\n收件邮箱：{}\n{}",item.from,item.subject,item.account,item.time));
                 if hit.clicked(){self.mail.open_uid=Some((item.account.clone(),item.uid));}
             }
@@ -741,7 +1105,9 @@ impl App {
     }
 
     /// 岛内邮件详情可滚动，也可以进入独立窗口阅读全文。
-    pub(crate) fn mail_detail(&mut self, c: &Card, item: &mail::Item, cmds: &mut Vec<Cmd>) {
+    pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
+        let hidden=self.mail_code_hidden(raw);
+        let display=self.display_mail(raw);let item=&display;
         c.fill(36.0, 36.0, 347.0, 188.0, 11.0, theme::CARD);
         let back = c.hit(330.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
         let bh = c.hover_t(&back).0;
@@ -754,7 +1120,7 @@ impl App {
         c.text(46.0, 50.0, &from, 11.5, W::Semibold, theme::WHITE, H::Left);
         let read=c.hit(266.0,42.0,60.0,14.0,("mail-read",&item.account,item.uid)).on_hover_text("在独立窗口阅读完整正文");
         c.text(324.0,50.0,"阅读全文",10.5,W::Regular,if read.hovered(){theme::BLUE}else{theme::GRAY},H::Right);
-        if read.clicked(){self.mail.reading=Some(item.clone());self.mail.reader_focus=true;}
+        if read.clicked(){self.mail.reading=Some(raw.clone());self.mail.reader_focus=true;}
         let subject = c.fit(&item.subject, 13.5, W::Semibold, 328.0);
         c.text(46.0, 73.0, &subject, 13.5, W::Semibold, theme::WHITE, H::Left);
         c.hit(46.0,58.0,328.0,20.0,("mail-subject",&item.account,item.uid)).on_hover_text(&item.subject);
@@ -774,7 +1140,7 @@ impl App {
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
             if !item.summary.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(&item.summary).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(item.summary.as_ref()).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
             }else if item.links.is_empty(){
                 ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }
@@ -789,7 +1155,11 @@ impl App {
         // 底部一行：会议时间（绿）优先，其次验证码（点一下复制）。
         c.seg((46.0,199.0),(374.0,199.0),0.6,Color32::from_gray(48));
         let y = 214.0;
-        if let Some(m) = &item.meeting {
+        if hidden {
+            c.text(46.0,y,"验证码已隐藏（不代表失效）",11.0,W::Regular,theme::GRAY,H::Left);
+            c.text(374.0,y,"查看 15 秒",10.5,W::Regular,theme::BLUE,H::Right);
+            if c.hit(290.0,y-14.0,86.0,24.0,("mail-reveal",item.uid)).clicked(){self.reveal_mail_code(raw);}
+        } else if let Some(m) = &item.meeting {
             let ignored=self.mail_event_ignored(m);
             c.text(46.0,y,&format!("{} · {}",if ignored{"已忽略"}else{"日程"},m.at),10.5,W::Regular,if ignored{theme::DIM}else{theme::GREEN},H::Left);
             let label=if ignored{"恢复日程"}else{"忽略日程"};

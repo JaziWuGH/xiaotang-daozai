@@ -19,7 +19,7 @@ pub fn parse(v:&Value)->Result<Snapshot,String>{
     let reset=super::reset(&v["nextResetTimestampUtc"]);
     let seconds=super::reset(&v["currentPeriodStart"]).zip(reset).and_then(|(start,end)|end.checked_sub(start)).filter(|n|*n>0);
     let plan=["grokPlanLabel","cursorPlanName"].iter().find_map(|key|v[key].as_str().filter(|s|!s.trim().is_empty())).unwrap_or_default().to_owned();
-    Ok(Snapshot{plan,at:chrono::Utc::now().timestamp(),windows:vec![Window{label:if v["isUnified"].as_bool()==Some(true){"共享周额度"}else{"本周"}.into(),seconds,remaining:(100.0-used) as f32,reset}],extra:vec![]})
+    Ok(Snapshot{credits:None,wallet:None,plan,at:chrono::Utc::now().timestamp(),windows:vec![Window{label:if v["isUnified"].as_bool()==Some(true){"共享周额度"}else{"本周"}.into(),seconds,remaining:(100.0-used) as f32,reset}],extra:vec![]})
 }
 
 pub fn native_path()->Option<PathBuf>{std::env::var_os("APPDATA").map(|p|PathBuf::from(p).join("Grok Bot/sand-secrets.json")).filter(|p|p.is_file())}
@@ -152,6 +152,13 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
     let url=format!("{BACKEND}/aiserver.v1.DashboardService/GetSandUsageStatus");let mut result=usage_request(agent,&url,&auth.token);
     if own && auth.refresh.is_some() && matches!(&result,Err(ureq::Error::Status(401,_))){
         auth=renew(agent,&auth).map_err(|e|(e,0))?;save_session(slot,&auth).map_err(|e|(e,0))?;result=usage_request(agent,&url,&auth.token);
+    }
+    // 部分代理出口会对本接口返回 403 或连接失败（同一令牌直连可用），此时改走直连重试一次。
+    if let Err(error)=&result{
+        if matches!(error,ureq::Error::Status(403,_)|ureq::Error::Transport(_)){
+            let direct=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).redirects(0).build();
+            if let Ok(ok)=usage_request(&direct,&url,&auth.token){result=Ok(ok);}
+        }
     }
     let value=read_json(result.map_err(http_error)?).map_err(|e|(e,60))?;
     if !own && stamp!=fs::metadata(&account.source).and_then(|m|m.modified()).ok(){return Err(("Grok Bot 登录已更新，请刷新额度".into(),0));}

@@ -1,9 +1,57 @@
 //! 网易云原生播放事件：只读增量日志，不依赖 SMTC 或特定 DLL 版本。
-use super::{MediaKind,NowPlaying};
+use super::{MediaKind,NowPlaying,PlayMode};
 use std::{fs::File,io::{Read,Seek,SeekFrom},path::Path,sync::{mpsc,Arc},time::{Duration,Instant}};
 
 const MAX_READ:u64=4*1024*1024;
 const MAX_LINE:usize=256*1024;
+
+fn monotonic_millis()->u64 {
+    static CLOCK:std::sync::OnceLock<(Instant,u64)>=std::sync::OnceLock::new();
+    let (start,epoch)=CLOCK.get_or_init(||(Instant::now(),std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64));
+    epoch.saturating_add(start.elapsed().as_millis() as u64)
+}
+
+// 初次读取历史记录时，使用可读的本地日期恢复进度；实时推进只依赖 Instant。
+fn historical_millis(line:&str,now:u64)->Option<u64> {
+    use chrono::{Datelike,TimeZone};
+    let date=line.strip_prefix('[')?.split(':').nth(2)?;
+    let current=chrono::Local.timestamp_millis_opt(i64::try_from(now).ok()?).single()?;
+    for year in [current.year(),current.year()-1] {
+        if year<current.year() && !(current.month()==1 && date.starts_with("12")){break;}
+        let Some(time)=chrono::NaiveDateTime::parse_from_str(&format!("{year}/{date}"),"%Y/%m%d/%H%M%S").ok()
+            .and_then(|date|chrono::Local.from_local_datetime(&date).single()) else{continue;};
+        let Ok(millis)=u64::try_from(time.timestamp_millis()) else{continue;};
+        if millis<=now.saturating_add(1000){return Some(millis.min(now));}
+    }
+    None
+}
+
+/// 最近一次读到的时长，供「按秒定位」换算成进度条比例。
+static LAST_DURATION_MS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+/// 已经点过进度条的目标位置（毫秒，-1 表示没有），轮询线程据此校正本地时间轴。
+static PENDING_SEEK_MS:std::sync::atomic::AtomicI64=std::sync::atomic::AtomicI64::new(-1);
+static MODE_PROBED:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+
+/// 网易云日志里的模式名（"播放模式切换" 事件）。
+fn mode_from_log(name:&str)->Option<PlayMode> {
+    match name {
+        "playRandom"=>Some(PlayMode::Random),
+        "playOrder"=>Some(PlayMode::Order),
+        "playAi"|"playHeartbeat"=>Some(PlayMode::Heart),
+        "playCycle"=>Some(PlayMode::Cycle),
+        "playOneCycle"=>Some(PlayMode::OneCycle),
+        _=>None,
+    }
+}
+
+/// 日志行是 `"旧播放模式::","playRandom","新播放模式::","playOrder"`，取新值。
+fn mode_from_event(args:&str)->Option<PlayMode> {
+    let rest=args.split("新播放模式::").nth(1)?;
+    rest.split('"')
+        .map(|piece|piece.trim_matches(|c:char|c==','||c==' '))
+        .find_map(mode_from_log)
+}
 
 // elog 的逐字节替换格式，参考 https://github.com/344272586-sketch/dsh-pet-qqmusic/blob/main/lib/netease-elog.js
 fn decode(byte:u8)->u8 {
@@ -14,6 +62,7 @@ fn decode(byte:u8)->u8 {
 fn song_id(value:&serde_json::Value)->Option<u64>{value.as_u64().or_else(||value.as_str()?.parse().ok()).filter(|id|*id>0)}
 
 fn cover_url(value:&str)->Option<String>{
+    if value.len()>4096{return None;}
     let mut url=url::Url::parse(value).ok()?;
     let host=url.host_str()?;
     if !matches!(url.scheme(),"http"|"https") || !(host=="music.126.net" || host.ends_with(".music.126.net")){return None;}
@@ -25,20 +74,22 @@ fn track(value:&serde_json::Value)->Option<(NowPlaying,String)>{
     let t=value.get("track").unwrap_or(value);
     let id=song_id(t.get("id")?)?;
     let title=t.get("name")?.as_str()?.trim().to_owned();
-    let artist=t.get("artists")?.as_array()?.iter().filter_map(|a|a.get("name")?.as_str()).collect::<Vec<_>>().join("/");
-    if title.is_empty() || artist.is_empty(){return None;}
+    let artist=t.get("artists").and_then(|a|a.as_array()).map(|a|a.iter().filter_map(|a|a.get("name")?.as_str()).collect::<Vec<_>>().join("/")).unwrap_or_default();
+    let album=t.pointer("/album/name").and_then(|v|v.as_str()).unwrap_or_default();
+    if title.is_empty(){return None;}
+    if [title.len(),artist.len(),album.len()].into_iter().any(|size|size>4096){crate::resources::REJECTED_DATA.fetch_add(1,std::sync::atomic::Ordering::Relaxed);return None;}
     let duration=t.get("duration").and_then(|v|v.as_f64()).unwrap_or_default()/1000.0;
     if !duration.is_finite() || !(0.0..86400.0).contains(&duration){return None;}
     let cover=t.pointer("/album/picUrl").and_then(|v|v.as_str()).and_then(cover_url).unwrap_or_default();
-    Some((NowPlaying{title,artist,album:t.pointer("/album/name").and_then(|v|v.as_str()).unwrap_or_default().into(),
+    Some((NowPlaying{title,artist,album:album.into(),
         source:"cloudmusic.exe".into(),song_id:Some(id),duration,playback_type:MediaKind::Music,..Default::default()},cover))
 }
 
 #[derive(Default)]
-struct Playback {media:NowPlaying,artwork_url:String,at:u64,ready:bool}
+struct Playback {media:NowPlaying,artwork_url:String,at:u64,observed_at:u64,ready:bool}
 impl Playback {
     fn position(&self,now:u64)->f64{
-        let position=self.media.position+if self.media.playing {now.saturating_sub(self.at)as f64/1000.0}else{0.0};
+        let position=self.media.position+if self.media.playing {now.saturating_sub(self.observed_at)as f64/1000.0}else{0.0};
         if self.media.duration>0.0{position.min(self.media.duration)}else{position}
     }
     fn metadata(&mut self,(metadata,cover):(NowPlaying,String)){
@@ -51,7 +102,8 @@ impl Playback {
         let Some((header,body))=line.strip_prefix('[').and_then(|s|s.split_once(']'))else{return;};
         let mut parts=header.split(':');
         if parts.next().and_then(|s|s.parse::<u32>().ok())!=Some(pid){return;}
-        let Some(at)=parts.nth(2).and_then(|s|s.parse::<u64>().ok()).filter(|at|*at<=now.saturating_add(1000) && *at>=self.at)else{return;};
+        // 日志计数只比较事件先后，不能与本机单调时钟相减。
+        let Some(at)=parts.nth(2).and_then(|s|s.parse::<u64>().ok()).filter(|at|*at>=self.at)else{return;};
         if body.contains("\"exitApp\""){*self=Self::default();return;}
         // 只解析播放事件；音频签名链接、Cookie 等其他日志内容不会进入状态或缓存。
         let Some((_,body))=body.split_once("【playing】,")else{return;};
@@ -60,23 +112,27 @@ impl Playback {
             let Some(metadata)=serde_json::from_str(args).ok().as_ref().and_then(track)else{return;};
             if self.media.song_id!=metadata.0.song_id {
                 if event=="checkPlayPrivilege" && self.media.song_id.is_some(){return;}
-                *self=Self{media:metadata.0,artwork_url:metadata.1,at,ready:false};
+                *self=Self{media:metadata.0,artwork_url:metadata.1,at,observed_at:now,ready:false};
             }else{self.metadata(metadata);}
+        }else if event=="播放模式切换"{
+            if let Some(mode)=mode_from_event(args){super::set_play_mode(mode);}
         }else if event.starts_with("native") && event.contains("load完成"){
             let Some(id)=serde_json::from_str::<serde_json::Value>(args).ok().and_then(|v|song_id(v.get("songId")?))else{return;};
             if self.media.song_id!=Some(id){*self=Self::default();self.media.song_id=Some(id);}
-            self.media.position=0.0;self.media.playing=true;self.at=at;self.ready=true;
+            self.media.position=0.0;self.media.playing=true;self.at=at;self.observed_at=now;self.ready=true;
         }else if event=="setPlayingPosition" && self.media.song_id.is_some(){
             let Some(position)=args.split(',').next().and_then(|s|s.trim().parse::<f64>().ok()).filter(|p|p.is_finite() && (0.0..86400.0).contains(p))else{return;};
-            self.media.position=position;self.at=at;self.ready=true;
+            self.media.position=position;self.at=at;self.observed_at=now;self.ready=true;
         }else if event.starts_with("native") && event.ends_with("state") && self.media.song_id.is_some(){
             let Some(status)=args.split(',').next().and_then(|s|s.trim().parse::<u8>().ok()).filter(|s|matches!(s,1|2))else{return;};
-            self.media.position=self.position(at);self.media.playing=status==1;self.at=at;self.ready=true;
+            self.media.position=self.position(now);self.media.playing=status==1;self.at=at;self.observed_at=now;self.ready=true;
         }
     }
     fn snapshot(&self,now:u64)->Option<NowPlaying>{
         if !self.ready || !self.media.is_music(){return None;}
-        let mut media=self.media.clone();media.position=self.position(now);media.sampled_at=Some(std::time::Instant::now());Some(media)
+        let mut media=self.media.clone();media.position=self.position(now);media.sampled_at=Some(std::time::Instant::now());
+        media.event_time_ms=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()
+            .map(|utc|(utc.as_millis() as u64).saturating_sub(now.saturating_sub(self.observed_at)));Some(media)
     }
 }
 
@@ -85,11 +141,15 @@ struct CoverCache {
     url:String,image:Option<Arc<eframe::egui::ColorImage>>,
     pending:Option<mpsc::Receiver<Option<Arc<eframe::egui::ColorImage>>>>,
     retry_at:Option<Instant>,
+    worker:Option<std::thread::JoinHandle<()>>,
 }
 impl CoverCache {
     fn get(&mut self,url:&str)->Option<Arc<eframe::egui::ColorImage>>{
+        self.get_with(url,fetch_cover)
+    }
+    fn get_with(&mut self,url:&str,load:impl FnOnce(&str)->Option<Arc<eframe::egui::ColorImage>>+Send+'static)->Option<Arc<eframe::egui::ColorImage>>{
         // 切歌时丢弃旧请求的接收端，迟到的封面不能覆盖新歌。
-        if self.url!=url{*self=Self{url:url.into(),..Default::default()};}
+        if self.url!=url{*self=Self{url:url.into(),worker:self.worker.take(),..Default::default()};}
         if self.url.is_empty(){return None;}
         if let Some(receiver)=&self.pending{
             match receiver.try_recv(){
@@ -98,14 +158,61 @@ impl CoverCache {
                 Err(mpsc::TryRecvError::Empty)=>{}
             }
         }
-        if self.image.is_none() && self.pending.is_none() && self.retry_at.is_none_or(|at|Instant::now()>=at){
+        if self.image.is_none() && self.pending.is_none() && self.worker.as_ref().is_none_or(|worker|worker.is_finished()) && self.retry_at.is_none_or(|at|Instant::now()>=at){
             let (sender,receiver)=mpsc::channel();let url=self.url.clone();
             self.pending=Some(receiver);self.retry_at=Some(Instant::now()+Duration::from_secs(3));
             // 网络与解码不占用媒体轮询线程，歌词时间轴继续正常推进。
-            std::thread::spawn(move||{let _=sender.send(fetch_cover(&url));});
+            self.worker=crate::resources::COVER.spawn(move||{let _=sender.send(load(&url));});
+            if self.worker.is_none(){self.pending=None;}
         }
         self.image.clone()
     }
+}
+
+#[test]
+fn resource_cache_recreation_cannot_bypass_download_limit(){
+    use std::sync::{Condvar,Mutex,atomic::{AtomicUsize,Ordering}};
+    let gate=Arc::new((Mutex::new(false),Condvar::new()));let started=Arc::new(AtomicUsize::new(0));
+    for _ in 0..30 {
+        let mut cache=CoverCache::default();let gate=gate.clone();let started=started.clone();
+        cache.get_with("cover",move |_|{
+            started.fetch_add(1,Ordering::SeqCst);
+            let _released=gate.1.wait_while(gate.0.lock().unwrap(),|open|!*open).unwrap();None
+        });
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let count=started.load(Ordering::SeqCst);
+    *gate.0.lock().unwrap()=true;gate.1.notify_all();
+    assert!(count<=2,"重建缓存绕过了并发上限，产生 {count} 个下载线程");
+}
+
+#[test]
+fn stalled_cover_requests_do_not_accumulate_threads_when_tracks_change(){
+    use std::sync::{Condvar,Mutex,atomic::{AtomicUsize,Ordering}};
+    let gate=Arc::new((Mutex::new(false),Condvar::new()));
+    let started=Arc::new(AtomicUsize::new(0));let active=Arc::new(AtomicUsize::new(0));
+    let mut cache=CoverCache::default();
+    for song in 0..40 {
+        let gate=gate.clone();let started=started.clone();let active=active.clone();
+        cache.get_with(&format!("cover-{song}"),move |_|{
+            active.fetch_add(1,Ordering::SeqCst);started.fetch_add(1,Ordering::SeqCst);
+            let (lock,ready)=&*gate;let _guard=ready.wait_while(lock.lock().unwrap(),|released|!*released).unwrap();
+            active.fetch_sub(1,Ordering::SeqCst);None
+        });
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let count=started.load(Ordering::SeqCst);
+    *gate.0.lock().unwrap()=true;gate.1.notify_all();
+    let until=Instant::now()+Duration::from_secs(2);
+    while active.load(Ordering::SeqCst)>0 && Instant::now()<until {std::thread::sleep(Duration::from_millis(5));}
+    assert_eq!(count,1,"旧封面请求阻塞时，切歌不能继续创建新下载线程");
+    assert_eq!(active.load(Ordering::SeqCst),0,"解除阻塞后旧下载线程应结束");
+    cache.worker.take().unwrap().join().unwrap();
+    let image=Arc::new(eframe::egui::ColorImage::new([2,2],eframe::egui::Color32::BLUE));
+    let current=image.clone();
+    cache.get_with("cover-39",move |url|{assert_eq!(url,"cover-39");Some(current)});
+    cache.worker.take().unwrap().join().unwrap();
+    assert!(Arc::ptr_eq(&cache.get_with("cover-39",|_|panic!("已有封面不应再次下载")).unwrap(),&image),"旧请求结束后应继续加载当前歌曲");
 }
 
 #[test]
@@ -129,16 +236,20 @@ fn fetch_cover(url:&str)->Option<Arc<eframe::egui::ColorImage>>{
 pub(super) struct Reader {
     pid:u32,offset:u64,prefix:Vec<u8>,carry:Vec<u8>,skip_line:bool,
     playback:Playback,lookup:(Option<u64>,u64),cover:CoverCache,
+    queue_print:Vec<Option<(std::time::SystemTime,u64)>>,
 }
 impl Reader {
     pub(super) fn pending(&self)->bool {
         self.pid!=0 && self.playback.media.song_id.is_some() && (!self.playback.ready || !self.playback.media.is_music())
     }
-    fn ingest(&mut self,bytes:&[u8],now:u64){
+    fn ingest(&mut self,bytes:&[u8],now:u64,replay:bool){
         for byte in bytes.iter().copied().map(decode){
             if byte==b'\n'{
                 if !self.skip_line{
-                    if let Ok(line)=std::str::from_utf8(&self.carry){self.playback.line(line,self.pid,now);}
+                    if let Ok(line)=std::str::from_utf8(&self.carry){
+                        let observed=if replay{historical_millis(line,now).unwrap_or(now)}else{now};
+                        self.playback.line(line,self.pid,observed);
+                    }
                 }
                 self.carry.clear();self.skip_line=false;
             }else if !self.skip_line{
@@ -159,20 +270,36 @@ impl Reader {
             if start>self.offset{self.carry.clear();self.skip_line=true;}
             file.seek(SeekFrom::Start(start)).ok()?;
             let mut bytes=vec![0;(size-start)as usize];file.read_exact(&mut bytes).ok()?;
-            self.offset=size;self.ingest(&bytes,now);
+            let replay=self.offset==0;
+            self.offset=size;self.ingest(&bytes,now,replay);
         }
         // 启动时续播可能只写歌曲 ID，按该 ID 补充本地队列里的元数据。
         let id=self.playback.media.song_id;
         if id.is_some() && (!self.playback.media.is_music() || self.playback.artwork_url.is_empty()) && (self.lookup.0!=id || now.saturating_sub(self.lookup.1)>=5000){
+            let root=path.parent()?;
+            // 队列文件可达 8MB：同一首歌且文件没有变化时不重复解析（这首歌本来就没有封面时会一直满足上面的条件）。
+            let print=queue_fingerprint(root);
+            if self.lookup.0!=id || self.queue_print!=print {
+                self.queue_print=print;
+                if let Some(metadata)=queue_track(root,id?){self.playback.metadata(metadata);}
+            }
             self.lookup=(id,now);
-            if let Some(metadata)=queue_track(path.parent()?,id?){self.playback.metadata(metadata);}
+        }
+        // 时长给「按秒定位」换算比例用；点过进度条后把本地时间轴对齐到目标位置，
+        // 因为这个版本的日志不再上报 setPlayingPosition，拖完不校正就会继续按旧起点外推。
+        let duration=self.playback.media.duration;
+        if duration>0.0 {LAST_DURATION_MS.store((duration*1000.0) as u64,std::sync::atomic::Ordering::Relaxed);}
+        let pending=PENDING_SEEK_MS.swap(-1,std::sync::atomic::Ordering::Relaxed);
+        if pending>=0 && self.playback.media.song_id.is_some() {
+            self.playback.media.position=pending as f64/1000.0;
+            self.playback.at=now;
         }
         self.playback.snapshot(now)
     }
     pub(super) fn poll(&mut self)->Option<NowPlaying>{
         let path=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("NetEase/CloudMusic/cloudmusic.elog");
         let sampled=std::time::Instant::now();
-        let mut media=self.read(&path,process_id(),unsafe{windows::Win32::System::SystemInformation::GetTickCount64()})?;
+        let mut media=self.read(&path,process_id(),monotonic_millis())?;
         if self.cover.url==self.playback.artwork_url{media.artwork=self.cover.image.clone();}
         media.sampled_at=Some(sampled);Some(media)
     }
@@ -183,8 +310,14 @@ impl Reader {
     }
 }
 
+const QUEUE_FILES:[(&str,&str);2]=[("playingList","list"),("fmPlay","queue")];
+
+fn queue_fingerprint(root:&Path)->Vec<Option<(std::time::SystemTime,u64)>>{
+    QUEUE_FILES.iter().map(|(file,_)|std::fs::metadata(root.join("webdata/file").join(file)).ok().and_then(|meta|Some((meta.modified().ok()?,meta.len())))).collect()
+}
+
 fn queue_track(root:&Path,id:u64)->Option<(NowPlaying,String)>{
-    for (file,key) in [("playingList","list"),("fmPlay","queue")]{
+    for (file,key) in QUEUE_FILES{
         let Some(value)=(||{
             let file=File::open(root.join("webdata/file").join(file)).ok()?;
             if file.metadata().ok()?.len()>8*1024*1024{return None;}
@@ -216,9 +349,268 @@ pub(super) fn control(command:super::Transport){
     }}
 }
 
+// ---------------------------------------------------------------
+// 界面通道（网易云 3.x）：
+// - 播放模式按钮是标准 UIA 按钮，名字随模式变化，可以直接 Invoke 切换；
+// - 进度条不在 UIA 树里，也没有定位热键，只能按像素位置点它。
+// ---------------------------------------------------------------
+/// 底栏模式按钮的 UIA 名称 → 播放模式。
+fn mode_from_button(name:&str)->Option<PlayMode> {
+    match name {
+        "shuffle"=>Some(PlayMode::Random),
+        "order"=>Some(PlayMode::Order),
+        "heartbeat"=>Some(PlayMode::Heart),
+        "loop"=>Some(PlayMode::Cycle),
+        "singleloop"=>Some(PlayMode::OneCycle),
+        _=>None,
+    }
+}
+
+#[cfg(windows)]
+fn mode_button()->Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
+    use windows::core::{w,PCWSTR};
+    use windows::Win32::System::Com::{CoCreateInstance,CoInitializeEx,CLSCTX_ALL,COINIT_MULTITHREADED};
+    use windows::Win32::UI::Accessibility::{CUIAutomation,IUIAutomation,TreeScope_Descendants};
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    unsafe{
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let window=FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null()).ok()?;
+        let automation:IUIAutomation=CoCreateInstance(&CUIAutomation,None,CLSCTX_ALL).ok()?;
+        let root=automation.ElementFromHandle(window).ok()?;
+        let condition=automation.CreateTrueCondition().ok()?;
+        // 首次查询会让网易云异步构建无障碍树，前几次可能只拿到半个树，轮询等它建好。
+        for attempt in 0..6 {
+            if attempt>0 {std::thread::sleep(Duration::from_millis(400));}
+            let Ok(elements)=root.FindAll(TreeScope_Descendants,&condition) else{continue;};
+            for index in 0..elements.Length().unwrap_or(0) {
+                let Ok(element)=elements.GetElement(index) else{continue;};
+                if element.CurrentControlType().map(|kind|kind.0).unwrap_or_default()!=50000 {continue;}
+                let name=element.CurrentName().map(|name|name.to_string()).unwrap_or_default();
+                if mode_from_button(&name).is_some(){return Some(element);}
+            }
+        }
+        None
+    }
+}
+
+/// 读当前播放模式；首次读取会让网易云构建无障碍树，耗时约一秒。
+#[cfg(windows)]
+fn read_play_mode()->Option<PlayMode> {
+    let button=mode_button()?;
+    let name=unsafe{button.CurrentName().ok()?.to_string()};
+    mode_from_button(&name)
+}
+
+/// 点击模式按钮后的下一个模式。3.1.42 实测顺序：
+/// 随机 → 顺序 → 心动 → 列表循环 → 单曲循环 → 随机。
+fn next_mode(mode:PlayMode)->PlayMode {
+    match mode {
+        PlayMode::Random=>PlayMode::Order,
+        PlayMode::Order=>PlayMode::Heart,
+        PlayMode::Heart=>PlayMode::Cycle,
+        PlayMode::Cycle=>PlayMode::OneCycle,
+        PlayMode::OneCycle=>PlayMode::Random,
+        PlayMode::Unknown=>PlayMode::Unknown,
+    }
+}
+
+/// 底栏按钮行的位置（3.1.42 实测）：播放控制组以暂停键居中，
+/// 按钮行中心距客户区底 40px，模式按钮在水平中心左侧 92px。
+#[cfg(windows)]
+const MODE_BUTTON_FROM_BOTTOM:i32=40;
+#[cfg(windows)]
+const MODE_BUTTON_FROM_CENTER:i32=92;
+
+/// 点一下底栏的模式按钮。和进度条一样只投递窗口消息：
+/// 不显示窗口、不动光标、不抢前台，网易云收在托盘时也能点。
+#[cfg(windows)]
+fn click_mode_button()->bool {
+    use windows::Win32::Foundation::{LPARAM,RECT,WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect,PostMessageW,WM_LBUTTONDOWN,WM_LBUTTONUP,WM_MOUSEMOVE};
+    const MK_LBUTTON:usize=0x0001;
+    let Some(window)=render_widget() else{trace("mode: 找不到渲染窗口");return false;};
+    unsafe{
+        let mut rect=RECT::default();
+        if GetClientRect(window,&mut rect).is_err(){trace("mode: GetClientRect 失败");return false;}
+        let (width,height)=(rect.right-rect.left,rect.bottom-rect.top);
+        if width<400 || height<300 {trace(&format!("mode: 客户区过小 {width}x{height}"));return false;}
+        let x=width/2-MODE_BUTTON_FROM_CENTER;
+        let y=height-MODE_BUTTON_FROM_BOTTOM;
+        let point=((y as isize)<<16)|(x as isize & 0xFFFF);
+        trace(&format!("mode: client={width}x{height} point=({x},{y})"));
+        let _=PostMessageW(window,WM_MOUSEMOVE,WPARAM(0),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(40));
+        let _=PostMessageW(window,WM_LBUTTONDOWN,WPARAM(MK_LBUTTON),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(50));
+        let _=PostMessageW(window,WM_LBUTTONUP,WPARAM(0),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    true
+}
+
+/// 切到下一个播放模式。点完立刻按固定顺序前移本地状态，图标不用等日志回读就变；
+/// 网易云随后写下的「播放模式切换」事件会以真实值覆盖，偏差最多一帧。
+#[cfg(windows)]
+pub(super) fn cycle_play_mode()->bool {
+    if !click_mode_button(){return false;}
+    if let Some(mode)=Some(next_mode(super::play_mode())).filter(|mode|*mode!=PlayMode::Unknown){super::set_play_mode(mode);}
+    true
+}
+
+/// 启动后补一次模式读取（网易云没切过模式时日志里没有事件）。
+/// 只在窗口本来就可见时读，不为了读模式去弹窗口。
+#[cfg(windows)]
+pub(super) fn probe_play_mode_once() {
+    use std::sync::atomic::Ordering;
+    use windows::core::{w,PCWSTR};
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW,IsWindowVisible};
+    if super::play_mode()!=PlayMode::Unknown {return;}
+    if MODE_PROBED.load(Ordering::Relaxed) {return;}
+    // 先便宜地看一眼窗口：收在托盘时 UIA 树是空的，读了也是白读，别为此反复起线程。
+    let visible=unsafe{FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null())
+        .map(|window|IsWindowVisible(window).as_bool()).unwrap_or(false)};
+    if !visible {return;}
+    if MODE_PROBED.swap(true,Ordering::Relaxed) {return;}
+    std::thread::spawn(||{
+        if let Some(mode)=read_play_mode(){super::set_play_mode(mode);}
+    });
+}
+
+/// 定位过程的诊断日志：只在 debug 构建里写到临时目录，发布版本是空实现。
+fn trace(message:&str){
+    #[cfg(debug_assertions)]{
+        use std::io::Write;
+        let stamp=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_secs()).unwrap_or(0);
+        if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(std::env::temp_dir().join("daozai-seek.log")){
+            let _=writeln!(file,"[{stamp}] {message}");
+        }
+    }
+    #[cfg(not(debug_assertions))] let _=message;
+}
+
+/// 底栏高度与进度条在其中的位置按 3.1.42 实测：进度条在底栏顶部，距客户区底 82px。
+#[cfg(windows)]
+fn click_progress(fraction:f64)->bool {
+    use windows::Win32::Foundation::{LPARAM,RECT,WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect,PostMessageW,WM_LBUTTONDOWN,WM_LBUTTONUP,WM_MOUSEMOVE};
+    const BAR_FROM_BOTTOM:i32=82;
+    const BAR_MARGIN:f64=8.0;
+    const MK_LBUTTON:usize=0x0001;
+    // 只把消息投给 CEF 的渲染子窗口：抬前台或移动光标都会打断用户，而顶层窗口不处理鼠标消息。
+    let Some(window)=render_widget() else{trace("click: 找不到渲染窗口");return false;};
+    unsafe{
+        let mut rect=RECT::default();
+        if GetClientRect(window,&mut rect).is_err(){trace("click: GetClientRect 失败");return false;}
+        let (width,height)=(rect.right-rect.left,rect.bottom-rect.top);
+        if width<400 || height<300 {trace(&format!("click: 客户区过小 {width}x{height}"));return false;}
+        let x=(BAR_MARGIN+fraction.clamp(0.0,1.0)*(width as f64-BAR_MARGIN*2.0)) as i32;
+        let y=height-BAR_FROM_BOTTOM;
+        let point=((y as isize)<<16)|(x as isize & 0xFFFF);
+        trace(&format!("click: frac={fraction:.3} client={width}x{height} point=({x},{y})"));
+        let _=PostMessageW(window,WM_MOUSEMOVE,WPARAM(0),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(40));
+        let _=PostMessageW(window,WM_LBUTTONDOWN,WPARAM(MK_LBUTTON),LPARAM(point));
+        std::thread::sleep(Duration::from_millis(50));
+        let _=PostMessageW(window,WM_LBUTTONUP,WPARAM(0),LPARAM(point));
+    }
+    true
+}
+
+/// 网易云的鼠标事件由 CEF 的渲染窗口接收：
+/// OrpheusBrowserHost → CefBrowserWindow → Chrome_WidgetWin_0 → Chrome_RenderWidgetHostHWND。
+#[cfg(windows)]
+fn render_widget()->Option<windows::Win32::Foundation::HWND>{
+    use windows::core::w;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{FindWindowW,GetClassNameW,GetWindow,GW_CHILD,GW_HWNDNEXT};
+    unsafe fn child(parent:HWND,class:&str)->Option<HWND>{
+        let mut child=GetWindow(parent,GW_CHILD).ok()?;
+        loop {
+            let mut name=[0u16;128];
+            let length=GetClassNameW(child,&mut name) as usize;
+            if String::from_utf16_lossy(&name[..length.min(128)])==class {return Some(child);}
+            child=GetWindow(child,GW_HWNDNEXT).ok()?;
+        }
+    }
+    unsafe{
+        let top=FindWindowW(w!("OrpheusBrowserHost"),None).ok()?;
+        let cef=child(top,"CefBrowserWindow")?;
+        let host=child(cef,"Chrome_WidgetWin_0")?;
+        child(host,"Chrome_RenderWidgetHostHWND")
+    }
+}
+
+/// 秒 → 进度条比例。时长未知时不猜，直接放弃（宁可不跳，也不要跳错位置）。
+fn seek_fraction(seconds:f64,duration:f64)->Option<f64>{
+    if !(duration>0.0) || !seconds.is_finite() {return None;}
+    Some((seconds.max(0.0)/duration).clamp(0.0,1.0))
+}
+
+/// 定位到第 `seconds` 秒。日志不上报位置，点击成功后由轮询线程接管本地时间轴。
+/// `fallback` 是界面侧已知的总时长：日志里还没读到元数据时（续播、日志滚动）用它换算。
+#[cfg(windows)]
+pub(super) fn seek(seconds:f64,fallback:f64)->bool {
+    use std::sync::atomic::Ordering;
+    let mut duration=LAST_DURATION_MS.load(Ordering::Relaxed) as f64/1000.0;
+    if !(duration>0.0) {duration=fallback;}
+    let Some(fraction)=seek_fraction(seconds,duration) else{
+        trace(&format!("seek: 没有时长 seconds={seconds:.2} fallback={fallback:.2}"));
+        return false;
+    };
+    trace(&format!("seek: seconds={seconds:.2} duration={duration:.2} frac={fraction:.3}"));
+    if !click_progress(fraction) {trace("seek: 点击失败");return false;}
+    PENDING_SEEK_MS.store((seconds.max(0.0)*1000.0) as i64,Ordering::Relaxed);
+    true
+}
+
 #[cfg(test)]
 mod tests{
     use super::*;
+    #[test]
+    fn log_clock_origin_does_not_change_playback_position(){
+        for origin in [0,9_000_000_000] {
+            let mut state=Playback::default();
+            state.line(&event(7,origin+1000,&metadata()),7,8_000_000);
+            state.line(&event(7,origin+2000,"\"native播放资源load完成\",{\"songId\":\"123\"}"),7,8_000_000);
+            assert_eq!(state.snapshot(8_001_000).unwrap().position,1.0);
+            state.line(&event(7,origin+3000,"\"native播放state\",2"),7,8_002_000);
+            assert_eq!(state.snapshot(8_010_000).unwrap().position,2.0);
+            state.line(&event(7,origin+4000,"\"setPlayingPosition\",30"),7,8_010_000);
+            state.line(&event(7,origin+5000,"\"native播放state\",1"),7,8_011_000);
+            assert_eq!(state.snapshot(8_012_000).unwrap().position,31.0);
+            state.line(&event(7,origin+2500,"\"setPlayingPosition\",200"),7,8_012_000);
+            assert_eq!(state.snapshot(8_013_000).unwrap().position,32.0);
+        }
+    }
+    #[test]
+    fn historical_replay_restores_mid_song_and_then_uses_local_elapsed_time(){
+        use chrono::TimeZone;
+        let now=chrono::Local.with_ymd_and_hms(2026,11,3,17,0,13).single().unwrap().timestamp_millis() as u64;
+        let raw=event(7,9_000_000_001,&metadata())
+            +&event(7,9_000_000_002,"\"native播放资源load完成\",{\"songId\":\"123\"}")
+            +&event(7,9_000_000_003,"\"native播放state\",2").replace("170000","170005")
+            +&event(7,9_000_000_004,"\"native播放state\",1").replace("170000","170010");
+        let mut reader=Reader{pid:7,..Default::default()};
+        reader.ingest(&encode(&raw),now,true);
+        assert_eq!(reader.playback.snapshot(now).unwrap().position,8.0);
+        reader.ingest(&encode(&event(7,9_000_000_005,"\"setPlayingPosition\",40")),now+1000,false);
+        assert_eq!(reader.playback.snapshot(now+3000).unwrap().position,42.0);
+    }
+
+    #[test]
+    fn historical_date_handles_new_year_without_using_log_counter(){
+        use chrono::TimeZone;
+        let now=chrono::Local.with_ymd_and_hms(2027,1,1,0,0,2).single().unwrap().timestamp_millis() as u64;
+        let line=event(7,42,"\"native播放state\",1").replace("1103/170000","1231/235959");
+        assert_eq!(historical_millis(&line,now),Some(now-3000));
+        let future=event(7,42,"\"native播放state\",1").replace("1103/170000","0101/000010");
+        assert_eq!(historical_millis(&future,now),None,"未来时间不能被误认为去年的事件");
+    }
+    #[test]
+    fn incomplete_artist_does_not_discard_a_known_native_song(){
+        let (media,_)=track(&serde_json::json!({"id":123,"name":"待补全的歌曲","duration":120000})).unwrap();
+        assert!(media.artist.is_empty() && media.is_music());assert_eq!(media.song_id,Some(123));
+    }
     #[test]
     fn transport_uses_only_netease_local_commands(){
         use super::super::Transport;
@@ -227,6 +619,46 @@ mod tests{
         assert_eq!(control_hotkey(Transport::Prev),Some("prev_local"));
         assert_eq!(control_hotkey(Transport::Seek(30.0)),None);
     }
+    #[test]
+    fn play_mode_names_map_to_modes(){
+        use super::super::PlayMode;
+        // 日志：旧 -> 新，取新值
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playRandom\",\"新播放模式::\",\"playOrder\""),Some(PlayMode::Order));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playOrder\",\"新播放模式::\",\"playAi\""),Some(PlayMode::Heart));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playAi\",\"新播放模式::\",\"playCycle\""),Some(PlayMode::Cycle));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playCycle\",\"新播放模式::\",\"playOneCycle\""),Some(PlayMode::OneCycle));
+        assert_eq!(mode_from_event("\"旧播放模式::\",\"playOneCycle\",\"新播放模式::\",\"playRandom\""),Some(PlayMode::Random));
+        assert_eq!(mode_from_event("没有模式字段"),None);
+        // UIA 按钮名（3.1.42 实测）
+        for (button,mode) in [("shuffle",PlayMode::Random),("order",PlayMode::Order),("heartbeat",PlayMode::Heart),("loop",PlayMode::Cycle),("singleloop",PlayMode::OneCycle)]{
+            assert_eq!(mode_from_button(button),Some(mode),"{button} 应映射到 {}",mode.label());
+        }
+        assert_eq!(mode_from_button("pause"),None);
+    }
+
+    #[test]
+    fn play_mode_cycle_order_matches_the_client(){
+        use super::super::PlayMode;
+        // 3.1.42 实测：随机 → 顺序 → 心动 → 列表循环 → 单曲循环 → 随机。
+        assert_eq!(next_mode(PlayMode::Random),PlayMode::Order);
+        assert_eq!(next_mode(PlayMode::Order),PlayMode::Heart);
+        assert_eq!(next_mode(PlayMode::Heart),PlayMode::Cycle);
+        assert_eq!(next_mode(PlayMode::Cycle),PlayMode::OneCycle);
+        assert_eq!(next_mode(PlayMode::OneCycle),PlayMode::Random);
+        assert_eq!(next_mode(PlayMode::Unknown),PlayMode::Unknown,"当前模式未知时不猜下一个");
+    }
+
+    #[test]
+    fn seek_fraction_maps_seconds_onto_the_bar(){
+        assert_eq!(seek_fraction(50.0,250.0),Some(0.2));
+        assert_eq!(seek_fraction(0.0,250.0),Some(0.0));
+        assert_eq!(seek_fraction(-30.0,250.0),Some(0.0),"-30 秒要贴在左端，不能抛出去");
+        assert_eq!(seek_fraction(999.0,250.0),Some(1.0),"> 时长要贴在右端");
+        assert_eq!(seek_fraction(50.0,0.0),None,"时长未知时不跳");
+        assert_eq!(seek_fraction(50.0,-1.0),None);
+        assert_eq!(seek_fraction(f64::NAN,250.0),None);
+    }
+
     #[test]
     fn native_track_reads_public_album_cover_and_clears_it_on_song_change(){
         let mut state=Playback::default();
@@ -268,32 +700,32 @@ mod tests{
     #[test]
     fn native_log_tracks_load_pause_resume_seek_and_ignores_other_processes(){
         let mut state=Playback::default();
-        state.line(&event(7,1000,&metadata()),7,10000);assert!(state.snapshot(1500).is_none());
-        state.line(&event(7,2000,"\"native播放资源load完成，开始播放\",{\"songId\":\"123\"}"),7,10000);
+        state.line(&event(7,1000,&metadata()),7,1000);assert!(state.snapshot(1500).is_none());
+        state.line(&event(7,2000,"\"native播放资源load完成，开始播放\",{\"songId\":\"123\"}"),7,2000);
         assert_eq!(state.snapshot(3000).unwrap().position,1.0);
-        state.line(&event(8,3500,"\"setPlayingPosition\",99"),7,10000);
-        state.line(&event(7,4000,"\"native播放state\",2"),7,10000);
+        state.line(&event(8,3500,"\"setPlayingPosition\",99"),7,3500);
+        state.line(&event(7,4000,"\"native播放state\",2"),7,4000);
         assert_eq!(state.snapshot(8000).unwrap().position,2.0);
-        state.line(&event(7,5000,"\"setPlayingPosition\",30.5"),7,10000);
-        state.line(&event(7,6000,"\"native播放state\",1"),7,10000);
+        state.line(&event(7,5000,"\"setPlayingPosition\",30.5"),7,5000);
+        state.line(&event(7,6000,"\"native播放state\",1"),7,6000);
         let media=state.snapshot(7000).unwrap();assert!(media.playing);assert_eq!(media.position,31.5);assert_eq!(media.song_id,Some(123));
-        state.line(&event(7,8000,"\"setPlayingPosition\",NaN"),7,10000);assert_eq!(state.snapshot(8000).unwrap().position,32.5);
-        state.line(&event(7,9000,"\"exitApp\""),7,10000);assert!(state.snapshot(10000).is_none());
+        state.line(&event(7,8000,"\"setPlayingPosition\",NaN"),7,8000);assert_eq!(state.snapshot(8000).unwrap().position,32.5);
+        state.line(&event(7,9000,"\"exitApp\""),7,9000);assert!(state.snapshot(10000).is_none());
     }
     #[test]
     fn native_log_handles_partial_utf8_and_new_process_without_stale_tracks(){
         let dir=std::env::temp_dir().join(format!("daozai-elog-{}",std::process::id()));std::fs::create_dir_all(&dir).unwrap();let path=dir.join("cloudmusic.elog");
         let raw=encode(&(event(7,1000,&metadata())+&event(7,2000,"\"native播放资源load完成\",{\"songId\":\"123\"}")));
         let mut reader=Reader{pid:7,..Default::default()};
-        for byte in &raw{reader.ingest(&[*byte],3000);}
+        for byte in &raw{reader.ingest(&[*byte],3000,false);}
         assert_eq!(reader.playback.snapshot(3000).unwrap().title,"测试歌曲");
         std::fs::write(&path,&raw).unwrap();reader=Reader::default();
-        assert_eq!(reader.read(&path,Some(7),3000).unwrap().position,1.0);
-        assert_eq!(reader.read(&path,Some(7),4000).unwrap().position,2.0);
+        assert_eq!(reader.read(&path,Some(7),3000).unwrap().position,0.0);
+        assert_eq!(reader.read(&path,Some(7),4000).unwrap().position,1.0);
         assert!(reader.read(&path,None,4000).is_none());
         assert!(reader.read(&path,Some(8),4000).is_none(),"新进程不能继承旧进程的歌曲");
         let raw=encode(&(event(8,5000,&metadata())+&event(8,6000,"\"native播放资源load完成\",{\"songId\":\"123\"}")));
-        std::fs::write(&path,&raw).unwrap();assert_eq!(reader.read(&path,Some(8),7000).unwrap().position,1.0);
+        std::fs::write(&path,&raw).unwrap();assert_eq!(reader.read(&path,Some(8),7000).unwrap().position,0.0);
         std::fs::write(&path,b"").unwrap();assert!(reader.read(&path,Some(8),7000).is_none());
         std::fs::remove_file(path).unwrap();std::fs::remove_dir(dir).unwrap();
     }
@@ -303,7 +735,7 @@ mod tests{
         let data=serde_json::json!({"list":[{"track":{"id":123,"name":"续播歌曲","artists":[{"name":"歌手"}],"duration":240000,"album":{"picUrl":"https://p1.music.126.net/resume.jpg"}}}]});
         std::fs::write(queue.join("playingList"),data.to_string()).unwrap();let path=dir.join("cloudmusic.elog");
         std::fs::write(&path,encode(&(event(9,1000,"\"native播放资源load完成\",{\"songId\":\"123\"}")+&event(9,1100,"\"setPlayingPosition\",80")))).unwrap();
-        let mut reader=Reader::default();let media=reader.read(&path,Some(9),2100).unwrap();assert_eq!(media.title,"续播歌曲");assert_eq!(media.position,81.0);
+        let mut reader=Reader::default();let media=reader.read(&path,Some(9),2100).unwrap();assert_eq!(media.title,"续播歌曲");assert_eq!(media.position,80.0);
         assert_eq!(reader.playback.artwork_url,"https://p1.music.126.net/resume.jpg?param=256y256");
         std::fs::remove_file(path).unwrap();std::fs::remove_file(queue.join("playingList")).unwrap();std::fs::remove_dir(&queue).unwrap();std::fs::remove_dir(dir.join("webdata")).unwrap();std::fs::remove_dir(dir).unwrap();
     }
