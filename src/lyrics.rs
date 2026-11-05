@@ -226,6 +226,21 @@ pub(super) fn artist_set(artist:&str)->Vec<String>{
     parts.sort();parts.dedup();parts
 }
 
+/// 歌手匹配等级：0 表示完全一致，1 表示一方是另一方的子集，None 表示唱的确实是别人。
+///
+/// 播放器上报的 `artist` 往往只有主唱，而网易云会把合唱曲的所有参与者都列出来
+/// （《松烟入墨》在网易云是「伦桑、小义学长、李蚊香、满汉全席」），旧逻辑要求集合相等，
+/// 于是这类歌全都匹配不到歌词。现在允许任一方包含另一方，但不能是「各唱各的」——
+/// 那样会串到同名不同歌手的翻唱版本上。
+fn artist_rank(candidate:&str,target_parts:&[String])->Option<u8> {
+    if target_parts.is_empty(){return None;}
+    let parts=artist_set(candidate);
+    if parts.is_empty(){return None;}
+    if parts==target_parts {return Some(0);}
+    let subset=|a:&[String],b:&[String]|a.iter().all(|name|b.contains(name));
+    (subset(&parts,target_parts)||subset(target_parts,&parts)).then_some(1)
+}
+
 fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration:f64)->Vec<u64> {
     let title=normalized(track);
     let cleaned=normalized(&clean_title(track));
@@ -239,20 +254,40 @@ fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration
         let artists=item.get("artists").or_else(||item.get("ar")).and_then(|v|v.as_array());
         let Some(artists)=artists else{continue;};
         let names=artists.iter().filter_map(|a|a.get("name")?.as_str()).collect::<Vec<_>>().join("、");
-        if artist_parts.is_empty() || artist_set(&names)!=artist_parts{continue;}
+        let Some(rank)=artist_rank(&names,&artist_parts) else{continue;};
         let candidate_duration=item.get("duration").or_else(||item.get("dt")).and_then(|v|v.as_f64()).unwrap_or_default()/1000.0;
         let difference=if duration>0.0 {(candidate_duration-duration).abs()}else{0.0};
         if duration>0.0 && difference>(duration*0.03).max(10.0){continue;}
-        matches.push((id,!exact,difference));
+        matches.push((id,!exact,rank,difference));
     }
-    matches.sort_by(|a,b|a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
-    matches.into_iter().map(|(id,_,_)|id).take(3).collect()
+    matches.sort_by(|a,b|a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)));
+    matches.into_iter().map(|(id,_,_,_)|id).take(3).collect()
+}
+
+/// 网易云搜索。网页版现在走 cloudsearch（POST），旧的 search/get/web 常年回
+/// 「405 操作频繁」，所以先试前者，无结果再退回后者。
+fn netease_search(base:&str,query:&str)->Result<serde_json::Value,FetchError> {
+    let code=|value:&serde_json::Value|value.get("code").and_then(|v|v.as_i64());
+    let encoded=urlencode(query);
+    let form=format!("s={encoded}&type=1&limit=12&offset=0");
+    // 闭包而不是直接调用：备用源要等首选源真的失败才发请求。
+    let attempts:[&dyn Fn()->Result<serde_json::Value,FetchError>;2]=[
+        &||request_json_post(&format!("{base}/api/cloudsearch/pc"),base,&form),
+        &||request_json(&format!("{base}/api/search/get/web?s={encoded}&type=1&limit=12"),base),
+    ];
+    let mut failure=FetchError::Unavailable("网易云搜索未成功".into());
+    for attempt in attempts {
+        match attempt() {
+            Ok(value) if code(&value)==Some(200)=>return Ok(value),
+            Ok(_)=>{},
+            Err(error)=>failure=error,
+        }
+    }
+    Err(failure)
 }
 
 fn fetch_netease(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,FetchError> {
-    let url=format!("{base}/api/search/get/web?s={}&type=1&limit=12",urlencode(&format!("{track} {artist}")));
-    let result=request_json(&url,base)?;
-    if result.get("code").and_then(|v|v.as_i64())!=Some(200){return Err(FetchError::Unavailable("网易云搜索未成功".into()));}
+    let result=netease_search(base,&format!("{track} {artist}"))?;
     let items=result.pointer("/result/songs").and_then(|v|v.as_array()).cloned().unwrap_or_default();
     let mut plain=None;
     for id in netease_candidates(&items,track,artist,duration) {
@@ -325,6 +360,19 @@ fn request_json_with_retry(url:&str,referer:&str,retry:bool)->Result<serde_json:
     serde_json::from_str(&text).map_err(|e|FetchError::InvalidResponse(e.to_string()))
 }
 
+fn request_json_post(url:&str,referer:&str,form:&str)->Result<serde_json::Value,FetchError> {
+    let response=ureq::post(url)
+        .set("User-Agent",concat!("Daozai/",env!("CARGO_PKG_VERSION")," (Windows)"))
+        .set("Referer",referer)
+        .set("Accept","application/json")
+        .set("Content-Type","application/x-www-form-urlencoded")
+        .timeout(std::time::Duration::from_secs(5))
+        .send_string(form)
+        .map_err(|e|FetchError::Unavailable(e.to_string()))?;
+    let text=response.into_string().map_err(|e|FetchError::InvalidResponse(e.to_string()))?;
+    serde_json::from_str(&text).map_err(|e|FetchError::InvalidResponse(e.to_string()))
+}
+
 fn clean_title(track:&str)->String {
     let suffix=regex::Regex::new(r"(?i)\s*[\(\[（【]\s*(?:official(?:\s+music)?\s+(?:video|audio)|lyrics?|lyric\s+video)\s*[\)\]）】]").unwrap();
     suffix.replace_all(track,"").split_whitespace().collect::<Vec<_>>().join(" ")
@@ -393,6 +441,26 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn netease_matching_accepts_multi_artist_versions_but_rejects_other_singers() {
+        // 真实搜索返回：播放器只报主唱「伦桑」，网易云这首歌列了四位歌手。
+        let items=serde_json::json!([
+            {"id":31066146,"name":"云水谣","artists":[{"name":"伦桑"}],"duration":239769},
+            {"id":28765208,"name":"松烟入墨","artists":[{"name":"赵景旭（Winky诗）"}],"duration":277583},
+            {"id":452036075,"name":"松烟入墨","artists":[{"name":"伦桑"},{"name":"小义学长"},{"name":"李蚊香"},{"name":"满汉全席"}],"duration":277551}
+        ]);
+        assert_eq!(netease_candidates(items.as_array().unwrap(),"松烟入墨","伦桑",277.0),vec![452036075]);
+    }
+
+    #[test]
+    fn netease_matching_puts_the_exact_artist_lineup_first() {
+        let items=serde_json::json!([
+            {"id":1,"name":"Track","artists":[{"name":"Artist"},{"name":"Guest"}],"duration":215000},
+            {"id":2,"name":"Track","artists":[{"name":"Artist"}],"duration":215400}
+        ]);
+        assert_eq!(netease_candidates(items.as_array().unwrap(),"Track","Artist",215.0),vec![2,1]);
+    }
+
     #[test]
     fn qq_matching_rejects_wrong_artist_version_duration_and_invalid_id() {
         let items=serde_json::json!([
@@ -571,12 +639,48 @@ mod tests {
         use std::{io::{Read,Write},net::TcpListener};
         let listener=TcpListener::bind("127.0.0.1:0").unwrap();
         let base=format!("http://{}",listener.local_addr().unwrap());
-        let worker=std::thread::spawn(move||for (status,body) in responses {
-            let (mut stream,_)=listener.accept().unwrap();
-            let mut buf=[0;4096];let _=stream.read(&mut buf).unwrap();
-            write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+        let worker=std::thread::spawn(move||{
+            for (status,body) in responses {
+                let (mut stream,_)=listener.accept().unwrap();
+                // POST 的表单体要读完整再回，否则客户端会发现连接被提前关掉。
+                let mut buf=Vec::new();
+                let mut chunk=[0;4096];
+                while let Ok(n)=stream.read(&mut chunk) {
+                    if n==0{break;}
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text=String::from_utf8_lossy(&buf).into_owned();
+                    let Some(head)=text.find("\r\n\r\n") else{continue;};
+                    let length=text[..head].lines().find_map(|line|{
+                        let (key,value)=line.split_once(':')?;
+                        key.eq_ignore_ascii_case("content-length").then_some(value.trim().parse::<usize>().ok())?
+                    }).unwrap_or(0);
+                    if buf.len()>=head+4+length{break;}
+                }
+                let _=write!(stream,"HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+            }
         });
         (base,worker)
+    }
+
+    #[test]
+    fn netease_search_prefers_cloudsearch_and_falls_back_to_the_legacy_endpoint() {
+        // 新接口：result.songs 里用 ar/dt 字段，和 search/get/web 的 artists/duration 等价。
+        let cloud=serde_json::json!({"code":200,"result":{"songs":[{"id":7,"name":"Track","ar":[{"name":"Artist"}],"dt":200000}]}}).to_string();
+        let lyric=serde_json::json!({"code":200,"lrc":{"lyric":"[00:01.00]第一句\n[00:05.00]第二句"}}).to_string();
+        let (base,worker)=serve(vec![("200 OK",cloud.clone()),("200 OK",lyric.clone())]);
+        assert!(fetch_netease(&base,"Track","Artist",200.0).unwrap().synced);
+        worker.join().unwrap();
+        // 新接口被限流时退回老接口，行为保持不变。
+        let limited=serde_json::json!({"code":405,"msg":"操作频繁，请稍候再试"}).to_string();
+        let legacy=serde_json::json!({"code":200,"result":{"songs":[{"id":7,"name":"Track","artists":[{"name":"Artist"}],"duration":200000}]}}).to_string();
+        let (base,worker)=serve(vec![("200 OK",limited),("200 OK",legacy),("200 OK",lyric)]);
+        assert!(fetch_netease(&base,"Track","Artist",200.0).unwrap().synced);
+        worker.join().unwrap();
+        // 两个接口都不可用时如实报服务异常。
+        let gone=serde_json::json!({"code":405}).to_string();
+        let (base,worker)=serve(vec![("200 OK",gone.clone()),("200 OK",gone)]);
+        assert!(matches!(fetch_netease(&base,"Track","Artist",200.0),Err(FetchError::Unavailable(_))));
+        worker.join().unwrap();
     }
 
     #[test]
