@@ -5,8 +5,9 @@ const MAX_LINES:usize=5000;
 const MAX_LINE_TEXT:usize=8192;
 fn rejected_lyrics()->Lyrics{crate::resources::REJECTED_DATA.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Lyrics::default()}
 
-/// 确认「所有来源都没有同步歌词」后记住 6 小时，期间不再联网；网络失败不会写入。
-const NEGATIVE_TTL:std::time::Duration=std::time::Duration::from_secs(6*3600);
+/// 确认「所有来源都没有同步歌词」后短暂记住，期间不再联网；网络失败不会写入。
+/// 播放器偶发上报错误时长时三个来源会同时误判，6 小时会把误判钉死一整晚，这里缩短到 20 分钟。
+const NEGATIVE_TTL:std::time::Duration=std::time::Duration::from_secs(20*60);
 const TRACE_LIMIT:usize=24;
 
 /// SMTC 在开播初期常给出 0 或几秒的假时长（QQ 音乐尤其明显）。
@@ -45,7 +46,8 @@ pub(crate) fn romanized(track:&str,lyrics:&Lyrics)->bool {
     latin>=40 && native*20<native+latin
 }
 
-fn negative_path(path:&std::path::Path)->std::path::PathBuf {path.with_extension("none")}
+/// v2 负缓存：换扩展名，让旧版本写入的「确认无歌词」一次性失效（含错误时长造成的误判），且无需删除用户缓存。
+fn negative_path(path:&std::path::Path)->std::path::PathBuf {path.with_extension("none2")}
 fn read_negative(path:&std::path::Path)->Option<Result<Lyrics,FetchError>> {
     use std::io::Read;
     let path=negative_path(path);
@@ -210,7 +212,7 @@ pub fn fetch_for_display(source:&str,track:&str,artist:&str,duration:f64,song_id
     })();
     let summary=outcome(&result.as_ref().map(|(lyrics,_)|lyrics.clone()).map_err(Clone::clone));
     let id=song_id.map(|id|format!(" ID={id}")).unwrap_or_default();
-    let line=format!("{} {source} · {track} - {artist}{id} → {} → 结果:{summary} 用时{}ms\n",
+    let line=format!("{} {source} · {track} - {artist}{id} 时长={duration:.1}s → {} → 结果:{summary} 用时{}ms\n",
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs(),
         take_trace().join(" → "),started.elapsed().as_millis());
     // 测试时不写，免得把模拟数据混进用户的真实诊断日志。
@@ -488,8 +490,12 @@ fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration
     let base_title=normalized(&clean_title(track));
     // 调用方已写明 feat. 合唱者时，歌手集合必须与候选严格对应，不能多出别的合唱阵容。
     let declared=!split_feature(&clean_title(track)).1.is_empty() || !split_feature(artist).1.is_empty();
-    let mut matches=Vec::new();
-    for item in items {
+    let known=usable_duration(duration);
+    let tolerance=(duration*0.03).max(10.0);
+    #[derive(Clone,Copy)]
+    struct Candidate {id:u64,exact:bool,rank:u8,difference:f64,duration_ok:bool,order:usize}
+    let mut matches:Vec<Candidate>=Vec::new();
+    for (order,item) in items.iter().enumerate() {
         let Some(id)=item.get("id").and_then(|v|v.as_u64()) else{continue;};
         let name=item.get("name").and_then(|v|v.as_str()).unwrap_or_default();
         let exact=normalized(name)==title;
@@ -501,13 +507,15 @@ fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration
         // 歌手按等级匹配：完全一致优先，一方包含另一方（合唱曲）也可，各唱各的拒绝。
         let Some(rank)=artist_rank(&names,&identity.1,declared) else{continue;};
         let candidate_duration=item.get("duration").or_else(||item.get("dt")).and_then(|v|v.as_f64()).unwrap_or_default()/1000.0;
-        let known=usable_duration(duration);
         let difference=if known {(candidate_duration-duration).abs()}else{0.0};
-        if known && difference>(duration*0.03).max(10.0){continue;}
-        matches.push((id,!exact,rank,difference));
+        let duration_ok=!known || difference<=tolerance;
+        matches.push(Candidate{id,exact,rank,difference,duration_ok,order});
     }
-    matches.sort_by(|a,b|a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)));
-    matches.into_iter().map(|(id,_,_,_)|id).take(3).collect()
+    // 严格筛选只在这里做；「上报时长不可信」的兜底由各 fetch 函数用未知时长重筛已有搜索结果，
+    // 这样版本校验语义不变，也不用为了重试多发一次网络请求。
+    let mut chosen:Vec<_>=matches.iter().filter(|c|c.duration_ok).copied().collect();
+    chosen.sort_by(|a,b|b.exact.cmp(&a.exact).then(a.rank.cmp(&b.rank)).then(a.difference.total_cmp(&b.difference)).then(a.order.cmp(&b.order)));
+    chosen.into_iter().map(|c|c.id).take(3).collect()
 }
 
 /// 网易云搜索。网页版现在走 cloudsearch（POST），旧的 search/get/web 常年回
@@ -541,6 +549,11 @@ fn fetch_netease(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,F
         let result=match netease_search(base,&query){Ok(result)=>result,Err(error) if i==0=>return Err(error),Err(_)=>break};
         let items=result.pointer("/result/songs").and_then(|v|v.as_array()).cloned().unwrap_or_default();
         candidates=netease_candidates(&items,track,artist,duration);
+        if candidates.is_empty() && usable_duration(duration) {
+            let relaxed=netease_candidates(&items,track,artist,0.0);
+            if !relaxed.is_empty(){trace(||format!("网易云时长{duration:.0}s与候选全不符，忽略时长重试"));}
+            candidates=relaxed;
+        }
         if !candidates.is_empty(){break;}
     }
     let mut plain=None;
@@ -599,13 +612,38 @@ fn qq_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration:f64)
 fn fetch_qqmusic(base:&str,track:&str,artist:&str,duration:f64)->Result<Lyrics,FetchError> {
     if track.trim().is_empty() || artist.trim().is_empty(){return Err(FetchError::IncompleteMetadata);}
     let (query_title,query_artist)=search_terms(track,artist);
-    let query=urlencode(&format!("{query_title} {query_artist}"));
-    let result=request_json_with_retry(&format!("{base}/soso/fcgi-bin/client_search_cp?w={query}&format=json&p=1&n=12"),"https://y.qq.com/",true)?;
-    if result["code"].as_i64()!=Some(0){return Err(FetchError::Unavailable("QQ 音乐搜索未成功".into()));}
-    let items=result.pointer("/data/song/list").and_then(|v|v.as_array()).ok_or_else(||FetchError::InvalidResponse("QQ 音乐未返回歌曲列表".into()))?;
+    // 「歌名 歌手」搜不到时再只按歌名搜一次：多歌手、译名歌手或版本后缀常让组合词落空，
+    // 匹配阶段仍严格校验歌名与歌手；同时多取一些结果，短歌名容易被翻唱/Live 版挤出前 12 条。
+    let mut queries=vec![format!("{query_title} {query_artist}")];
+    if !query_artist.trim().is_empty(){queries.push(query_title.clone());}
+    queries.dedup();
+    let mut mids:Vec<String>=Vec::new();
+    let mut responded=false;
+    let mut search_failure=FetchError::NotFound;
+    for query in queries {
+        let encoded=urlencode(&query);
+        let result=match request_json_with_retry(&format!("{base}/soso/fcgi-bin/client_search_cp?w={encoded}&format=json&p=1&n=30"),"https://y.qq.com/",true) {
+            Ok(result)=>result,
+            Err(error)=>{search_failure=error;continue;},
+        };
+        if result["code"].as_i64()!=Some(0){search_failure=FetchError::Unavailable("QQ 音乐搜索未成功".into());continue;}
+        let list=result.pointer("/data/song/list").and_then(|v|v.as_array()).cloned().unwrap_or_default();
+        responded=true;
+        mids=qq_candidates(&list,track,artist,duration);
+        if mids.is_empty() && usable_duration(duration) {
+            let relaxed=qq_candidates(&list,track,artist,0.0);
+            if !relaxed.is_empty(){trace(||format!("QQ音乐时长{duration:.0}s与候选全不符，忽略时长重试"));}
+            mids=relaxed;
+        }
+        if !mids.is_empty(){break;}
+    }
+    if mids.is_empty(){
+        trace(||"QQ音乐:搜索无匹配候选".into());
+        return Err(if responded{FetchError::NotFound}else{search_failure});
+    }
     let mut plain=None;
     let mut failure=FetchError::NotFound;
-    for mid in qq_candidates(items,track,artist,duration) {
+    for mid in mids {
         let result=match request_json_with_retry(&format!("{base}/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={mid}&format=json&nobase64=1"),"https://y.qq.com/",true) {
             Ok(result)=>result,
             Err(error)=>{failure=error;continue;},
@@ -675,7 +713,13 @@ fn fetch_from(base:&str,track:&str,artist:&str,duration_secs:f64)->Result<Lyrics
         let singer=item.get("artistName").and_then(|v|v.as_str()).unwrap_or_default();
         !identity.1.is_empty() && song_identity(name,singer)==identity
     }).collect::<Vec<_>>();
-    lyrics_from_items(&items,track,duration_secs)
+    let result=lyrics_from_items(&items,track,duration_secs);
+    // 上报时长错值时三个来源会同时筛掉全部候选；这里用「未知时长」重筛同一批结果。
+    if matches!(result,Err(FetchError::NotFound)) && usable_duration(duration_secs) && !items.is_empty() {
+        trace(||format!("LRCLIB 时长{duration_secs:.0}s与候选全不符，忽略时长重试"));
+        return lyrics_from_items(&items,track,0.0);
+    }
+    result
 }
 
 fn search(base:&str,track:&str,artist:&str)->Result<Vec<serde_json::Value>,FetchError> {
@@ -725,6 +769,68 @@ fn urlencode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wrong_reported_duration_does_not_wipe_all_candidates() {
+        // 切歌瞬间 SMTC 会给出上一首/错值时长，三个来源共用它；抓取层需用未知时长重筛已有结果。
+        let search=serde_json::json!({"code":200,"result":{"songs":[
+            {"id":1,"name":"绵绵","artists":[{"name":"陈奕迅"}],"duration":244000},
+            {"id":2,"name":"绵绵 (Live)","artists":[{"name":"陈奕迅"}],"duration":283000}
+        ]}}).to_string();
+        let lyric=serde_json::json!({"code":200,"lrc":{"lyric":"[00:01.00]正确歌词"}}).to_string();
+        let (base,worker)=serve(vec![("200 OK",search),("200 OK",lyric)]);
+        let result=fetch_netease(&base,"绵绵","陈奕迅",90.0);
+        worker.join().unwrap();
+        assert!(result.unwrap().synced);
+        // 严格匹配语义不变：可信但与候选相差很远的时长照常排除。
+        let items=serde_json::json!([{"id":7,"name":"Track","artists":[{"name":"Artist"}],"duration":232000}]);
+        assert!(netease_candidates(items.as_array().unwrap(),"Track","Artist",60.0).is_empty());
+    }
+
+    #[test]
+    fn qq_wrong_duration_still_finds_the_exact_track() {
+        let search=serde_json::json!({"code":0,"data":{"song":{"list":[
+            {"songmid":"formal","songname":"绵绵","singer":[{"name":"陈奕迅"}],"interval":244},
+            {"songmid":"live","songname":"绵绵 (Live)","singer":[{"name":"陈奕迅"}],"interval":283}
+        ]}}}).to_string();
+        let lyric=serde_json::json!({"code":0,"lyric":"[00:01.00]正确歌词"}).to_string();
+        let (base,worker)=serve(vec![("200 OK",search),("200 OK",lyric)]);
+        let result=fetch_qqmusic(&base,"绵绵","陈奕迅",90.0);
+        worker.join().unwrap();
+        assert!(result.unwrap().synced);
+    }
+
+    #[test]
+    fn lrclib_wrong_duration_still_returns_synced_lyrics() {
+        let rows=serde_json::json!([{"trackName":"绵绵","artistName":"陈奕迅","duration":244,"syncedLyrics":"[00:01.00]正确歌词"}]).to_string();
+        let (base,worker)=serve(vec![("200 OK",rows)]);
+        let result=fetch_from(&base,"绵绵","陈奕迅",90.0);
+        worker.join().unwrap();
+        assert!(result.unwrap().synced);
+    }
+
+    #[test]
+    fn qq_search_retries_with_title_only_when_combined_query_has_no_match() {
+        let empty=serde_json::json!({"code":0,"data":{"song":{"list":[]}}}).to_string();
+        let found=serde_json::json!({"code":0,"data":{"song":{"list":[
+            {"songmid":"testMID","songname":"Track","singer":[{"name":"Artist"}],"interval":215}
+        ]}}}).to_string();
+        let lyric=serde_json::json!({"code":0,"lyric":"[00:01.00]正确歌词"}).to_string();
+        let (base,worker)=serve(vec![("200 OK",empty),("200 OK",found),("200 OK",lyric)]);
+        let result=fetch_qqmusic(&base,"Track","Artist",215.0);
+        worker.join().unwrap();
+        assert!(result.unwrap().synced);
+    }
+
+    #[test]
+    fn legacy_negative_cache_no_longer_blocks_a_song() {
+        // 旧版 .none 里存着 6 小时的误判；换扩展名后应直接失效，无需删除用户缓存。
+        let path=std::env::temp_dir().join(format!("daozai-legacy-negative-{}-{:?}.lrc",std::process::id(),std::thread::current().id()));
+        let legacy=path.with_extension("none");
+        std::fs::write(&legacy,b"").unwrap();
+        assert!(read_negative(&path).is_none());
+        std::fs::remove_file(&legacy).unwrap();
+    }
+
     #[test]
     fn netease_matching_accepts_multi_artist_versions_but_rejects_other_singers() {
         // 真实搜索返回：播放器只报主唱「伦桑」，网易云这首歌列了四位歌手。
