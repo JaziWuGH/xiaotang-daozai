@@ -436,27 +436,43 @@ pub(crate) struct Pomo {
 const NATIVE_RETRIES:u32=12;
 const NETWORK_RETRIES:u32=10;
 
-/// 与 `format!("{title}|{artist}|{duration:.0}")` 等价，但不分配内存：界面每帧要比较好几次。
+/// 旧版本把时长拼在键尾（`title|artist|120`）。比较时忽略这一段，
+/// 让升级后的状态与录制/测试里的旧键平滑衔接。
+fn lyric_key_base(key:&str)->&str {
+    match key.rsplit_once('|') {
+        Some((head,tail)) if tail.parse::<f64>().is_ok()=>head,
+        _=>key,
+    }
+}
+fn same_lyric_key(a:&str,b:&str)->bool {a==b || lyric_key_base(a)==lyric_key_base(b)}
+
+/// 与 `format!("{title}|{artist}")` 等价，但不分配内存：界面每帧要比较好几次。
+/// 时长不参与比较：SMTC 开播初期的时长抖动不该让已经取到的歌词失效。
 fn lyric_key_matches(key:&str,media:&NowPlaying)->bool {
-    use std::io::Write;
-    let Some(rest)=key.strip_prefix(media.title.as_str()).and_then(|rest|rest.strip_prefix('|')) else{return false;};
-    let Some(rest)=rest.strip_prefix(media.artist.as_str()).and_then(|rest|rest.strip_prefix('|')) else{return false;};
-    let mut buffer=[0u8;32];
-    let mut cursor=std::io::Cursor::new(&mut buffer[..]);
-    if write!(cursor,"{:.0}",media.duration).is_err(){return rest==format!("{:.0}",media.duration);}
-    let written=cursor.position() as usize;
-    rest.as_bytes()==&buffer[..written]
+    let matches=|k:&str| k.strip_prefix(media.title.as_str()).and_then(|rest|rest.strip_prefix('|')).is_some_and(|rest|rest==media.artist.as_str());
+    matches(key) || matches(lyric_key_base(key))
 }
 
 #[test]
 fn lyric_key_matches_the_formatted_key_without_allocating(){
     for (title,artist,duration) in [("歌","手",120.4),("A|B","C",0.0),("歌","",239.5),("歌","手",240.5),("","",f64::NAN),("t","a",1e30)] {
         let media=NowPlaying{title:title.into(),artist:artist.into(),duration,..Default::default()};
-        let key=format!("{}|{}|{:.0}",title,artist,duration);
+        let key=format!("{title}|{artist}");
         assert!(lyric_key_matches(&key,&media),"{key}");
         assert!(!lyric_key_matches(&format!("{key}0"),&media));
         assert!(!lyric_key_matches(&format!("x{key}"),&media));
     }
+    // 同一首歌的时长从 0 跳到 8 秒再跳到真实值，歌词键必须保持不变。
+    let key="北京欢迎你|华语群星".to_owned();
+    for duration in [0.0,8.0,232.0] {
+        let song=NowPlaying{title:"北京欢迎你".into(),artist:"华语群星".into(),duration,..Default::default()};
+        assert!(lyric_key_matches(&key,&song),"时长 {duration} 秒时歌词键失效");
+    }
+    // 旧版含时长的键仍要认得，避免升级后把已有歌词判成别的歌。
+    let old=NowPlaying{title:"Track".into(),artist:"Artist".into(),duration:120.0,..Default::default()};
+    assert!(lyric_key_matches("Track|Artist|120",&old));
+    assert!(same_lyric_key("Track|Artist","Track|Artist|120"));
+    assert!(!same_lyric_key("Track|Artist","Other|Artist|120"));
 }
 
 #[derive(Default)]
@@ -2688,17 +2704,21 @@ impl App {
         if !self.show_lyrics && !self.settings.island_lyrics {self.ly=LyricsState::default();return;}
         let np = &self.media;
         if np.title.is_empty(){self.ly=LyricsState::default();return;}
-        let key = format!("{}|{}|{:.0}", np.title, np.artist, np.duration);
-        let id_arrived=key==self.ly.key && !self.ly.loading && self.ly.song_id.is_none() && np.song_id.is_some()
+        // 只认歌名与歌手：QQ 音乐等播放器开播初期时长会大幅抖动，
+        // 含时长的键会反复触发重查，并在一次失败后清空岛上的歌词。
+        let key = format!("{}|{}", np.title, np.artist);
+        let same_song=same_lyric_key(&key,&self.ly.key);
+        let id_arrived=same_song && !self.ly.loading && self.ly.song_id.is_none() && np.song_id.is_some()
             && !self.ly.lyrics.as_ref().is_some_and(|lyrics|lyrics.synced);
-        if key != self.ly.key || id_arrived || self.ly.retry_at.is_some_and(|at|self.t>=at) {
+        if !same_song || id_arrived || self.ly.retry_at.is_some_and(|at|self.t>=at) {
             // 歌曲信息抖动或快速切歌不能叠加网络线程；旧请求完成后只查询当前歌曲。
             if self.ly_worker.as_ref().is_some_and(|worker|!worker.is_finished()){return;}
             let Some(lease)=crate::resources::LYRICS.acquire()else{return;};
-            let native_only=key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou")
+            let native_only=same_song && np.source.to_ascii_lowercase().contains("kugou")
                 && self.ly.error==Some(lyrics::FetchError::NotFound);
-            let cached=if key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou"){self.ly.lyrics.take()}else{None};
-            let attempts=if key==self.ly.key {self.ly.attempts.saturating_add(1)}else{0};
+            // 同一首歌重查时保留已显示的歌词作为兜底，查词期间不清空岛上内容。
+            let cached=if same_song {self.ly.lyrics.take()}else{None};
+            let attempts=if same_song {self.ly.attempts.saturating_add(1)}else{0};
             self.ly = LyricsState { key, loading: cached.is_none() && !native_only, lyrics:cached.clone(),
                 error:native_only.then_some(lyrics::FetchError::NotFound), song_id:np.song_id, attempts, ..Default::default() };
             let (tx, rx) = std::sync::mpsc::channel();
@@ -2772,8 +2792,8 @@ impl App {
     }
 
     /// 外部直接提供歌词（录制演示用）。
-    pub fn set_lyrics(&mut self, title: &str, artist: &str, duration: f64, l: lyrics::Lyrics) {
-        self.ly = LyricsState { key: format!("{title}|{artist}|{duration:.0}"), lyrics: Some(l), ..Default::default() };
+    pub fn set_lyrics(&mut self, title: &str, artist: &str, _duration: f64, l: lyrics::Lyrics) {
+        self.ly = LyricsState { key: format!("{title}|{artist}"), lyrics: Some(l), ..Default::default() };
     }
 
     pub fn on_drop(&mut self, files: Vec<PathBuf>) {

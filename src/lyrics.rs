@@ -5,9 +5,13 @@ const MAX_LINES:usize=5000;
 const MAX_LINE_TEXT:usize=8192;
 fn rejected_lyrics()->Lyrics{crate::resources::REJECTED_DATA.fetch_add(1,std::sync::atomic::Ordering::Relaxed);Lyrics::default()}
 
-/// 确认「所有来源都没有同步歌词」后记住 7 天，期间不再联网；网络失败不会写入。
-const NEGATIVE_TTL:std::time::Duration=std::time::Duration::from_secs(7*24*3600);
+/// 确认「所有来源都没有同步歌词」后记住 6 小时，期间不再联网；网络失败不会写入。
+const NEGATIVE_TTL:std::time::Duration=std::time::Duration::from_secs(6*3600);
 const TRACE_LIMIT:usize=24;
+
+/// SMTC 在开播初期常给出 0 或几秒的假时长（QQ 音乐尤其明显）。
+/// 这类值一律视为「时长未知」，不参与在线候选筛选，也不进入缓存键。
+fn usable_duration(duration:f64)->bool {duration.is_finite() && (20.0..=86_400.0).contains(&duration)}
 
 thread_local!{static TRACE:std::cell::RefCell<Vec<String>>=const{std::cell::RefCell::new(Vec::new())};}
 /// 记录本次查词经过的步骤，只写本机诊断日志，便于定位「为什么没词」。
@@ -53,6 +57,8 @@ fn read_negative(path:&std::path::Path)->Option<Result<Lyrics,FetchError>> {
     Some(if lyrics.lines.is_empty(){Err(FetchError::NotFound)}else{Ok(lyrics)})
 }
 fn write_negative(path:&std::path::Path,plain:Option<&Lyrics>) {
+    // 已经存有同步歌词时绝不记「没有歌词」：歌词可能刚由另一组元数据取到。
+    if read_cache(path).is_some(){return;}
     if let Some(parent)=path.parent(){if std::fs::create_dir_all(parent).is_err(){return;}}
     let raw=plain.map(|lyrics|lyrics.lines.iter().map(|line|line.text.as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default();
     let _=crate::model::atomic_write(&negative_path(path),raw.as_bytes());
@@ -189,7 +195,18 @@ pub fn fetch_for_display(source:&str,track:&str,artist:&str,duration:f64,song_id
             trace(||"酷狗本地:无".into());
             return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
         }
-        fetch_for_source(source,track,artist,duration,song_id).map(|lyrics|(lyrics,false))
+        // 元数据抖动触发的重查失败时，沿用已经显示的歌词，别把岛上的歌词清空。
+        match fetch_for_source(source,track,artist,duration,song_id) {
+            Ok(lyrics)=>Ok((lyrics,false)),
+            Err(error)=>{
+                // 网络失败照常上报以便重试；「查无此歌」时沿用岛上已显示的歌词。
+                let soft=matches!(&error,FetchError::NotFound|FetchError::IncompleteMetadata);
+                match cached.filter(|lyrics|lyrics.synced).filter(|_|soft) {
+                    Some(lyrics)=>{trace(||"沿用已显示歌词".into());Ok((lyrics,false))},
+                    None=>Err(error),
+                }
+            }
+        }
     })();
     let summary=outcome(&result.as_ref().map(|(lyrics,_)|lyrics.clone()).map_err(Clone::clone));
     let id=song_id.map(|id|format!(" ID={id}")).unwrap_or_default();
@@ -206,13 +223,15 @@ pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:
     if source.to_ascii_lowercase().contains("qqmusic") {
         let common=cache_path(track,artist,duration);
         let path=common.parent().unwrap().join("qqmusic").join(common.file_name().unwrap());
-        if let Some(lyrics)=read_cache(&path).filter(|lyrics|!romanized(track,lyrics)){trace(||"本地缓存:命中".into());return Ok(lyrics);}
+        if let Some(lyrics)=read_cached(track,artist,duration,&path).filter(|lyrics|!romanized(track,lyrics)){trace(||"本地缓存:命中".into());return Ok(lyrics);}
         if let Some(remembered)=read_negative(&path){trace(||"近期已确认无同步歌词".into());return remembered;}
         let preferred=fetch_qqmusic("https://c.y.qq.com",track,artist,duration);
         trace(||format!("QQ音乐:{}",outcome(&preferred)));
         if let Ok(lyrics)=&preferred {if lyrics.synced && !romanized(track,lyrics) {write_cache(&path,lyrics);return preferred;}}
         let (fallback,failed)=fetch_online_detail(track,artist,duration,Skip::QqMusic);
-        if !failed && matches!(&preferred,Ok(_)|Err(FetchError::NotFound)) && !fallback.as_ref().is_ok_and(|l|l.synced) {
+        // 假时长会让在线匹配误判为「查无此歌」，此时不能把结论记进负缓存。
+        let reliable=duration<=0.0 || usable_duration(duration);
+        if reliable && !failed && matches!(&preferred,Ok(_)|Err(FetchError::NotFound)) && !fallback.as_ref().is_ok_and(|l|l.synced) {
             write_negative(&path,preferred.as_ref().ok().or(fallback.as_ref().ok()));
         }
         return match (preferred,fallback) {
@@ -300,26 +319,59 @@ fn fetch_online_detail(track:&str,artist:&str,duration_secs:f64,skip:Skip)->(Res
     if track.trim().is_empty() || artist.trim().is_empty(){return (Err(FetchError::IncompleteMetadata),true);}
     let path=cache_path(track,artist,duration_secs);
     // 旧版本可能缓存过罗马音版本：忽略它重新查找原文。
-    if let Some(lyrics)=read_cache(&path).filter(|lyrics|!romanized(track,lyrics)){trace(||"本地缓存:命中".into());return (Ok(lyrics),false);}
+    if let Some(lyrics)=read_cached(track,artist,duration_secs,&path).filter(|lyrics|!romanized(track,lyrics)){trace(||"本地缓存:命中".into());return (Ok(lyrics),false);}
     if let Some(remembered)=read_negative(&path){trace(||"近期已确认无同步歌词".into());return (remembered,false);}
     let netease=(skip!=Skip::Netease).then_some("https://music.163.com");
     let qq=(skip!=Skip::QqMusic).then_some("https://c.y.qq.com");
     let (result,failed)=fetch_with_sources_detail(netease,qq,Some("https://lrclib.net"),track,artist,duration_secs);
+    // 时长还是假值时，本次「未找到」可能只是筛选条件不可靠，不记负缓存。
+    let reliable=duration_secs<=0.0 || usable_duration(duration_secs);
     match &result {
         // 罗马音版本照常显示，但不缓存，下次仍尝试找原文。
         Ok(lyrics) if lyrics.synced=>{if !romanized(track,lyrics){write_cache(&path,lyrics);}},
         // 每个来源都正常回应却没有同步歌词，才记为「确认没有」；有来源断网或限流时下次照常重查。
-        Ok(lyrics) if !failed=>write_negative(&path,Some(lyrics)),
-        Err(FetchError::NotFound) if !failed=>write_negative(&path,None),
+        Ok(lyrics) if reliable && !failed=>write_negative(&path,Some(lyrics)),
+        Err(FetchError::NotFound) if reliable && !failed=>write_negative(&path,None),
         _=>{}
     }
     (result,failed)
 }
 
-fn cache_path(track:&str,artist:&str,duration:f64)->std::path::PathBuf {
-    let key=format!("{}|{}|{duration:.0}",normalized(track),normalized(artist));
+fn hashed_path(key:&str)->std::path::PathBuf {
     let hash=key.bytes().fold(14695981039346656037u64,|h,b|(h^b as u64).wrapping_mul(1099511628211));
     crate::model::config_dir().join("lyrics").join(format!("{hash:016x}.lrc"))
+}
+
+/// 缓存键只看歌名与歌手。播放器刚开播时时长会从 0 跳到几秒再跳到真值，
+/// 把时长放进键会让刚取到的歌词立刻 miss，重查失败后还会写入负缓存把歌词钉死。
+fn cache_path(track:&str,artist:&str,_duration:f64)->std::path::PathBuf {
+    hashed_path(&format!("{}|{}",normalized(track),normalized(artist)))
+}
+
+/// 旧版本按「歌名|歌手|时长」命名的缓存；命中后迁移到稳定键，避免升级后全部重新联网。
+fn legacy_cache_path(track:&str,artist:&str,duration:f64)->std::path::PathBuf {
+    hashed_path(&format!("{}|{}|{duration:.0}",normalized(track),normalized(artist)))
+}
+
+/// 旧缓存可能落在 qqmusic 子目录，按目标 path 的父目录还原。
+fn in_same_dir(target:&std::path::Path,other:&std::path::Path)->std::path::PathBuf {
+    match (target.parent(),other.file_name()) {
+        (Some(parent),Some(name))=>parent.join(name),
+        _=>other.to_path_buf(),
+    }
+}
+
+fn read_cached(track:&str,artist:&str,duration:f64,path:&std::path::Path)->Option<Lyrics> {
+    if let Some(lyrics)=read_cache(path){return Some(lyrics);}
+    let mut tried:Vec<std::path::PathBuf>=Vec::new();
+    // 常见两种旧键：查询当下的时长，以及开播初期的 0 秒。
+    for d in [duration,0.0] {
+        let candidate=in_same_dir(path,&legacy_cache_path(track,artist,d));
+        if tried.contains(&candidate){continue;}
+        tried.push(candidate.clone());
+        if let Some(lyrics)=read_cache(&candidate){write_cache(path,&lyrics);return Some(lyrics);}
+    }
+    None
 }
 
 fn read_cache(path:&std::path::Path)->Option<Lyrics> {
@@ -449,8 +501,9 @@ fn netease_candidates(items:&[serde_json::Value],track:&str,artist:&str,duration
         // 歌手按等级匹配：完全一致优先，一方包含另一方（合唱曲）也可，各唱各的拒绝。
         let Some(rank)=artist_rank(&names,&identity.1,declared) else{continue;};
         let candidate_duration=item.get("duration").or_else(||item.get("dt")).and_then(|v|v.as_f64()).unwrap_or_default()/1000.0;
-        let difference=if duration>0.0 {(candidate_duration-duration).abs()}else{0.0};
-        if duration>0.0 && difference>(duration*0.03).max(10.0){continue;}
+        let known=usable_duration(duration);
+        let difference=if known {(candidate_duration-duration).abs()}else{0.0};
+        if known && difference>(duration*0.03).max(10.0){continue;}
         matches.push((id,!exact,rank,difference));
     }
     matches.sort_by(|a,b|a.1.cmp(&b.1).then(a.2.cmp(&b.2)).then(a.3.total_cmp(&b.3)));
@@ -641,8 +694,9 @@ fn lyrics_from_items(items:&[serde_json::Value],track:&str,duration_secs:f64)->R
     let mut plain:Option<(Lyrics,f64)>=None;
     for it in items {
         let d = it.get("duration").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let score=if duration_secs>0.0{(d-duration_secs).abs()}else{0.0};
-        if duration_secs>0.0 && d>0.0 && score>(duration_secs*0.03).max(10.0){continue;}
+        let known=usable_duration(duration_secs);
+        let score=if known{(d-duration_secs).abs()}else{0.0};
+        if known && d>0.0 && score>(duration_secs*0.03).max(10.0){continue;}
         if let Some(raw)=it.get("syncedLyrics").and_then(|v|v.as_str()) {
             let parsed=parse_lrc(raw);
             let rank=(romanized(track,&parsed),score);
@@ -1177,8 +1231,83 @@ mod tests {
         assert!(!same_song("Track","甲","Track","丙"));
     }
 
+    /// 临时把数据目录指向独立目录，测试结束恢复，避免碰到用户真实缓存。
+    struct TempData(Option<std::ffi::OsString>,std::path::PathBuf);
+    impl TempData {
+        fn new(tag:&str)->Self {
+            let dir=std::env::temp_dir().join(format!("daozai-{tag}-{}-{:?}",std::process::id(),std::thread::current().id()));
+            let _=std::fs::create_dir_all(dir.join("lyrics"));
+            let previous=std::env::var_os("DAOZAI_DATA_DIR");
+            std::env::set_var("DAOZAI_DATA_DIR",&dir);
+            Self(previous,dir)
+        }
+    }
+    impl Drop for TempData {
+        fn drop(&mut self) {
+            match self.0.take() {Some(value)=>std::env::set_var("DAOZAI_DATA_DIR",value),None=>std::env::remove_var("DAOZAI_DATA_DIR")}
+            let _=std::fs::remove_dir_all(&self.1);
+        }
+    }
+
     #[test]
-    fn confirmed_missing_lyrics_are_remembered_for_a_week_but_failures_are_not(){
+    fn cache_key_ignores_unstable_smtc_duration(){
+        let stable=cache_path("北京欢迎你","华语群星",0.0);
+        assert_eq!(stable,cache_path("北京欢迎你","华语群星",8.0));
+        assert_eq!(stable,cache_path("北京欢迎你","华语群星",232.0));
+        assert_ne!(stable,cache_path("另一首歌","华语群星",232.0));
+    }
+
+    #[test]
+    fn legacy_cache_is_migrated_to_the_stable_key(){
+        let _data=TempData::new("legacy-lyrics");
+        let (track,artist)=("迁移测试","歌手");
+        // 开播初期上报 0 秒时写下的旧缓存，正是升级后最需要救回的一批。
+        let old=legacy_cache_path(track,artist,0.0);
+        write_cache(&old,&parse_lrc("[00:01]旧缓存歌词\n[00:05]第二句"));
+        let stable=cache_path(track,artist,8.0);
+        assert_ne!(stable,old);
+        let found=read_cached(track,artist,8.0,&stable).expect("应命中旧版 0 秒缓存");
+        assert!(found.synced);assert_eq!(found.lines[0].text,"旧缓存歌词");
+        assert!(read_cache(&stable).is_some(),"命中后应迁移到稳定键");
+    }
+
+    #[test]
+    fn fake_duration_does_not_filter_out_real_songs(){
+        let items=vec![serde_json::json!({"id":7,"name":"Track","artists":[{"name":"Artist"}],"duration":232000})];
+        assert_eq!(netease_candidates(&items,"Track","Artist",0.0),vec![7]);
+        assert_eq!(netease_candidates(&items,"Track","Artist",8.0),vec![7],"假时长不能筛掉正版候选");
+        assert!(netease_candidates(&items,"Track","Artist",60.0).is_empty(),"可信但仍相差很大的时长照常排除");
+        let lrc=serde_json::json!([{"trackName":"Track","artistName":"Artist","duration":232.0,"syncedLyrics":"[00:01]歌词"}]);
+        assert!(lyrics_from_items(lrc.as_array().unwrap(),"Track",8.0).unwrap().synced);
+    }
+
+    #[test]
+    fn negative_cache_never_buries_lyrics_already_fetched(){
+        let path=std::env::temp_dir().join(format!("daozai-negative-guard-{}-{:?}.lrc",std::process::id(),std::thread::current().id()));
+        let _=std::fs::remove_file(&path);let _=std::fs::remove_file(negative_path(&path));
+        write_cache(&path,&parse_lrc("[00:01]已有歌词"));
+        write_negative(&path,None);
+        assert!(read_negative(&path).is_none(),"已有同步歌词时不能写负缓存");
+        assert!(read_cache(&path).unwrap().synced);
+        let _=std::fs::remove_file(&path);let _=std::fs::remove_file(negative_path(&path));
+    }
+
+    #[test]
+    fn a_failed_recheck_keeps_the_lyrics_already_on_the_island(){
+        let _data=TempData::new("recheck-lyrics");
+        let (track,artist)=("重查测试","歌手");
+        // 负缓存让本次查词必定失败且不会联网。
+        let path=cache_path(track,artist,8.0);
+        let qq=path.parent().unwrap().join("qqmusic").join(path.file_name().unwrap());
+        let _=std::fs::create_dir_all(qq.parent().unwrap());
+        let _=crate::model::atomic_write(&negative_path(&qq),b"");
+        let shown=parse_lrc("[00:01]正在显示的歌词");
+        let (lyrics,waiting)=fetch_for_display("QQMusic.exe",track,artist,8.0,None,Some(shown)).unwrap();
+        assert!(!waiting);assert_eq!(lyrics.lines[0].text,"正在显示的歌词");
+    }
+
+    #[test]
+    fn confirmed_missing_lyrics_are_remembered_briefly_but_failures_are_not(){
         let path=std::env::temp_dir().join(format!("daozai-negative-{}-{:?}.lrc",std::process::id(),std::thread::current().id()));
         let _=std::fs::remove_file(negative_path(&path));
         assert!(read_negative(&path).is_none());
@@ -1187,7 +1316,7 @@ mod tests {
         write_negative(&path,Some(&from_plain("第一行\n第二行")));
         let plain=read_negative(&path).unwrap().unwrap();
         assert!(!plain.synced);assert_eq!(plain.lines.len(),2);
-        // 超过 7 天视为过期，重新联网查询。
+        // 超过保留期视为过期，重新联网查询。
         let file=std::fs::OpenOptions::new().write(true).open(negative_path(&path)).unwrap();
         file.set_modified(std::time::SystemTime::now()-NEGATIVE_TTL-std::time::Duration::from_secs(60)).unwrap();drop(file);
         assert!(read_negative(&path).is_none());
