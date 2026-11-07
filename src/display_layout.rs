@@ -96,6 +96,7 @@ mod bottom_tests {
         let work=Bounds{left:0,top:0,right:1920,bottom:1032};
         assert_eq!(bottom_origin(m,work,640.0,270.0,1.0,0.0),Some((640,762)));
         assert_eq!(bottom_origin(m,work,640.0,270.0,1.5,0.0),Some((480,627)),"缩放后画布仍贴工作区底边");
+        assert_eq!(bottom_origin(m,work,640.0,270.0,2.0,0.0),Some((320,492)),"200% 画布仍完整贴住工作区底边");
         for offset in [-1.0,0.0,1.0] {
             let (x,_)=bottom_origin(m,work,640.0,270.0,1.0,offset).unwrap();
             let (top_x,_)=island_origin_offset(m,640.0,1.0,offset).unwrap();
@@ -113,7 +114,7 @@ mod side_tests {
     use crate::model::Dock;
     #[test]
     fn side_canvas_hugs_the_edge_and_keeps_the_panel_on_screen(){
-        for (m,scale) in [(Bounds{left:0,top:0,right:1920,bottom:1080},1.0),(Bounds{left:-2560,top:-400,right:0,bottom:1040},1.5)] {
+        for (m,scale) in [(Bounds{left:0,top:0,right:1920,bottom:1080},1.0),(Bounds{left:-2560,top:-400,right:0,bottom:1040},1.5),(Bounds{left:0,top:0,right:1920,bottom:1080},2.0)] {
             let canvas=(500.0,600.0);
             let (x,_)=side_origin(m,Dock::Left,canvas,150.0,scale,0.0).unwrap();assert_eq!(x,m.left);
             let (x,_)=side_origin(m,Dock::Right,canvas,150.0,scale,0.0).unwrap();assert_eq!(x+(500.0*scale) as i32,m.right);
@@ -143,6 +144,7 @@ mod offset_tests {
             (Bounds{left:0,top:0,right:1920,bottom:1080},1.0),
             (Bounds{left:-2560,top:-400,right:0,bottom:1040},1.5),
             (Bounds{left:1920,top:200,right:3840,bottom:1280},1.25*1.4),
+            (Bounds{left:0,top:0,right:1920,bottom:1080},2.0),
         ] {
             for offset in [-1.0,1.0,-5.0,5.0] {
                 let (x,_)=island_origin_offset(m,640.0,scale,offset).unwrap();

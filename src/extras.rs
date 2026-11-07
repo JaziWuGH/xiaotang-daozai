@@ -591,6 +591,19 @@ mod tests {
         }
     }
     #[test]
+    fn island_size_slider_can_reach_200_percent(){
+        let ctx=egui::Context::default();let mut value=100;
+        let pos=egui::pos2(20.0,30.0);let end=egui::pos2(260.0,30.0);
+        let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
+        let frames=[vec![],vec![egui::Event::PointerMoved(pos)],vec![button(pos,true)],vec![egui::Event::PointerMoved(end)],vec![button(end,false)]];
+        for events in frames {
+            let _=ctx.run(egui::RawInput{events,screen_rect:Some(Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(320.0,80.0))),..Default::default()},|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(20)).show(ctx,|ui|{ui.spacing_mut().slider_width=180.0;island_size_slider(ui,&mut value);});
+            });
+        }
+        assert_eq!(value,crate::model::ISLAND_SIZE_MAX,"滑到最右应能选到 200%");
+    }
+    #[test]
     fn number_stepper_clicks_follow_steps_and_limits() {
         for (initial,step,x,expected) in [(5u32,1,127.0,6),(5,1,13.0,4),(0,1,13.0,0),(10,1,127.0,10),(9,3,127.0,10),(1,3,13.0,0)] {
             let ctx=egui::Context::default();
@@ -1229,7 +1242,7 @@ impl App {
                                     if ui.add_enabled(self.settings.island_size!=100,egui::Button::new("恢复默认")).clicked(){self.settings.island_size=100;}
                                 }).response
                             });
-                            settings_hint(ui,"文字、图标和吉祥物按实际像素重新绘制，放大后依旧清晰；只影响岛体，不影响设置窗口。");
+                            settings_hint(ui,"文字、图标和吉祥物按实际像素重新绘制，放大后依旧清晰；范围 80%–200%，只影响岛体，不影响设置窗口。");
                         });
                         settings_label(ui,"岛体显示");
                         settings_card(ui,|ui|{

@@ -173,8 +173,11 @@ impl Dock {
 }
 
 /// 岛体大小（百分比）的范围与步进。
+/// 上限 200%：主窗口倍率由 eframe 按物理像素重新栅格化（底层允许 0.5..=3.0），
+/// 文字、图标与吉祥物放大到 2 倍依旧清晰；定位、热区和画布都按同一倍率换算，
+/// 岛体可见区域仍留在屏幕内，超出屏幕的只是透明画布留白。
 pub const ISLAND_SIZE_MIN: u32 = 80;
-pub const ISLAND_SIZE_MAX: u32 = 140;
+pub const ISLAND_SIZE_MAX: u32 = 200;
 pub const ISLAND_SIZE_STEP: u32 = 5;
 /// 水平位置：-100 = 最左，0 = 居中，100 = 最右（按可移动范围的百分比）。
 pub const ISLAND_OFFSET_MAX: i32 = 100;
@@ -800,8 +803,10 @@ mod tests {
 
     #[test]
     fn island_appearance_values_are_normalized() {
+        assert_eq!(ISLAND_SIZE_MAX, 200, "设置里必须能选到 200%");
         assert_eq!(island_size_value(100), 100);
         assert_eq!(island_size_value(10), ISLAND_SIZE_MIN);
+        assert_eq!(island_size_value(200), 200, "200% 不能被旧上限截断");
         assert_eq!(island_size_value(999), ISLAND_SIZE_MAX);
         assert_eq!(island_size_value(113), 115);
         assert_eq!(island_size_value(112), 110);
@@ -814,6 +819,8 @@ mod tests {
         assert_eq!((s.skin, s.glass_blur, s.island_scale(), s.island_offset_ratio()), (Skin::Classic, true, 1.0, 0.0));
         s.island_size = 125; s.island_offset = -250;
         assert_eq!((s.island_scale(), s.island_offset_ratio()), (1.25, -1.0));
+        s.island_size = 200;
+        assert_eq!(s.island_scale(), 2.0, "200% 必须原样传给主窗口倍率");
     }
 
     #[test]
