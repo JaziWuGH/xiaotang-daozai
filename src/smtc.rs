@@ -558,6 +558,56 @@ fn toggle_action(visible:bool,in_front:bool)->WindowToggle {
     if visible && in_front {WindowToggle::Hide}else{WindowToggle::Show}
 }
 
+/// 顶层窗口的静态特征。抽成纯数据，好拿实机抓到的窗口属性直接做单元测试，
+/// 不必在测试里真的造几十个 Win32 窗口。
+#[derive(Clone,Copy,Debug)]
+struct WindowFacts<'a> {
+    class:&'a str,
+    title:&'a str,
+    visible:bool,
+    owned:bool,
+    width:i32,
+    height:i32,
+    style:u32,
+    ex_style:u32,
+}
+
+// 只用这几个样式位，写成常量让判定函数不依赖 windows crate。
+const WIN_WS_CAPTION:u32=0x00C0_0000;
+const WIN_WS_SYSMENU:u32=0x0008_0000;
+const WIN_WS_MINIMIZEBOX:u32=0x0002_0000;
+const WIN_WS_THICKFRAME:u32=0x0004_0000;
+const WIN_WS_EX_TOOLWINDOW:u32=0x0000_0080;
+const WIN_WS_EX_NOACTIVATE:u32=0x0800_0000;
+
+/// 判断顶层窗口是不是播放器主窗口并给出排序分；`None` 表示绝不能当作主窗口。
+///
+/// 播放器会建几十个辅助窗，QQ 音乐就有一个 1440×753、标题 "TipWindow"、还带
+/// 标题栏的隐藏提示窗。旧逻辑只按「有标题 / 可见 / 有标题栏 / 面积大」打分，
+/// 主窗口最小化到托盘时反而输给它，点封面就把这块空白大窗 SW_SHOW 出来。
+fn main_window_score(f:&WindowFacts)->Option<u16> {
+    if f.ex_style & (WIN_WS_EX_TOOLWINDOW|WIN_WS_EX_NOACTIVATE)!=0 {return None;}
+    if f.owned {return None;}
+    // 主窗口得能像正常窗口那样交互：系统菜单、最小化按钮、可调整边框至少有一个。
+    // TipWindow 之类的提示浮层恰好一个都没有。
+    if f.style & (WIN_WS_SYSMENU|WIN_WS_MINIMIZEBOX|WIN_WS_THICKFRAME)==0 {return None;}
+    let class=f.class.to_ascii_lowercase();
+    if class=="ime" || ["msctfime","gdi+","tooltips_","animationtimer","txgflayermask","qqmusic_daemon","qqmusicdummywindow"]
+        .iter().any(|prefix|class.starts_with(*prefix)) {return None;}
+    let title=f.title.to_ascii_lowercase();
+    if ["tipwindow","txmenuwindow","dummy window","gdi+ window","default ime","msctfime ui",
+        "molepluginwnd","dynamiclyricwindow","qqmusic_com_wnd"]
+        .iter().any(|needle|title.contains(*needle)) {return None;}
+    let mut score=0u16;
+    if f.visible {score+=8;}
+    if !f.title.trim().is_empty(){score+=2;}
+    if f.style&WIN_WS_CAPTION!=0 {score+=2;}
+    if f.style&WIN_WS_MINIMIZEBOX!=0 {score+=2;}
+    // 只对可见窗口算面积分：隐藏的提示窗尺寸再大也不该加分。
+    if f.visible && f.width>300 && f.height>200 {score+=2;}
+    Some(score)
+}
+
 /// 由浮岛藏起来的主窗口（按来源记住）：再点一次封面直接还原，
 /// 不用重新枚举——窗口藏起来后打分排序可能选中别的窗口（歌词窗等）。
 #[cfg(windows)]
@@ -692,31 +742,37 @@ unsafe fn process_file_name(pid:u32)->Option<String> {
     Some(full.rsplit('\\').next().unwrap_or(&full).to_string())
 }
 
-/// 找该进程的顶层窗口：按「有标题栏 > 可见 > 面积大 > 有标题」打分，避免选中 IME / GDI+ 这类工具窗口。
+/// 找该进程的顶层窗口：先排掉辅助窗，再按「可见 > 有标题 > 可交互样式 > 面积」打分。
+/// 一个都挑不出来时返回 `None`，交给 `activate` 用启动客户端的方式兜底，
+/// 千万别退而求其次把提示窗 / 计时器窗显示出来。
 #[cfg(windows)]
 fn find_app_window(exe:&str)->Option<windows::Win32::Foundation::HWND> {
-    use windows::Win32::Foundation::{BOOL,HWND,LPARAM};
+    use windows::Win32::Foundation::{BOOL,HWND,LPARAM,RECT};
     use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows,GetWindowLongW,GetWindowRect,GetWindowTextLengthW,GetWindowThreadProcessId,GWL_EXSTYLE,GWL_STYLE,IsWindowVisible,WS_CAPTION,WS_EX_NOACTIVATE,WS_EX_TOOLWINDOW};
+    use windows::Win32::UI::WindowsAndMessaging::{EnumWindows,GetClassNameW,GetWindow,GetWindowLongW,GetWindowRect,GetWindowTextW,GetWindowThreadProcessId,GW_OWNER,GWL_EXSTYLE,GWL_STYLE,IsWindowVisible};
     struct Search<'a>{exe:&'a str,best:Option<(u16,HWND)>}
     unsafe extern "system" fn visit(hwnd:HWND,param:LPARAM)->BOOL {
         let search=&mut *(param.0 as *mut Search);
-        if search.best.is_some_and(|(score,_)|score>=12){return BOOL(0);}
-        let extended=GetWindowLongW(hwnd,GWL_EXSTYLE) as u32;
-        if extended & (WS_EX_TOOLWINDOW.0|WS_EX_NOACTIVATE.0)!=0{return BOOL(1);}
         let mut pid=0u32;
         GetWindowThreadProcessId(hwnd,Some(&mut pid));
         if pid==0||pid==GetCurrentProcessId(){return BOOL(1);}
         if !process_file_name(pid).is_some_and(|name|name.eq_ignore_ascii_case(search.exe)){return BOOL(1);}
-        let mut score=0u16;
-        if GetWindowTextLengthW(hwnd)>0{score+=2;}
-        if IsWindowVisible(hwnd).as_bool(){score+=4;}
-        if GetWindowLongW(hwnd,GWL_STYLE) as u32 & WS_CAPTION.0!=0{score+=4;}
-        let mut rect=windows::Win32::Foundation::RECT::default();
-        if GetWindowRect(hwnd,&mut rect).is_ok() {
-            if rect.right-rect.left>300 && rect.bottom-rect.top>200 {score+=2;}
+        let mut class=[0u16;128];let class_len=GetClassNameW(hwnd,&mut class) as usize;
+        let class=String::from_utf16_lossy(&class[..class_len.min(class.len())]);
+        let mut title=[0u16;256];let title_len=GetWindowTextW(hwnd,&mut title) as usize;
+        let title=String::from_utf16_lossy(&title[..title_len.min(title.len())]);
+        let mut rect=RECT::default();let _=GetWindowRect(hwnd,&mut rect);
+        let facts=WindowFacts{
+            class:&class,title:&title,
+            visible:IsWindowVisible(hwnd).as_bool(),
+            owned:GetWindow(hwnd,GW_OWNER).is_ok(),
+            width:rect.right-rect.left,height:rect.bottom-rect.top,
+            style:GetWindowLongW(hwnd,GWL_STYLE) as u32,
+            ex_style:GetWindowLongW(hwnd,GWL_EXSTYLE) as u32,
+        };
+        if let Some(score)=main_window_score(&facts) {
+            if search.best.is_none_or(|(old,_)|score>old){search.best=Some((score,hwnd));}
         }
-        if search.best.is_none_or(|(old,_)|score>old){search.best=Some((score,hwnd));}
         BOOL(1)
     }
     let mut search=Search{exe,best:None};
@@ -729,11 +785,14 @@ fn find_app_window(exe:&str)->Option<windows::Win32::Foundation::HWND> {
 fn focus_window(hwnd:windows::Win32::Foundation::HWND) {
     use windows::Win32::System::Threading::{AttachThreadInput,GetCurrentThreadId};
     use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-    use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop,GetForegroundWindow,GetWindowThreadProcessId,IsIconic,SetForegroundWindow,ShowWindow,SW_RESTORE,SW_SHOW};
+    use windows::Win32::UI::WindowsAndMessaging::{BringWindowToTop,GetForegroundWindow,GetWindowThreadProcessId,IsIconic,IsWindowVisible,SetForegroundWindow,ShowWindow,SW_RESTORE,SW_SHOW};
     unsafe{
         // 托盘里收起的窗口没有最小化标志，两种恢复都试一遍。
         if IsIconic(hwnd).as_bool(){let _=ShowWindow(hwnd,SW_RESTORE);}
         else{let _=ShowWindow(hwnd,SW_SHOW);}
+        // QQ 音乐这类客户端会「隐藏 + 最小化」同时用：SW_RESTORE 未必重新显示，
+        // 这里兜一次，免得点了封面只有提示文案、窗口却没出来。
+        if !IsWindowVisible(hwnd).as_bool(){let _=ShowWindow(hwnd,SW_SHOW);}
         let _=SetForegroundWindow(hwnd);
         if GetForegroundWindow()==hwnd {return;}
         let foreground=GetForegroundWindow();
@@ -1162,6 +1221,57 @@ mod tests {
         assert_eq!(toggle_action(true,false),WindowToggle::Show,"被别的窗口挡住：先切到前面");
         assert_eq!(toggle_action(false,false),WindowToggle::Show,"收在托盘（不可见）：先显示出来");
         assert_eq!(toggle_action(false,true),WindowToggle::Show,"不可见时即使被报成前台窗口也不能再去隐藏");
+    }
+
+    /// 实机抓到的 QQ 音乐窗口（2026-11-07）：主窗口最小化收在托盘，
+    /// 而 `TipWindow` 是 1440×753、带标题栏的隐藏提示窗，旧打分会把它选成主窗口。
+    #[test]
+    fn auxiliary_windows_never_win_the_main_window_pick(){
+        let interactive=0xa6cf0000u32; // CAP | SYS | MIN | MAX | THICK | POPUP
+        let tip=WindowFacts{class:"ATL:50CDEA40",title:"TipWindow",visible:false,owned:false,width:1440,height:753,style:0x04c00080,ex_style:0x100};
+        assert_eq!(main_window_score(&tip),None,"提示窗不能被当成主窗口");
+        let timer=WindowFacts{class:"AnimationTimerClass",title:"",visible:false,owned:false,width:1440,height:753,style:0x04cf0000,ex_style:0x100};
+        assert_eq!(main_window_score(&timer),None,"全屏计时器窗也不能算");
+        let queue=WindowFacts{class:"TXGuiFoundation",title:"播放队列",visible:false,owned:false,width:448,height:687,style:0x86080000,ex_style:0x80080};
+        assert_eq!(main_window_score(&queue),None,"工具窗口要排除");
+        let daemon=WindowFacts{class:"QQMusic_Daemon_Wnd",title:"听爸爸的话 - 周杰伦   ",visible:false,owned:false,width:0,height:0,style:0x84880000,ex_style:0x88};
+        assert_eq!(main_window_score(&daemon),None,"后台守护窗不能冒充主窗口");
+        let menu=WindowFacts{class:"TXGuiFoundation",title:"TXMenuWindow",visible:false,owned:false,width:14,height:14,style:0x860a0000,ex_style:0x08000080};
+        assert_eq!(main_window_score(&menu),None,"弹出菜单要排除");
+        let com=WindowFacts{class:"csQQMusicComApiWnd2017",title:"QQMusic_COM_WND_B2DA2B76",visible:false,owned:false,width:136,height:39,style:0x40cf0000,ex_style:0x100};
+        assert_eq!(main_window_score(&com),None,"COM 通信窗要排除");
+        let hidden=WindowFacts{class:"TXGuiFoundation",title:"听爸爸的话 - 周杰伦   ",visible:false,owned:false,width:160,height:28,style:interactive,ex_style:0x300};
+        let score=main_window_score(&hidden).expect("收在托盘里的主窗口仍要能找到并恢复");
+        assert!(score>0);
+        let mut shown=hidden;shown.visible=true;shown.width=1200;shown.height=800;
+        assert!(main_window_score(&shown).unwrap()>score,"可见的大主窗口优先级更高");
+        let overlay=WindowFacts{class:"ATL:7AB59878",title:"",visible:true,owned:false,width:1440,height:753,style:0x84000000,ex_style:0x80};
+        assert_eq!(main_window_score(&overlay),None,"没有交互样式的浮层即使可见又大也不能入选");
+        let owned=WindowFacts{class:"TXGuiFoundation",title:"音量",visible:true,owned:true,width:91,height:269,style:interactive,ex_style:0x80080};
+        assert_eq!(main_window_score(&owned),None,"有属主的弹出窗要排除");
+        // 其它播放器的常规主窗口不能被误伤。
+        let netease=WindowFacts{class:"OrpheusBrowserHost",title:"网易云音乐",visible:true,owned:false,width:1020,height:680,style:interactive,ex_style:0x100};
+        assert!(main_window_score(&netease).is_some());
+    }
+
+    /// 实机校验：本机开着 QQ 音乐时，选中的必须是主窗口而不是 TipWindow。
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn real_qqmusic_window_pick_is_not_the_tip_window(){
+        use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW,GetWindowLongW,GetWindowTextW,GWL_EXSTYLE,GWL_STYLE};
+        let Some(hwnd)=find_app_window("QQMusic.exe") else {eprintln!("QQ 音乐未运行，跳过实机校验");return;};
+        let mut class=[0u16;128];let class_len=unsafe{GetClassNameW(hwnd,&mut class)} as usize;
+        let class=String::from_utf16_lossy(&class[..class_len.min(class.len())]);
+        let mut title=[0u16;256];let title_len=unsafe{GetWindowTextW(hwnd,&mut title)} as usize;
+        let title=String::from_utf16_lossy(&title[..title_len.min(title.len())]);
+        eprintln!("选中的 QQ 音乐窗口: class={class} title={title}");
+        assert!(!title.eq_ignore_ascii_case("TipWindow"),"不能把提示窗选成主窗口");
+        assert!(main_window_score(&WindowFacts{
+            class:&class,title:&title,visible:true,owned:false,width:1200,height:800,
+            style:unsafe{GetWindowLongW(hwnd,GWL_STYLE)} as u32,
+            ex_style:unsafe{GetWindowLongW(hwnd,GWL_EXSTYLE)} as u32,
+        }).is_some());
     }
 
     #[cfg(windows)]
