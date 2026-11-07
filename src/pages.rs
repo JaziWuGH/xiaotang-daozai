@@ -7,6 +7,7 @@ use crate::mail;
 use crate::paint::{self, capsule, mix, Card, H};
 use crate::smtc::Transport;
 use crate::theme::{self, size, W};
+use crate::timezone;
 use eframe::egui::{self, Color32, Pos2, Rect};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -55,6 +56,45 @@ fn cover_colors(title: &str) -> (Color32, Color32) {
 }
 
 impl App {
+    // ================= 世界时钟 =================
+    /// 主时钟大字在左，最多四座城市在右；城市清单在设置页里维护。
+    pub(crate) fn page_world_clock(&mut self, c: &Card, env: &Env) {
+        let dim = Color32::from_rgb(150, 150, 158);
+        c.text(15.0, 45.0, "世界时钟", size::TITLE, W::Bold, theme::WHITE, H::Left);
+        let main_label = if env.display_label.is_empty() { "跟随系统".to_string() }
+            else { format!("主时钟 · {}", env.display_label) };
+        c.text(404.0, 45.0, &main_label, size::SMALL, W::Regular, dim, H::Right);
+        c.fill(15.0, 52.0, 389.0, 1.0, 0.5, Color32::from_white_alpha(22));
+
+        // 左右翻页箭头占 x 8..34 / 385..411（y 55..81），正文从 44 起、右缘收到 378。
+        let clock = self.settings.clock_text(&env.display_clock);
+        c.text(44.0, 82.0, &clock, size::HERO, W::Bold, theme::WHITE, H::Left);
+        c.text(44.0, 100.0, &env.display_date, size::BODY, W::Regular, theme::GRAY, H::Left);
+        if !self.settings.time_sync_at.is_empty() {
+            let at=self.settings.time_sync_at.split_whitespace().nth(1).unwrap_or(&self.settings.time_sync_at);
+            let short=at.get(..5).unwrap_or(at);
+            // 这行和右侧第四座城市同高，必须压在 x<200 以内。
+            c.text(44.0, 118.0, &format!("{short} 对时 · {:+} ms", self.settings.time_offset_ms),
+                size::TINY, W::Regular, dim, H::Left);
+        } else {
+            c.text(44.0, 118.0, "可在设置 → 时间 里开启互联网对时", size::TINY, W::Regular, dim, H::Left);
+        }
+
+        if env.cities.is_empty() {
+            c.text(378.0, 82.0, "还没有添加城市", size::BODY, W::Regular, dim, H::Right);
+            c.text(378.0, 100.0, "设置 → 时间 → 世界时钟", size::TINY, W::Regular, dim, H::Right);
+            return;
+        }
+        for (i, city) in env.cities.iter().take(4).enumerate() {
+            // 四行都落在 y 68..119，避开顶部箭头和底部页码豆（y≈133）。
+            let y = 68.0 + i as f32 * 17.0;
+            c.text(200.0, y, &city.label, size::BODY, W::Regular, theme::WHITE, H::Left);
+            c.text(270.0, y, &city.clock, size::BODY, W::Semibold, theme::WHITE, H::Left);
+            let diff = timezone::diff_text(timezone::diff_minutes(city.utc_minutes, env.main_utc_minutes));
+            c.text(378.0, y, &diff, size::TINY, W::Regular, dim, H::Right);
+        }
+    }
+
     // ================= 音乐 =================
     pub(crate) fn page_music(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let np=self.media.clone();

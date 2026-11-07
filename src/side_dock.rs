@@ -123,7 +123,7 @@ impl App {
             let mid = y + h / 2.0;
             match item {
                 SideItem::Clock => {
-                    let (hour, minute) = side_clock(&self.settings.clock_text(&env.clock));
+                    let (hour, minute) = side_clock(&self.settings.clock_text(&env.display_clock));
                     c.text(cx, mid - 1.0, &hour, 13.5, W::Bold, theme::WHITE, H::Center);
                     c.text(cx, mid + 13.0, &minute, 13.5, W::Bold, theme::WHITE, H::Center);
                 }

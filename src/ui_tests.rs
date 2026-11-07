@@ -45,7 +45,7 @@ fn v0649_settings_and_mail_accounts_survive_upgrade(){
     let directory=crate::model::config_dir();
     std::fs::create_dir_all(&directory).unwrap();
     let legacy=concat!("settings_theme=dark\npet=0\nminimal=1\nbrowser_minimal=1\n",
-        "visible_pages=10111111\npage_order=5,2,0,1,3,4,6,7\nshow_battery=0\n",
+        "visible_pages=101111110\npage_order=5,2,0,1,3,4,6,7,8\nshow_battery=0\n",
         "system_hud=0\nread_notifications=1\nnotifications=0\nsound=1\n",
         "lyrics_enabled=0\nisland_lyrics=1\nlyric_delay_ms=-650\nhide_fullscreen=0\n",
         "focus_minutes=45\nrest_minutes=10\nwater_minutes=60\nserving_ml=300\nwater_start=8\nwater_end=23\n",
@@ -410,6 +410,11 @@ struct H {
     file_drop_zone:Option<Rect>,
     hovered_files:Vec<egui::HoveredFile>,
     dropped_files:Vec<egui::DroppedFile>,
+    display_clock:String,
+    display_date:String,
+    display_label:String,
+    cities:Vec<crate::timezone::CityTime>,
+    main_utc_minutes:i32,
 }
 
 impl H {
@@ -418,7 +423,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![],display_clock:"09:41:00".into(),display_date:"10月28日 周三".into(),display_label:String::new(),cities:vec![],main_utc_minutes:0 }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -436,6 +441,12 @@ impl H {
             clock: "09:41:00".into(),
             today: "2026-10-28".into(),
             date: "10月28日 周三".into(),
+            display_clock: self.display_clock.clone(),
+            display_today: "2026-10-28".into(),
+            display_date: self.display_date.clone(),
+            display_label: self.display_label.clone(),
+            cities: self.cities.clone(),
+            main_utc_minutes: self.main_utc_minutes,
             cursor: self.cursor,
             bt: self.bt.clone(),
             bt_ready: true,
@@ -1375,7 +1386,7 @@ fn wheel_navigation_reaches_every_page_in_both_directions(){
     h.app.shelf.items.clear();h.app.todos.items.clear();
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.hover(H::local(210.0,18.0),0.3);
-    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,0]),(40.0,[7,6,5,4,3,2,1,0])] {
+    for (delta,pages) in [(-40.0,[1,2,3,4,5,6,7,8,0]),(40.0,[8,7,6,5,4,3,2,1,0])] {
         for page in pages {
             h.wheel(delta);
             assert_eq!(h.app.page,page,"滚轮翻页不能被空的置物架或待办卡住");
@@ -1431,9 +1442,9 @@ fn wheel_handles_small_deltas_without_skipping_pages_on_bursts(){
 }
 
 #[test]
-fn navigation_wraps_between_eight_pages_and_notification_settings_remain_accessible() {
+fn navigation_wraps_between_nine_pages_and_notification_settings_remain_accessible() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,7);
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(21.0,68.0));assert_eq!(h.app.page,8);
     h.hover(H::local(300.0,60.0),0.8);h.click(H::local(398.0,68.0));assert_eq!(h.app.page,0);
     h.app.open_settings_category(3);assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,6);
 }
@@ -1583,7 +1594,7 @@ fn quota_accounts_switch_independently_and_hide_with_the_page() {
 fn page_visibility_is_saved_and_sets_the_starting_page() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    assert_eq!(h.app.settings.visible_pages,[true;8]);
+    assert_eq!(h.app.settings.visible_pages,[true;9]);
     assert!(h.app.settings.show_battery);
     h.app.settings.show_battery=false;
     h.app.set_page_visible(0,false);
@@ -1591,17 +1602,17 @@ fn page_visibility_is_saved_and_sets_the_starting_page() {
     h.app.settings.save();
     let settings=crate::model::Settings::load();
     assert!(!settings.show_battery);
-    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true]);
+    assert_eq!(settings.visible_pages,[false,true,true,false,true,true,true,true,true]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),1);
     assert_eq!(restarted.settings.visible_pages,settings.visible_pages);
     assert!(!restarted.settings.show_battery);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,false,false]);
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=1000000\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true],"旧版页面开关应保留，并开启新增的日程页");
+    assert_eq!(crate::model::Settings::load().visible_pages,[true,false,false,false,false,false,false,true,true],"旧版页面开关应保留，并开启新增的日程页与世界时钟页");
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=invalid\n").unwrap();
-    assert_eq!(crate::model::Settings::load().visible_pages,[true;8]);
+    assert_eq!(crate::model::Settings::load().visible_pages,[true;9]);
 }
 
 #[test]
@@ -1641,7 +1652,7 @@ fn battery_module_can_disable_only_the_power_warning() {
 fn page_visibility_skips_hidden_pages_in_every_navigation_control() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [2,5,0] {
         h.click(H::local(398.0,68.0));
@@ -1670,7 +1681,7 @@ fn page_visibility_moves_away_from_hidden_page_and_keeps_one_page() {
     h.app.set_page_visible(4,false);
     assert_eq!(h.app.page,0);
     assert!(!h.app.is_editing());
-    for page in [0,1,3,5,6,7] {h.app.set_page_visible(page,false);}
+    for page in [0,1,3,5,6,7,8] {h.app.set_page_visible(page,false);}
     assert_eq!(h.app.page,2);
     h.app.set_page_visible(2,false);
     assert!(h.app.settings.visible_pages[2],"不能关闭最后一个页面");
@@ -3758,13 +3769,13 @@ fn calendar_sync_result_does_not_enqueue_another_sync() {
 fn page_order_persists_and_controls_navigation() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+    h.app.settings.page_order=[5,2,0,1,3,4,6,7,8];
     h.app.settings.save();
     let settings=crate::model::Settings::load();
-    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7]);
+    assert_eq!(settings.page_order,[5,2,0,1,3,4,6,7,8]);
     let restarted=App::new(&h.ctx,Options{fetch_lyrics:false,pet_idle:1e9});
     assert_eq!(restarted.page(),5);
-    for page in [1,3,4,6,7] {h.app.set_page_visible(page,false);}
+    for page in [1,3,4,6,7,8] {h.app.set_page_visible(page,false);}
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     for expected in [5,2,0] {
         h.click(H::local(398.0,68.0));
@@ -3777,7 +3788,7 @@ fn page_order_persists_and_controls_navigation() {
     assert_eq!(h.app.page,5);
     for invalid in ["0,0,1,2,3,4,5,6","8,1,2,3,4,5,6,7","0,1","invalid"] {
         std::fs::write(crate::model::config_dir().join("settings.txt"),format!("page_order={invalid}\n")).unwrap();
-        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7]);
+        assert_eq!(crate::model::Settings::load().page_order,[0,1,2,3,4,5,6,7,8]);
     }
 }
 
@@ -3804,9 +3815,9 @@ fn page_order_drag_applies_on_release_and_saves() {
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
     draw(&mut h,vec![egui::Event::PointerMoved(to)]);
-    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[0,1,2,3,4,5,6,7,8]);
     draw(&mut h,vec![button(to,false)]);
-    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7]);
+    assert_eq!(h.app.settings.page_order,[1,2,0,3,4,5,6,7,8]);
     assert_eq!(crate::model::Settings::load().page_order,h.app.settings.page_order);
 }
 
@@ -5630,7 +5641,7 @@ fn wheel_short_clipboard_and_calendar_turn_pages(){
     h.app.calendar.view.day=day;h.app.calendar.view.month=crate::calendar::month_start(day);h.app.calendar.view.loaded=Some(h.app.calendar.view.month);
     for (count,ended,all_day) in [(0,false,false),(1,false,false),(5,false,false),(8,true,false),(4,false,true)]{
         h.app.calendar.view.events=(0..count).map(|i|crate::mail::Meeting{all_day,title:format!("日程 {i}"),start:if ended{start-7200}else{start+i*60},end:Some(if ended{start-3600}else{start+3600}),at:String::new(),uid:format!("wheel-{i}")}).collect();
-        for (delta,page) in [(-40.0,0),(40.0,6)]{
+        for (delta,page) in [(-40.0,8),(40.0,6)]{
             h.app.show_page(7);h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
             assert_eq!(h.app.page,page,"日历可见列表未溢出应翻页，条数 {count}");
         }
@@ -5641,4 +5652,113 @@ fn wheel_short_clipboard_and_calendar_turn_pages(){
         h.hover(H::local(300.0,160.0),0.5);h.wheel(delta);
         assert_eq!(h.app.page,7,"日历溢出后边界也应留在本页");assert_eq!(h.app.calendar.view.first,first);
     }
+}
+
+/// `DAOZAI_TIME_PREVIEW=<png 路径>` 时导出世界时钟页，用来肉眼核对布局。
+#[test]
+#[ignore = "只在需要出预览图时手动跑"]
+fn render_world_clock_preview(){
+    let Ok(dest)=std::env::var("DAOZAI_TIME_PREVIEW") else{return};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(crate::app::WORLD_CLOCK_PAGE);
+    h.app.settings.time_zone="Asia/Shanghai".into();
+    h.app.settings.time_sync_at="2026-11-07 09:50".into();
+    h.app.settings.time_offset_ms=341;
+    h.cursor=Some(H::local(200.0,60.0));
+    let city=|label:&str,clock:&str,utc:i32|crate::timezone::CityTime{label:label.into(),clock:clock.into(),date:"2026-11-06".into(),utc_minutes:utc};
+    let cities=vec![city("纽约","20:57",-300),city("伦敦","01:57",0),city("东京","10:57",540),city("悉尼","12:57",660)];
+    let mut raster=crate::preview_raster::Raster::new(1280,380);
+    for frame in 0..150 {
+        let t=frame as f64/60.0;
+        let env=Env{t,clock:"20:57:00".into(),today:"2026-11-06".into(),date:"11月6日 周五".into(),
+            display_clock:"09:57:00".into(),display_today:"2026-11-07".into(),display_date:"11月7日 周六".into(),
+            display_label:"北京".into(),cities:cities.clone(),main_utc_minutes:480,cursor:h.cursor,..Default::default()};
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+        let output=h.ctx.run(raw,|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+        });
+        raster.update_textures(&output.textures_delta);
+        if frame==149 {
+            raster.buf.fill([0.10,0.10,0.12,1.0]);
+            raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+            let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            let image=image::RgbaImage::from_raw(1280,380,rgba).unwrap();
+            image::imageops::crop_imm(&image,200,0,880,290).to_image().save(&dest).unwrap();
+        }
+        raster.free_textures(&output.textures_delta);
+    }
+}
+
+#[test]
+fn time_settings_persist_and_reject_unknown_zone() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    assert!(h.app.settings.time_zone.is_empty(),"默认跟随系统时区");
+    assert_eq!(h.app.settings.world_clocks.len(),3);
+    assert!(h.app.settings.time_sync);
+    h.app.settings.time_zone="Asia/Shanghai".into();
+    h.app.settings.world_clocks=vec![("巴黎".into(),"Europe/Paris".into())];
+    h.app.settings.time_offset_ms=42;
+    h.app.settings.time_sync_at="2026-11-06 21:00:00".into();
+    h.app.settings.time_sync=false;
+    h.app.settings.save();
+    let loaded=crate::model::Settings::load();
+    assert_eq!(loaded.time_zone,"Asia/Shanghai");
+    assert_eq!(loaded.world_clocks,vec![("巴黎".into(),"Europe/Paris".into())]);
+    assert_eq!(loaded.time_offset_ms,42);
+    assert_eq!(loaded.time_sync_at,"2026-11-06 21:00:00");
+    assert!(!loaded.time_sync);
+    // 旧配置没有时间字段，或写了非法时区，都要安全回退。
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"time_zone=Mars/Olympus\n").unwrap();
+    let legacy=crate::model::Settings::load();
+    assert!(legacy.time_zone.is_empty());
+    assert_eq!(legacy.world_clocks.len(),3);
+    assert!(legacy.time_sync);
+    assert_eq!(legacy.time_offset_ms,0);
+    // 8 页时代的配置：页序自动补上新页面，页面开关保留且新页默认开启。
+    std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=10111111\npage_order=5,2,0,1,3,4,6,7\n").unwrap();
+    let eight=crate::model::Settings::load();
+    assert_eq!(eight.page_order,[5,2,0,1,3,4,6,7,8]);
+    assert!(eight.visible_pages[8]);
+    assert!(eight.visible_pages[0]);
+}
+
+#[test]
+fn top_bar_shows_selected_zone_not_system_clock() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.display_clock="21:57:00".into();
+    h.display_date="11月6日 周五".into();
+    h.display_label="北京".into();
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.hover(H::local(200.0,40.0),1.0);
+    let has=|text:&str|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==text));
+    assert!(has("21:57"),"顶栏应显示所选时区的时钟");
+    assert!(has("北京 · 11月6日 周五"),"日期前要带时区标签，免得误以为系统时间错了");
+    assert!(!has("09:41"),"系统本地时间不应再出现在顶栏");
+}
+
+#[test]
+fn world_clock_page_lists_cities_with_offsets() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.time_zone="Asia/Shanghai".into();
+    h.display_label="北京".into();
+    h.main_utc_minutes=480;
+    h.cities=vec![
+        crate::timezone::CityTime{label:"纽约".into(),clock:"21:41".into(),date:"2026-10-27".into(),utc_minutes:-240},
+        crate::timezone::CityTime{label:"东京".into(),clock:"10:41".into(),date:"2026-10-28".into(),utc_minutes:540},
+    ];
+    h.app.show_page(crate::app::WORLD_CLOCK_PAGE);
+    h.hover(H::local(200.0,40.0),1.0);
+    let has=|text:&str|h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==text));
+    assert!(has("世界时钟"));
+    assert!(has("主时钟 · 北京"));
+    assert!(has("纽约") && has("21:41") && has("-12 小时"));
+    assert!(has("东京") && has("10:41") && has("+1 小时"));
+    // 清空城市后给出引导，不留一块空白卡片。
+    h.cities.clear();h.frame(vec![]);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="还没有添加城市")));
 }

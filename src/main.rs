@@ -78,6 +78,10 @@ struct Shell {
     quota_at: PollClock,
     /// 进程无声消失时用来界定「死前最后一刻」的节流时钟。
     heartbeat_at: PollClock,
+    /// 上次触发互联网对时的时间（默认每 30 分钟一次）。
+    time_sync_at: PollClock,
+    /// 正在进行的对时任务，避免重复起线程。
+    time_sync_rx: Option<std::sync::mpsc::Receiver<Result<daozai::timezone::SyncResult,String>>>,
 }
 
 impl Shell {
@@ -170,6 +174,8 @@ impl Shell {
             cal_sig: (Vec::new(), true),
             quota: daozai::quota::Service::start(), quota_sig: None, quota_at: PollClock::default(),
             heartbeat_at: PollClock::default(),
+            time_sync_at: PollClock::default(),
+            time_sync_rx: None,
         }
     }
 
@@ -206,8 +212,51 @@ impl Shell {
         }
     }
 
+    /// 起一个后台线程取标准时间；结果不阻塞界面，由 `poll_time_sync` 收。
+    fn start_time_sync(&mut self) {
+        if self.time_sync_rx.is_some(){return;}
+        let (tx,rx)=std::sync::mpsc::channel();
+        self.time_sync_rx=Some(rx);
+        self.app.settings.time_sync_note="正在连接标准时间服务器…".into();
+        std::thread::spawn(move||{let _=tx.send(daozai::timezone::sync_once());});
+    }
+
+    fn poll_time_sync(&mut self) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(rx)=self.time_sync_rx.take() else{return;};
+        match rx.try_recv() {
+            Ok(Ok(result))=>{
+                self.app.settings.time_offset_ms=result.offset_ms;
+                self.app.settings.time_sync_at=result.at;
+                self.app.settings.time_sync_note=format!("{} · 补偿 {} ms · 往返 {} ms",result.source,result.offset_ms,result.rtt_ms);
+            }
+            Ok(Err(error))=>{
+                // 对不上就继续用系统时间，不把旧偏差当作新结果。
+                self.app.settings.time_sync_note=format!("对时失败：{error}（已沿用系统时间）");
+            }
+            Err(TryRecvError::Empty)=>{self.time_sync_rx=Some(rx);return;}
+            Err(TryRecvError::Disconnected)=>{self.app.settings.time_sync_note="对时线程意外结束".into();}
+        }
+        self.app.settings.save();
+    }
+
     fn env(&mut self, ctx: &egui::Context) -> Env {
-        let (clock, today, date) = local_now();
+        let offset_ms=self.app.settings.time_offset_ms;
+        let (clock, today, date) = local_now(offset_ms);
+        // 系统本地时间给日历/待办用；顶栏另算一份所选时区的墙上时间。
+        let (display_clock,display_today,display_date)=if self.app.settings.time_zone.is_empty(){
+            (clock.clone(),today.clone(),date.clone())
+        }else{
+            daozai::timezone::zoned(&self.app.settings.time_zone,offset_ms)
+                .unwrap_or_else(||(clock.clone(),today.clone(),date.clone()))
+        };
+        let display_label=if self.app.settings.time_zone.is_empty(){String::new()}else{
+            daozai::timezone::label_of(&self.app.settings.time_zone).split(" / ").next().unwrap_or("").to_string()
+        };
+        let cities=self.app.settings.world_clocks.iter()
+            .filter_map(|(label,tz)|daozai::timezone::city_time(label,tz,offset_ms))
+            .take(4).collect::<Vec<_>>();
+        let main_utc_minutes=daozai::timezone::main_utc_minutes(&self.app.settings.time_zone,offset_ms);
         // 电量变化很慢，每 5 秒读一次就够
         if self.sys.2.ready(Duration::from_secs(5)) {
             let (b, c) = read_power();
@@ -237,6 +286,12 @@ impl Shell {
             clock,
             today,
             date,
+            display_clock,
+            display_today,
+            display_date,
+            display_label,
+            cities,
+            main_utc_minutes,
             battery: self.sys.0,
             charging: self.sys.1,
             network: Some(self.system_state.network),
@@ -288,6 +343,12 @@ impl eframe::App for Shell {
             self.heartbeat_at=PollClock::now();
             diagnostics::note("heartbeat.log",&format!("运行中，已启动 {:.0} 秒",self.t0.elapsed().as_secs_f64()));
         }
+        // 互联网对时：启动后先校一次，之后每 30 分钟一次；请求全在后台线程。
+        if self.app.settings.time_sync && self.time_sync_at.ready(Duration::from_secs(1800)) {
+            self.time_sync_at=PollClock::now();
+            self.start_time_sync();
+        }
+        self.poll_time_sync();
         let guarded=daozai::resources::GUARD.tripped();
         if guarded && !self.guard_notified {
             // 资源保护熔断：停止音乐会话轮询（含封面、网易云日志）与歌词查询，保住用户电脑，重启后恢复。
@@ -642,6 +703,7 @@ impl eframe::App for Shell {
                 Cmd::CalendarTest(cfg,password)=>self.cal.test(cfg,password),
                 Cmd::CalendarSync=>self.cal.sync_now(),
                 Cmd::CalendarMonth(month)=>self.cal.view_month(month),
+                Cmd::SyncTime=>self.start_time_sync(),
                 Cmd::CalendarForget=>{
                     if let Err(error)=daozai::calendar::forget_config(){self.app.say(&error);continue;}
                     if let Some(old)=self.app.forget_calendar(){daozai::calendar::secrets::delete(&old);}
@@ -704,23 +766,9 @@ mod repaint_tests {
     }
 }
 
-#[cfg(windows)]
-fn local_now() -> (String, String, String) {
-    use windows::Win32::System::SystemInformation::GetLocalTime;
-    let st = unsafe { GetLocalTime() };
-    let wd = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
-    (
-        format!("{:02}:{:02}:{:02}", st.wHour, st.wMinute, st.wSecond),
-        format!("{:04}-{:02}-{:02}", st.wYear, st.wMonth, st.wDay),
-        format!("{}月{}日 {}", st.wMonth, st.wDay, wd[(st.wDayOfWeek as usize).min(6)]),
-    )
-}
-
-#[cfg(not(windows))]
-fn local_now() -> (String, String, String) {
-    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let (h, m, s) = ((secs / 3600) % 24, (secs / 60) % 60, secs % 60);
-    (format!("{h:02}:{m:02}:{s:02}"), "1970-01-01".into(), "1月1日 周四".into())
+/// 系统本地时间，应用互联网对时得到的偏差；日历、待办等业务模块读这一份。
+fn local_now(offset_ms: i64) -> (String, String, String) {
+    daozai::timezone::system(offset_ms)
 }
 
 #[cfg(windows)]

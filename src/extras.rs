@@ -1150,7 +1150,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","主时钟时差与多城市时间"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1284,6 +1284,58 @@ impl App {
                             let mut pet=self.settings.pet;
                             setting_row(ui,"岛仔吉祥物","收起时常驻，播放音乐时一起唱歌",&mut pet);
                             if pet!=self.settings.pet {self.set_pet(pet);}
+                        });
+                        settings_label(ui,"时间");
+                        settings_card(ui,|ui|{
+                            settings_control_row_right(ui,"显示时区",|ui|{
+                                egui::ComboBox::from_id_salt("main-time-zone").width(190.0)
+                                    .selected_text(crate::timezone::label_of(&self.settings.time_zone))
+                                    .show_ui(ui,|ui|{
+                                        for (value,label) in crate::timezone::PRESETS {
+                                            ui.selectable_value(&mut self.settings.time_zone,(*value).to_string(),*label);
+                                        }
+                                    });
+                            });
+                            settings_hint(ui,"只改变岛仔顶栏与世界时钟显示的时间，不改系统时区；日历、待办和喝水记录仍按系统时间。");
+                            ui.separator();
+                            setting_row(ui,"互联网对时","每 30 分钟用标准时间校准走时偏差",&mut self.settings.time_sync);
+                            settings_control_row_right(ui,"标准时间",|ui|{
+                                if ui.small_button("立即同步").clicked(){self.pending.push(Cmd::SyncTime);}
+                                let status=if self.settings.time_sync_note.is_empty(){"尚未对时".to_string()}else{self.settings.time_sync_note.clone()};
+                                ui.label(egui::RichText::new(status).size(11.0).color(ui.visuals().weak_text_color()));
+                            });
+                            settings_hint(ui,"优先 NTP（UDP 123），不通时改读网站的 Date 响应头；断网自动沿用系统时间，不影响显示。");
+                            ui.separator();
+                            ui.label(egui::RichText::new("世界时钟").size(12.0));
+                            let mut remove=None;
+                            for (i,(label,tz)) in self.settings.world_clocks.iter().enumerate() {
+                                ui.horizontal(|ui|{
+                                    ui.label(egui::RichText::new(format!("{label} · {}",crate::timezone::label_of(tz))).size(11.5));
+                                    if ui.small_button("移除").clicked(){remove=Some(i);}
+                                });
+                            }
+                            if let Some(i)=remove {self.settings.world_clocks.remove(i);}
+                            if self.settings.world_clocks.is_empty(){settings_hint(ui,"还没有城市；添加后可在展开面板的「世界时钟」页查看。");}
+                            settings_hint(ui,"面板一屏最多显示 4 座城市，列表更长时只显示前 4 座；时区规则含夏令时自动切换。");
+                            let draft_id=egui::Id::new("world-clock-draft");
+                            let mut draft:(String,String)=ui.data(|d|d.get_temp(draft_id)).unwrap_or_else(||(String::new(),"Asia/Tokyo".into()));
+                            let mut add=false;
+                            ui.horizontal(|ui|{
+                                ui.add(egui::TextEdit::singleline(&mut draft.0).hint_text("城市名").desired_width(110.0));
+                                egui::ComboBox::from_id_salt("world-clock-tz").width(150.0)
+                                    .selected_text(crate::timezone::label_of(&draft.1))
+                                    .show_ui(ui,|ui|{
+                                        for (value,label) in crate::timezone::PRESETS.iter().filter(|(v,_)|!v.is_empty()) {
+                                            ui.selectable_value(&mut draft.1,(*value).to_string(),*label);
+                                        }
+                                    });
+                                add=ui.small_button("添加").clicked();
+                            });
+                            if add && !draft.0.trim().is_empty() {
+                                self.settings.world_clocks.push((draft.0.trim().to_string(),draft.1.clone()));
+                                draft.0.clear();
+                            }
+                            ui.data_mut(|d|d.insert_temp(draft_id,draft));
                         });
                         self.avoidance.settings(ui,&mut self.settings);
                         settings_label(ui,"声音与显示");

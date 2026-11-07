@@ -9,6 +9,7 @@ pub mod display_layout;
 mod mail_privacy;
 pub mod poll_clock;
 pub mod resources;
+pub mod timezone;
 pub mod anim;
 pub mod appaudio;
 pub mod players;

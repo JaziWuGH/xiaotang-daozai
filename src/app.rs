@@ -49,7 +49,9 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "世界时钟"];
+/// 世界时钟页在 `visible_pages` / `page_order` 里的下标。
+pub(crate) const WORLD_CLOCK_PAGE: usize = 8;
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -83,12 +85,23 @@ impl Default for Options {
 #[derive(Clone, Default)]
 pub struct Env {
     pub t: f64,
-    /// `HH:MM:SS`
+    /// 系统本地时间 `HH:MM:SS`。日历、待办、喝水等业务逻辑仍用它，
+    /// 避免把「北京时间字符串」误当成本地时刻换算时间戳。
     pub clock: String,
-    /// `YYYY-MM-DD`
+    /// 系统本地日期 `YYYY-MM-DD`
     pub today: String,
-    /// 顶栏日期，例如 `10月28日 周三`
+    /// 系统本地日期，例如 `10月28日 周三`
     pub date: String,
+    /// 顶栏实际显示的时间（按设置里的时区，含互联网校时偏差）。
+    pub display_clock: String,
+    pub display_today: String,
+    pub display_date: String,
+    /// 显示时区的短标签；跟随系统时为空串。
+    pub display_label: String,
+    /// 世界时钟卡片上的城市（已在环境层算好，绘制时不再逐帧解析时区）。
+    pub cities: Vec<crate::timezone::CityTime>,
+    /// 主时钟相对 UTC 的偏移分钟数。
+    pub main_utc_minutes: i32,
     pub battery: Option<u8>,
     pub charging: bool,
     /// 互联网连接状态；未知时不触发表情提醒。
@@ -117,10 +130,10 @@ pub struct Env {
 
 impl Env {
     pub fn hour(&self) -> usize {
-        self.clock.get(0..2).and_then(|s| s.parse().ok()).unwrap_or(12)
+        self.display_clock.get(0..2).and_then(|s| s.parse().ok()).unwrap_or(12)
     }
     pub fn minute(&self) -> u32 {
-        self.clock.get(3..5).and_then(|s| s.parse().ok()).unwrap_or(0)
+        self.display_clock.get(3..5).and_then(|s| s.parse().ok()).unwrap_or(0)
     }
 }
 
@@ -192,6 +205,8 @@ pub enum Cmd {
     CalendarForget,
     /// 选择 .ics 文件导入本机日程。
     CalendarImport,
+    /// 立即用互联网标准时间校准走时（后台线程执行，不阻塞界面）。
+    SyncTime,
 }
 
 /// 毛玻璃皮肤下原生窗口区域的组成部分（相对 `win` 左上角，逻辑点）。
@@ -594,7 +609,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -2278,11 +2293,12 @@ impl App {
         let header=base.faded(1.0-lyric_alpha);
         let base=&header;
         let m = anim::ease_in_out(smoothstep(0.0, 0.85, p));
-        let clock = self.settings.clock_text(&env.clock);
+        let clock = self.settings.clock_text(&env.display_clock);
         let show_battery=self.settings.show_battery && env.battery.is_some();
 
         // 顶栏终点布局：[电池][日期][时钟] 作为一组整体居中
-        let date_w = base.text_w(&env.date, size::DATE, W::Regular);
+        let display_date = if env.display_label.is_empty() { env.display_date.clone() } else { format!("{} · {}", env.display_label, env.display_date) };
+        let date_w = base.text_w(&display_date, size::DATE, W::Regular);
         let clock_w = paint::clock_width(base,&clock,size::CLOCK);
         let battery_space=if show_battery {24.0}else{0.0};
         let group = battery_space + date_w + 8.0 + clock_w;
@@ -2314,7 +2330,7 @@ impl App {
         }
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
-            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
+            base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &display_date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
         if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
             paint::playback_bars(base,lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m),lerp(15.0,18.0,m),self.t,self.media.playing,theme::WHITE);
@@ -2480,6 +2496,7 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             CALENDAR_PAGE => self.page_calendar(c,env),
+            WORLD_CLOCK_PAGE => self.page_world_clock(c,env),
             _ => self.page_settings(c),
         }
     }

@@ -198,11 +198,23 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
+    /// 主时钟显示时区（IANA 名；空串 = 跟随系统）。只影响岛仔显示，不改系统时区。
+    pub time_zone: String,
+    /// 世界时钟卡片上的城市：(显示名, IANA 时区)。
+    pub world_clocks: Vec<(String,String)>,
+    /// 是否定时用互联网标准时间校准走时。
+    pub time_sync: bool,
+    /// 最近一次校准得到的本机时钟偏差（毫秒，正数表示本机慢了）。
+    pub time_offset_ms: i64,
+    /// 最近一次成功对时的本地时间说明。
+    pub time_sync_at: String,
+    /// 最近一次对时结果（成功写偏差，失败写原因），给设置页展示。
+    pub time_sync_note: String,
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
@@ -241,7 +253,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -295,16 +307,24 @@ impl Settings {
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
-                    if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                    if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
+                        // 旧配置只有 8 个页面，新增的「世界时钟」补在末尾。
+                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) { order.push(8); }
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
+                "time_zone" => s.time_zone = if v.is_empty() || v.parse::<chrono_tz::Tz>().is_ok() { v } else { String::new() },
+                "world_clocks" => s.world_clocks = serde_json::from_str(&v).unwrap_or_else(|_|crate::timezone::default_cities()),
+                "time_sync" => s.time_sync = v != "0",
+                "time_offset_ms" => s.time_offset_ms = v.parse::<i64>().unwrap_or(0).clamp(-86_400_000,86_400_000),
+                "time_sync_at" => s.time_sync_at = v,
+                "time_sync_note" => s.time_sync_note = v,
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
@@ -365,6 +385,12 @@ impl Settings {
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
+                ("time_zone".into(), self.time_zone.clone()),
+                ("world_clocks".into(), serde_json::to_string(&self.world_clocks).unwrap_or_default()),
+                ("time_sync".into(), (self.time_sync as u8).to_string()),
+                ("time_offset_ms".into(), self.time_offset_ms.to_string()),
+                ("time_sync_at".into(), self.time_sync_at.clone()),
+                ("time_sync_note".into(), self.time_sync_note.clone()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
