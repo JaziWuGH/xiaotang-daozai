@@ -4115,7 +4115,7 @@ fn music_mode_button_cycles_only_when_mode_is_known(){
 }
 
 #[test]
-fn qqmusic_shows_current_mode_without_direct_cycling(){
+fn qqmusic_shows_current_mode_and_can_cycle_it(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
     h.app.show_page(0);
@@ -4126,13 +4126,13 @@ fn qqmusic_shows_current_mode_without_direct_cycling(){
     h.cmds.clear();
     h.click(H::local(118.0,118.0));
     assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"QQ 音乐读得到模式时要给出入口");
-    // 还没读到模式时也应该给入口，点了能把客户端调到前台。
+    // 还没读到模式时也应该给入口，点一下会弹出菜单并切到下一档。
     h.media.play_mode=crate::smtc::PlayMode::Unknown;
     h.frame(vec![]);h.cmds.clear();
     h.click(H::local(118.0,118.0));
     assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"QQ 音乐首次读取前也要给出入口");
     assert!(crate::smtc::supports_play_mode("QQMusic.exe"),"QQ 音乐应能显示当前模式");
-    assert!(!crate::smtc::can_cycle_play_mode("QQMusic.exe"),"QQ 音乐不能从岛上直接切换");
+    assert!(crate::smtc::can_cycle_play_mode("QQMusic.exe"),"QQ 音乐现在能从岛上直接切换");
     assert!(crate::smtc::can_cycle_play_mode("cloudmusic.exe"),"网易云行为不能被改动");
     assert!(!crate::smtc::supports_play_mode("Spotify.exe"));
 }

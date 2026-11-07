@@ -608,14 +608,15 @@ impl eframe::App for Shell {
                     }
                 }
                 Cmd::CyclePlayMode=>{
-                    // 切换模式或唤起播放器都会触发前台事件，别让它把面板收走。
-                    self.app.keep_open(1.2);
+                    // QQ 音乐会短暂显示并抢前台，整个过程约 1 秒，面板要一直保持展开，
+                    // 否则前台事件会把面板收走、用户看不到图标变化。
+                    self.app.keep_open(2.5);
                     let ctx=ctx.clone();
                     std::thread::spawn(move||{
-                        if smtc::cycle_play_mode() {
-                            // 网易云图标已就地前移；QQ 音乐窗口被调到前台，两者都要主动重绘。
-                            ctx.request_repaint();
-                        }else{
+                        let success=smtc::cycle_play_mode();
+                        // 成功要立刻重绘图标；失败也重绘，好把错误提示显示出来。
+                        ctx.request_repaint();
+                        if !success {
                             smtc::set_mode_error("没能切换播放模式，请确认播放器正在运行");
                         }
                     });

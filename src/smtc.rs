@@ -518,9 +518,11 @@ pub fn supports_play_mode(source:&str)->bool {
     source.eq_ignore_ascii_case("cloudmusic.exe") || source.eq_ignore_ascii_case("qqmusic.exe")
 }
 
-/// 是否支持「从岛上直接点一下就切换」。QQ 音乐所有无侵入切换通道都不可用，
-/// 点击时改为把客户端调到前台，用户在客户端点底栏即可。
-pub fn can_cycle_play_mode(source:&str)->bool {source.eq_ignore_ascii_case("cloudmusic.exe")}
+/// 是否支持「从岛上直接点一下就切换」。网易云走日志/UIA，QQ 音乐走真实鼠标点击
+/// 底栏按钮弹出的模式菜单，两者都能从岛上直接切档。
+pub fn can_cycle_play_mode(source:&str)->bool {
+    source.eq_ignore_ascii_case("cloudmusic.exe") || source.eq_ignore_ascii_case("qqmusic.exe")
+}
 
 /// 轮询线程记住当前来源，因为 Cmd::CyclePlayMode 不带参数，需要靠它分发实现。
 fn remember_mode_backend(source:&str) {
@@ -529,11 +531,11 @@ fn remember_mode_backend(source:&str) {
     MODE_BACKEND.store(value,std::sync::atomic::Ordering::Relaxed);
 }
 
-/// 切到下一个播放模式（网易云）。QQ 音乐分支只唤醒客户端，不模拟点击。
+/// 切到下一个播放模式：网易云走日志/UIA，QQ 音乐真实点击底栏模式菜单。
 #[cfg(windows)]
 pub fn cycle_play_mode()->bool {
     match MODE_BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
-        2=>qqmusic_playmode::reveal(),
+        2=>qqmusic_playmode::cycle(),
         _=>netease_playback::cycle_play_mode(),
     }
 }
@@ -720,21 +722,6 @@ pub fn activate(source:&str)->String {
     if launch(&format!("shell:AppsFolder\\{source}")) {return format!("正在打开{label}");}
     format!("没找到{label}，请先手动打开一次")
 }
-
-/// 只把客户端主窗口调到前台，不切换隐藏状态。给「需要用户回客户端操作」的入口用，
-/// 与 activate 的显示/隐藏切换区分开，免得点一下模式按钮反而把窗口藏了。
-#[cfg(windows)]
-pub fn reveal_app(source:&str)->bool {
-    if let Some(window)=take_hidden(source){focus_window(window);return true;}
-    let candidates=exe_candidates(source);
-    if let Some(window)=candidates.iter().find_map(|exe|find_app_window(exe)){
-        focus_window(window);return true;
-    }
-    false
-}
-
-#[cfg(not(windows))]
-pub fn reveal_app(_source:&str)->bool {false}
 
 /// 播放器来源对应的可执行文件名：按应用音量要拿它去比音频会话。
 pub fn player_exe(source:&str)->String {
@@ -1132,7 +1119,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             if !np.source.is_empty(){selected_source=np.source.clone();}
             #[cfg(windows)]
             netease.fill_artwork(&mut np);
-            // 播放模式：网易云读日志/UIA，QQ 音乐读底栏按钮名，其余客户端保持 Unknown。
+            // 播放模式：网易云读日志/UIA，QQ 音乐读底栏按钮名（并可从岛上点菜单切换），其余客户端保持 Unknown。
             remember_mode_backend(&np.source);
             if np.source.eq_ignore_ascii_case("cloudmusic.exe") {
                 #[cfg(windows)]
