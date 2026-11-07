@@ -1287,6 +1287,9 @@ impl App {
                         });
                         settings_label(ui,"时间");
                         settings_card(ui,|ui|{
+                            setting_row(ui,"时间常驻","收起时始终在岛上显示时间，极简刘海、歌词和通知都不顶掉",&mut self.settings.time_resident);
+                            settings_hint(ui,"开启后药丸左端固定留给时钟；关闭则回到原来的紧凑形态。");
+                            ui.separator();
                             settings_control_row_right(ui,"显示时区",|ui|{
                                 egui::ComboBox::from_id_salt("main-time-zone").width(190.0)
                                     .selected_text(crate::timezone::label_of(&self.settings.time_zone))

@@ -422,7 +422,9 @@ impl H {
         let dir = std::env::temp_dir().join(format!("daozai-test-{}-{}", std::process::id(), rand_id()));
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
-        let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        let mut app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
+        // 既有布局断言以「时间常驻关闭」为基线；新功能的测试会显式打开。
+        app.settings.time_resident=false;
         Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![],display_clock:"09:41:00".into(),display_date:"10月28日 周三".into(),display_label:String::new(),cities:vec![],main_utc_minutes:0 }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
@@ -5703,8 +5705,13 @@ fn time_settings_persist_and_reject_unknown_zone() {
     h.app.settings.time_offset_ms=42;
     h.app.settings.time_sync_at="2026-11-06 21:00:00".into();
     h.app.settings.time_sync=false;
+    h.app.settings.time_resident=true;
     h.app.settings.save();
     let loaded=crate::model::Settings::load();
+    assert!(loaded.time_resident,"时间常驻开关要能持久化");
+    h.app.settings.time_resident=false;
+    h.app.settings.save();
+    assert!(!crate::model::Settings::load().time_resident);
     assert_eq!(loaded.time_zone,"Asia/Shanghai");
     assert_eq!(loaded.world_clocks,vec![("巴黎".into(),"Europe/Paris".into())]);
     assert_eq!(loaded.time_offset_ms,42);
@@ -5717,6 +5724,7 @@ fn time_settings_persist_and_reject_unknown_zone() {
     assert_eq!(legacy.world_clocks.len(),3);
     assert!(legacy.time_sync);
     assert_eq!(legacy.time_offset_ms,0);
+    assert!(legacy.time_resident,"旧配置没有该键时默认开启时间常驻");
     // 8 页时代的配置：页序自动补上新页面，页面开关保留且新页默认开启。
     std::fs::write(crate::model::config_dir().join("settings.txt"),"visible_pages=10111111\npage_order=5,2,0,1,3,4,6,7\n").unwrap();
     let eight=crate::model::Settings::load();
@@ -5761,4 +5769,114 @@ fn world_clock_page_lists_cities_with_offsets() {
     // 清空城市后给出引导，不留一块空白卡片。
     h.cities.clear();h.frame(vec![]);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="还没有添加城市")));
+}
+
+/// `DAOZAI_RESIDENT_PREVIEW=<目录>` 时导出极简 / 歌词 / 通知三种收回态，肉眼核对时间席位。
+#[test]
+#[ignore = "只在需要出预览图时手动跑"]
+fn render_resident_clock_preview(){
+    let Ok(dir)=std::env::var("DAOZAI_RESIDENT_PREVIEW") else{return};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let lyrics_lrc=||crate::lyrics::parse_lrc("[00:05]当前歌词\n[00:10]下一句");
+    for (name,minimal,lyrics,notice) in [("minimal",true,false,false),("lyrics",false,true,false),("notice",false,false,true)] {
+        let mut h=H::new();
+        h.app.settings.time_resident=true;
+        h.app.settings.pet=false;
+        h.app.settings.minimal=minimal;
+        h.app.settings.island_lyrics=lyrics;
+        h.display_clock="21:57:00".into();
+        h.display_date="11月6日 周五".into();
+        h.display_label="北京".into();
+        if lyrics {
+            h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),playing:true,position:7.0,duration:120.0,..Default::default()};
+            h.app.set_lyrics("Track","Artist",120.0,lyrics_lrc());
+        }
+        if notice {h.app.alert("系统音量","音量 50%",5,false);}
+        let mut raster=crate::preview_raster::Raster::new(1280,380);
+        for frame in 0..150 {
+            if lyrics {h.app.set_lyrics("Track","Artist",120.0,lyrics_lrc());}
+            let t=frame as f64/60.0;
+            let env=Env{t,clock:"08:57:00".into(),today:"2026-11-06".into(),date:"11月6日 周五".into(),
+                display_clock:"21:57:00".into(),display_today:"2026-11-06".into(),display_date:"11月6日 周五".into(),
+                display_label:"北京".into(),media:h.media.clone(),cursor:None,..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+            });
+            raster.update_textures(&output.textures_delta);
+            if frame==149 {
+                raster.buf.fill([0.10,0.10,0.12,1.0]);
+                raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw(1280,380,rgba).unwrap();
+                let dest=std::path::Path::new(&dir).join(format!("{name}.png"));
+                image::imageops::crop_imm(&image,0,0,1280,150).to_image().save(&dest).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+}
+
+fn clock_texts(h:&H)->Vec<String> {
+    h.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().to_string()),_=>None}).collect()
+}
+fn clock_count(h:&H,text:&str)->usize {clock_texts(h).iter().filter(|t|*t==text).count()}
+
+#[test]
+fn resident_clock_keeps_time_visible_when_island_is_minimal() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.minimal=true;
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.region.height()<20.0,"关闭常驻时极简刘海仍是一条细线");
+    assert_eq!(clock_count(&h,"09:41"),0);
+    h.app.settings.time_resident=true;
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(h.region.height()>25.0,"时间常驻时药丸要留得下时钟");
+    assert_eq!(clock_count(&h,"09:41"),1,"收回态显示且只显示一份时间");
+    assert!((h.app.current_width()-80.0).abs()<2.0,"小药丸宽度应贴合时间席位");
+}
+
+#[test]
+fn resident_clock_keeps_time_visible_over_island_lyrics() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.time_resident=true;
+    h.app.settings.island_lyrics=true;
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),playing:true,position:7.0,duration:120.0,..Default::default()};
+    let lyrics=||crate::lyrics::parse_lrc("[00:05]当前歌词\n[00:10]下一句");
+    h.app.set_lyrics("Track","Artist",120.0,lyrics());
+    // 每帧都会按媒体键刷新歌词状态，测试里逐帧补回，保持岛体处于歌词形态。
+    for _ in 0..90 {h.app.set_lyrics("Track","Artist",120.0,lyrics());h.frame(vec![]);}
+    assert!(h.app.island_lyric().is_some(),"歌词确实占住了岛上");
+    assert_eq!(clock_count(&h,"09:41"),1,"歌词模式仍要看到时间");
+    let pet_width=if h.app.pet_enabled(){48.0}else{0.0};
+    assert!((h.app.current_width()-crate::app::LYRIC_BAR_W-pet_width-68.0).abs()<2.0,"歌词岛应为时钟让出 68px");
+    h.app.settings.time_resident=false;
+    for _ in 0..90 {h.app.set_lyrics("Track","Artist",120.0,lyrics());h.frame(vec![]);}
+    assert_eq!(clock_count(&h,"09:41"),0,"关掉开关就回到原来的歌词药丸");
+}
+
+#[test]
+fn resident_clock_keeps_time_visible_over_notice_banner() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.time_resident=true;
+    h.app.alert("系统音量","音量 50%",5,false);
+    for _ in 0..60 {h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"通知横幅应仍在");
+    assert_eq!(clock_count(&h,"09:41"),1,"通知覆盖时时间不被顶掉");
+    h.app.settings.time_resident=false;
+    for _ in 0..60 {h.frame(vec![]);}
+    assert_eq!(clock_count(&h,"09:41"),0);
+}
+
+#[test]
+fn resident_clock_does_not_duplicate_the_normal_pill_clock() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.time_resident=true;
+    for _ in 0..90 {h.frame(vec![]);}
+    assert_eq!(clock_count(&h,"09:41"),1,"普通药丸本来就有时钟，不能再叠一份");
 }

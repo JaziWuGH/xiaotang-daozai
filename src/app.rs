@@ -1461,18 +1461,27 @@ impl App {
     pub fn set_minimal(&mut self,enabled:bool) {
         self.settings.minimal=enabled;if enabled {self.settings.pet=false;}self.settings.save();
     }
+    /// 时间常驻时药丸左端预留的水平空间。左右停靠本来就有竖排时钟，不需要让位。
+    /// 时段文字（上午 / 晚上）会额外占宽，跟着设置一起算。
+    fn resident_clock_space(&self) -> f32 {
+        if !self.settings.time_resident || self.side() {return 0.0;}
+        68.0 + if self.settings.clock_period>0 {32.0}else{0.0}
+    }
+
     fn base_size(&self) -> (f32, f32) {
+        let reserve=self.resident_clock_space();
         if !self.compact_notices()&&!self.open {
-            if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space(),height);}
+            if let Some(a)=&self.notice {let (width,height)=self.notice_size(a);return (width+self.pet_space()+reserve,height);}
         }
         if self.side() {
             // 左右停靠：竖向胶囊（通知仍是贴边滑出的横向卡片，见上）。
             return self.side_base_size(self.effective_minimal()&&self.t>=self.notification_bell_until&&(self.browser_minimal_active||self.pending_messengers.is_empty()));
         }
         if self.island_lyrics_active() {
-            (self.lyric_bar_width(),BAR_H)
+            (self.lyric_bar_width()+reserve,BAR_H)
         } else if self.effective_minimal()&&self.t>=self.notification_bell_until {
-            (BAR_W_MIN, BAR_H_MIN)
+            // 常驻时不再缩成 4.5px 细线，改成一条只放得下时钟的小药丸。
+            if reserve>0.0 {(reserve+12.0,BAR_H)}else{(BAR_W_MIN, BAR_H_MIN)}
         } else {
             (self.resident.target.width.min(WIN_W-32.0), BAR_H)
         }
@@ -1676,7 +1685,10 @@ impl App {
         let painter = ui.painter_at(ui.max_rect().expand(40.0));
         let feather = 1.0 / ctx.pixels_per_point();
         let body=messenger_rect.filter(|_|outside_badge.is_none()).map_or(panel,|badge|panel.union(badge));
-        let minimal_pill = self.effective_minimal() && !self.island_lyrics_active() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
+        let reserve=self.resident_clock_space();
+        let time_resident=reserve>0.0 && !self.open && pc<0.25;
+        let minimal_active = self.effective_minimal() && !self.island_lyrics_active() && self.notice.is_none() && self.t>=self.notification_bell_until && pc < 0.02;
+        let minimal_pill = minimal_active && !time_resident;
         let flare = if minimal_pill || pill { 0.0 } else { lerp(5.0, FLARE, pc) };
         let k = (w / PW).clamp(0.3, 1.1);
         let thickness = if side { crate::side_dock::SIDE_BAR_W } else { BAR_H };
@@ -1736,14 +1748,16 @@ impl App {
             let width_progress=if (to-from).abs()<1.0 {if banner{1.0}else{0.0}}else{((self.w.pos-from)/(to-from)).clamp(0.0,1.0)};
             let (opacity,header_opacity)=if banner {(self.hud_alpha*smoothstep(0.45,0.85,width_progress),1.0-smoothstep(0.05,0.40,width_progress))}
                 else {(self.hud_alpha*smoothstep(0.20,0.60,width_progress),1.0-smoothstep(0.05,0.25,width_progress))};
+            // 时间常驻时，顶栏那一份交给左端席位，避免同一行出现两个时钟。
+            let header_opacity=if time_resident{0.0}else{header_opacity};
             if !minimal_pill||pc>0.0 {self.resident_header(&base.faded(header_opacity),panel,cx,pc,reveal,env);}
             if let Some(a)=self.hud_notice.clone(){
-                let overlay=Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())).faded(opacity);
+                let overlay=Card::new(ui,panel.min+Vec2::new(self.pet_space()+reserve,0.0),panel.intersect(ui.max_rect())).faded(opacity);
                 let overlay=if opacity<0.85||!banner{overlay.ghost()}else{overlay};
                 self.draw_notice(&overlay,panel,&a,&mut cmds);
             }
         }else if banner {
-            if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space(),0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);}
+            if let Some(a)=self.notice.clone(){self.draw_notice(&Card::new(ui,panel.min+Vec2::new(self.pet_space()+reserve,0.0),panel.intersect(ui.max_rect())),panel,&a,&mut cmds);}
         }else if !minimal_pill || pc > 0.0 {
             self.resident_header(&base, panel, cx, if restoring_lyrics{0.0}else{pc}, reveal, env);
         }
@@ -1803,6 +1817,9 @@ impl App {
             if self.calendar.draft.is_some(){self.draw_calendar_editor(&c);}else if self.task_dialog.is_some(){self.draw_task_editor(&c);}else{self.panel_body(&c, env, &mut cmds);}
             if !self.toast_below {self.toast_layer(&c,106.0);}
         }
+        // 时间常驻：收回态被极简刘海、歌词或通知顶替时，左端席位仍画出时钟。
+        let need_clock=time_resident && (minimal_active || banner || fading_hud || self.island_lyrics_active());
+        self.draw_resident_clock(&base,panel,env,pc,need_clock);
         // 岛下的确认提示使用独立裁剪区域，收起时跟随岛体下沿。
         let floating_toast=if self.toast_below && self.toast.is_some() {
             // 侧边停靠：提示出现在胶囊正下方，靠边时向内挪，保证完整显示。
@@ -2251,6 +2268,23 @@ impl App {
     // ---------------------------------------------------------------
     // 顶栏：电池 + 日期 + 时钟。药丸里的电池与时钟会「飞」到顶栏位置（共享元素过渡）。
     // ---------------------------------------------------------------
+    /// 收起态的时间常驻席位：在药丸左端单独画一份时钟。
+    /// 极简刘海、岛上歌词、通知横幅都会顶掉普通顶栏时钟，这里补回来；覆盖内容已在
+    /// `base_size` / `draw_notice` / 歌词分支里顺延，双方不会挤在同一块位置。
+    fn draw_resident_clock(&self, base: &Card, panel: Rect, env: &Env, pc: f32, needed: bool) {
+        if !needed {return;}
+        let alpha=1.0-smoothstep(0.0,0.25,pc);
+        if alpha<=0.004 {return;}
+        let c=base.shifted(panel.min.x-base.origin.x,panel.min.y-base.origin.y).faded(alpha);
+        let c=if alpha<0.85 {c.ghost()}else{c};
+        let clock=self.settings.clock_text(&env.display_clock);
+        // 极简常驻时药丸里只有时间，居中摆；其余场景固定在左端席位。
+        let x=if self.effective_minimal() && self.notice.is_none() {
+            (panel.width()-paint::clock_width(&c,&clock,size::PILL_CLOCK))/2.0
+        } else {12.0};
+        paint::clock(&c,x,21.0,&clock,size::PILL_CLOCK);
+    }
+
     fn shared_header(&mut self, base: &Card, cx: f32, p: f32, reveal: f32, env: &Env) {
         let local_cx = cx - base.origin.x;
         let fit=((WIN_W-32.0)/self.resident.target.width).min(1.0);
@@ -2260,9 +2294,11 @@ impl App {
         let lyric_alpha=if self.island_lyrics_active() {1.0-smoothstep(0.0,0.35,p)}else{0.0};
         if let Some(galley)=self.island_lyric_layout.clone().filter(|_|lyric_alpha>0.003) {
             let c=base.faded(lyric_alpha);
-            let content_width=self.lyric_bar_width()-self.lyric_focus_space();
+            // 左端整块让给常驻时钟：封面顺延，歌词与播放条保持在原位。
+            let shift=if p<0.02 {self.resident_clock_space()}else{0.0};
+            let content_width=self.lyric_bar_width()-self.lyric_focus_space()-shift;
             let width=self.w.pos.max(content_width);
-            let left=local_cx-width/2.0;
+            let left=local_cx-width/2.0+shift;
             let center_y=BAR_H/2.0;
             if let Some((image,texture))=&self.music_artwork {
                 let [width,height]=image.size;
