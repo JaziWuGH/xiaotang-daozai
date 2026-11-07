@@ -2310,9 +2310,11 @@ impl App {
         let lyric_alpha=if self.island_lyrics_active() {1.0-smoothstep(0.0,0.35,p)}else{0.0};
         if let Some(galley)=self.island_lyric_layout.clone().filter(|_|lyric_alpha>0.003) {
             let c=base.faded(lyric_alpha);
-            // 左端整块让给常驻时钟：封面顺延，歌词与播放条保持在原位。
+            // 左端整块让给常驻时钟：药丸宽度已经加上了这份席位，内容区不能再扣一次。
+            // 重复扣减会让居中的歌词整体左移半个席位、压到封面上，播放条也会缩在中间，
+            // 右端凭空多出一大块空白。
             let shift=if p<0.02 {self.resident_clock_space()}else{0.0};
-            let content_width=self.lyric_bar_width()-self.lyric_focus_space()-shift;
+            let content_width=self.lyric_bar_width()-self.lyric_focus_space();
             let width=self.w.pos.max(content_width);
             let left=local_cx-width/2.0+shift;
             let center_y=BAR_H/2.0;

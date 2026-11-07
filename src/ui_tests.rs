@@ -5778,7 +5778,9 @@ fn render_resident_clock_preview(){
     let Ok(dir)=std::env::var("DAOZAI_RESIDENT_PREVIEW") else{return};
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let lyrics_lrc=||crate::lyrics::parse_lrc("[00:05]当前歌词\n[00:10]下一句");
-    for (name,minimal,lyrics,notice) in [("minimal",true,false,false),("lyrics",false,true,false),("notice",false,false,true)] {
+    let long_lrc=||crate::lyrics::parse_lrc("[00:05]像你安静点 请你安静点耶\n[00:10]下一句");
+    let lrc=|long:bool| if long {long_lrc()}else{lyrics_lrc()};
+    for (name,minimal,lyrics,notice,long) in [("minimal",true,false,false,false),("lyrics",false,true,false,false),("lyrics-long",false,true,false,true),("notice",false,false,true,false)] {
         let mut h=H::new();
         h.app.settings.time_resident=true;
         h.app.settings.pet=false;
@@ -5789,12 +5791,12 @@ fn render_resident_clock_preview(){
         h.display_label="北京".into();
         if lyrics {
             h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),playing:true,position:7.0,duration:120.0,..Default::default()};
-            h.app.set_lyrics("Track","Artist",120.0,lyrics_lrc());
+            h.app.set_lyrics("Track","Artist",120.0,lrc(long));
         }
         if notice {h.app.alert("系统音量","音量 50%",5,false);}
         let mut raster=crate::preview_raster::Raster::new(1280,380);
         for frame in 0..150 {
-            if lyrics {h.app.set_lyrics("Track","Artist",120.0,lyrics_lrc());}
+            if lyrics {h.app.set_lyrics("Track","Artist",120.0,lrc(long));}
             let t=frame as f64/60.0;
             let env=Env{t,clock:"08:57:00".into(),today:"2026-11-06".into(),date:"11月6日 周五".into(),
                 display_clock:"21:57:00".into(),display_today:"2026-11-06".into(),display_date:"11月6日 周五".into(),
