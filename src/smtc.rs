@@ -16,6 +16,9 @@ mod kugou_control;
 #[cfg(windows)]
 #[path="player_seek.rs"]
 mod player_seek;
+#[cfg(windows)]
+#[path="qqmusic_playmode.rs"]
+mod qqmusic_playmode;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -63,8 +66,10 @@ impl PlayMode {
     }
 }
 
-/// 最近一次读到的播放模式（目前只有网易云能读）。
+/// 最近一次读到的播放模式（网易云）；QQ 音乐另有一份独立状态，见 qqmusic_playmode。
 static PLAY_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+/// 当前来源的播放模式实现：0=无、1=网易云、2=QQ 音乐。轮询线程写入，Cmd 分发时读取。
+static MODE_BACKEND: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 static MODE_ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// 界面侧已知的总时长（毫秒），给「按秒定位」在日志还没读到元数据时兜底。
 static KNOWN_DURATION_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -104,7 +109,7 @@ pub struct NowPlaying {
     pub duration: f64,
     pub artwork: Option<Arc<eframe::egui::ColorImage>>,
     pub playback_type: MediaKind,
-    /// 播放模式；只有能读到的客户端（网易云）才不是 Unknown。
+    /// 播放模式；只有能读到的客户端（网易云、QQ 音乐）才不是 Unknown。
     pub play_mode: PlayMode,
 }
 
@@ -507,12 +512,31 @@ pub fn control(cmd: Transport,source:&str) {
 #[cfg(not(windows))]
 pub fn control(_cmd: Transport,_source:&str) {}
 
-/// 该播放来源是否支持读取/切换播放模式（目前只有网易云）。
-pub fn supports_play_mode(source:&str)->bool {source.eq_ignore_ascii_case("cloudmusic.exe")}
+/// 该播放来源是否支持读取播放模式。QQ 音乐不上报 SMTC 循环/随机状态，
+/// 但底栏模式按钮的 UIA 名称可读，因此同样能在岛上显示当前模式。
+pub fn supports_play_mode(source:&str)->bool {
+    source.eq_ignore_ascii_case("cloudmusic.exe") || source.eq_ignore_ascii_case("qqmusic.exe")
+}
 
-/// 切到下一个播放模式（随机 → 顺序 → 心动 → 列表循环 → 单曲循环）。目前只支持网易云。
+/// 是否支持「从岛上直接点一下就切换」。QQ 音乐所有无侵入切换通道都不可用，
+/// 点击时改为把客户端调到前台，用户在客户端点底栏即可。
+pub fn can_cycle_play_mode(source:&str)->bool {source.eq_ignore_ascii_case("cloudmusic.exe")}
+
+/// 轮询线程记住当前来源，因为 Cmd::CyclePlayMode 不带参数，需要靠它分发实现。
+fn remember_mode_backend(source:&str) {
+    let value=if source.eq_ignore_ascii_case("cloudmusic.exe"){1}
+        else if source.eq_ignore_ascii_case("qqmusic.exe"){2}else{0};
+    MODE_BACKEND.store(value,std::sync::atomic::Ordering::Relaxed);
+}
+
+/// 切到下一个播放模式（网易云）。QQ 音乐分支只唤醒客户端，不模拟点击。
 #[cfg(windows)]
-pub fn cycle_play_mode()->bool {netease_playback::cycle_play_mode()}
+pub fn cycle_play_mode()->bool {
+    match MODE_BACKEND.load(std::sync::atomic::Ordering::Relaxed) {
+        2=>qqmusic_playmode::reveal(),
+        _=>netease_playback::cycle_play_mode(),
+    }
+}
 
 #[cfg(not(windows))]
 pub fn cycle_play_mode()->bool {false}
@@ -696,6 +720,21 @@ pub fn activate(source:&str)->String {
     if launch(&format!("shell:AppsFolder\\{source}")) {return format!("正在打开{label}");}
     format!("没找到{label}，请先手动打开一次")
 }
+
+/// 只把客户端主窗口调到前台，不切换隐藏状态。给「需要用户回客户端操作」的入口用，
+/// 与 activate 的显示/隐藏切换区分开，免得点一下模式按钮反而把窗口藏了。
+#[cfg(windows)]
+pub fn reveal_app(source:&str)->bool {
+    if let Some(window)=take_hidden(source){focus_window(window);return true;}
+    let candidates=exe_candidates(source);
+    if let Some(window)=candidates.iter().find_map(|exe|find_app_window(exe)){
+        focus_window(window);return true;
+    }
+    false
+}
+
+#[cfg(not(windows))]
+pub fn reveal_app(_source:&str)->bool {false}
 
 /// 播放器来源对应的可执行文件名：按应用音量要拿它去比音频会话。
 pub fn player_exe(source:&str)->String {
@@ -1073,6 +1112,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             if stopped.load(std::sync::atomic::Ordering::Acquire) || Arc::strong_count(&state)==1{break;}
             if !active.load(std::sync::atomic::Ordering::Relaxed){
                 artwork.clear(false);playback_clock=PlaybackClock::default();memory=MediaMemory::default();selected_source.clear();
+                remember_mode_backend("");
                 #[cfg(windows)] {netease=netease_playback::Reader::default();}
                 if let Ok(mut current)=state.lock(){if !current.title.is_empty(){*current=NowPlaying::default();ctx.request_repaint();}}
                 std::thread::park_timeout(Duration::from_millis(250));continue;
@@ -1092,11 +1132,18 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             if !np.source.is_empty(){selected_source=np.source.clone();}
             #[cfg(windows)]
             netease.fill_artwork(&mut np);
-            // 播放模式目前只有网易云读得到，其他客户端保持 Unknown。
+            // 播放模式：网易云读日志/UIA，QQ 音乐读底栏按钮名，其余客户端保持 Unknown。
+            remember_mode_backend(&np.source);
             if np.source.eq_ignore_ascii_case("cloudmusic.exe") {
                 #[cfg(windows)]
                 netease_playback::probe_play_mode_once();
                 np.play_mode=play_mode();
+            } else if np.source.eq_ignore_ascii_case("qqmusic.exe") {
+                #[cfg(windows)]
+                {
+                    qqmusic_playmode::poll();
+                    np.play_mode=qqmusic_playmode::current();
+                }
             }
             playback_clock.update(&mut np);
             if np.title.is_empty() {

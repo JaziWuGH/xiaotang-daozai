@@ -608,15 +608,15 @@ impl eframe::App for Shell {
                     }
                 }
                 Cmd::CyclePlayMode=>{
-                    // 点网易云底栏的模式按钮会顺带触发一次前台事件，别让它把面板收走。
+                    // 切换模式或唤起播放器都会触发前台事件，别让它把面板收走。
                     self.app.keep_open(1.2);
                     let ctx=ctx.clone();
                     std::thread::spawn(move||{
                         if smtc::cycle_play_mode() {
-                            // 图标已在后台就地前移，主动重绘一次，不用等下一轮轮询。
+                            // 网易云图标已就地前移；QQ 音乐窗口被调到前台，两者都要主动重绘。
                             ctx.request_repaint();
                         }else{
-                            smtc::set_mode_error("没能切换播放模式，请确认网易云正在播放");
+                            smtc::set_mode_error("没能切换播放模式，请确认播放器正在运行");
                         }
                     });
                 }

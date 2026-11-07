@@ -4115,6 +4115,29 @@ fn music_mode_button_cycles_only_when_mode_is_known(){
 }
 
 #[test]
+fn qqmusic_shows_current_mode_without_direct_cycling(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"给小朋友的歌".into(),artist:"门尼".into(),
+        duration:221.0,play_mode:crate::smtc::PlayMode::Cycle,..Default::default()};
+    h.hover(H::local(300.0,60.0),0.8);
+    assert!(h.app.open);
+    h.cmds.clear();
+    h.click(H::local(118.0,118.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"QQ 音乐读得到模式时要给出入口");
+    // 还没读到模式时也应该给入口，点了能把客户端调到前台。
+    h.media.play_mode=crate::smtc::PlayMode::Unknown;
+    h.frame(vec![]);h.cmds.clear();
+    h.click(H::local(118.0,118.0));
+    assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::CyclePlayMode)),"QQ 音乐首次读取前也要给出入口");
+    assert!(crate::smtc::supports_play_mode("QQMusic.exe"),"QQ 音乐应能显示当前模式");
+    assert!(!crate::smtc::can_cycle_play_mode("QQMusic.exe"),"QQ 音乐不能从岛上直接切换");
+    assert!(crate::smtc::can_cycle_play_mode("cloudmusic.exe"),"网易云行为不能被改动");
+    assert!(!crate::smtc::supports_play_mode("Spotify.exe"));
+}
+
+#[test]
 fn play_mode_labels_are_readable(){
     use crate::smtc::PlayMode;
     assert_eq!(PlayMode::Random.label(),"随机播放");

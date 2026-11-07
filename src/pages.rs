@@ -198,12 +198,15 @@ impl App {
         };
         let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr");
         lyrics_card.text(74.0,y+5.0,"词",14.0,W::Semibold,if !has {ic}else if self.show_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
-        // 播放模式：能读到的客户端显示当前模式，网易云即使还没读到也先显示入口。
+        // 播放模式：网易云可直接点击切换；QQ 音乐只显示当前模式，
+        // 点击把客户端调到前台（它不接受任何无侵入切换指令），随后读回新模式。
         let mode_known=np.play_mode!=crate::smtc::PlayMode::Unknown;
+        let direct_cycle=crate::smtc::can_cycle_play_mode(&np.source);
         if has && (mode_known || crate::smtc::supports_play_mode(&np.source)) {
             let (mode_button,mode_card)=btn(118.0,26.0,"m-mode");
             paint::play_mode(&mode_card,118.0,y,np.play_mode,if mode_known {ic}else{theme::GRAY});
-            let hint=if mode_known {format!("{}（点击切换）",np.play_mode.label())}else{"播放模式（点击切换）".into()};
+            let action=if direct_cycle {"点击切换"}else{"点击打开 QQ 音乐切换"};
+            let hint=if mode_known {format!("{}（{action}）",np.play_mode.label())}else{format!("播放模式（{action}）")};
             if mode_button.on_hover_text(hint).clicked() {
                 cmds.push(Cmd::CyclePlayMode);
             }
