@@ -1242,16 +1242,18 @@ impl App {
                                 }).response
                             });
                             let edge=self.settings.dock.label();
-                            ui.label(egui::RichText::new(if !self.settings.display_id.is_empty()&&selected.is_none(){"暂时显示在主屏，重新连接所选屏幕后自动恢复。".to_string()}else{format!("显示在所选屏幕{edge}；断开时暂时回到主屏。")}).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(if !self.settings.display_id.is_empty()&&selected.is_none(){"暂时显示在主屏，重新连接所选屏幕后自动恢复。".to_string()}else{format!("显示在所选屏幕的{edge}；断开时暂时回到主屏。")}).size(11.0).color(ui.visuals().weak_text_color()));
                             ui.add_space(4.0);
-                            // 停靠边缘：顶部为横向；左右为竖向排列，展开面板从边缘滑出。
+                            // 停靠边缘：顶部 / 底部为横向，左右为竖向排列；底部面板朝上展开。
                             let docks:Vec<(crate::model::Dock,&str)>=crate::model::Dock::ALL.iter().map(|d|(*d,d.label())).collect();
                             settings_control_row_right(ui,"停靠",|ui|{
                                 // 换边后偏移的含义变了（水平 ↔ 上下），回到居中。
-                                if settings_segmented(ui,&mut self.settings.dock,&docks,64.0) {self.settings.island_offset=0;}
+                                if settings_segmented(ui,&mut self.settings.dock,&docks,52.0) {self.settings.island_offset=0;}
                             });
                             if self.settings.dock.is_side() {
-                                ui.label(egui::RichText::new("收起时竖向排列时间、电池、播放、专注和 AI 额度；展开面板从屏幕边缘滑出。吉祥物和岛上歌词只在顶部停靠时显示。").size(11.0).color(ui.visuals().weak_text_color()));
+                                ui.label(egui::RichText::new("收起时竖向排列时间、电池、播放、专注和 AI 额度；展开面板从屏幕边缘滑出。吉祥物和岛上歌词只在顶部、底部停靠时显示。").size(11.0).color(ui.visuals().weak_text_color()));
+                            } else if self.settings.dock.is_bottom() {
+                                ui.label(egui::RichText::new("贴在任务栏上方，形状上下翻转、展开面板朝上展开；水平位置与顶部停靠一致。").size(11.0).color(ui.visuals().weak_text_color()));
                             }
                             ui.add_space(4.0);
                             let side=self.settings.dock.is_side();

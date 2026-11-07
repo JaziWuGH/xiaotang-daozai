@@ -339,11 +339,13 @@ impl Window {
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。
     /// `scale` 是主窗口的实际像素比（系统 DPI × 岛体大小），画布按它同步调整物理尺寸。
-    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock)->bool {
+    pub fn place_on_display(&self, scale:f32, bounds:crate::display_layout::Bounds, work:crate::display_layout::Bounds, offset:f32, dock:crate::model::Dock)->bool {
         unsafe {
-            // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移，画布换成竖向的大小。
+            // 顶部：水平居中 + 水平偏移；左右：贴边 + 竖直偏移；底部：贴工作区底边（任务栏上方）。
             let origin=if dock.is_side() {
                 crate::display_layout::side_origin(bounds,dock,(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H),crate::side_dock::SIDE_HALF_EXTENT,scale,offset)
+            } else if dock.is_bottom() {
+                crate::display_layout::bottom_origin(bounds,work,crate::app::WIN_W,crate::app::WIN_H,scale,offset)
             } else {crate::display_layout::island_origin_offset(bounds,crate::app::WIN_W,scale,offset)};
             let Some((x,y))=origin else{return false;};
             let (canvas_w,canvas_h)=if dock.is_side() {(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)} else {(crate::app::CANVAS_W,crate::app::WIN_H)};

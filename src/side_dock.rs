@@ -61,12 +61,13 @@ impl App {
         if self.settings.island_shape == IslandShape::Pill { PILL_GAP } else { 0.0 }
     }
 
-    /// 宽 `w`、高 `h` 的岛体在画布 `win` 里的位置：顶部停靠水平居中贴顶，
-    /// 左右停靠贴边、竖直居中。
+    /// 宽 `w`、高 `h` 的岛体在画布 `win` 里的位置：顶部居中贴顶、底部居中贴底
+    /// （往上展开），左右停靠贴边、竖直居中。
     pub(crate) fn island_rect(&self, win: Rect, w: f32, h: f32) -> Rect {
         let gap = self.side_gap();
         match self.dock() {
             Dock::Top => Rect::from_min_size(Pos2::new(win.center().x - w / 2.0, win.top() + gap), Vec2::new(w, h)),
+            Dock::Bottom => Rect::from_min_size(Pos2::new(win.center().x - w / 2.0, win.bottom() - gap - h), Vec2::new(w, h)),
             Dock::Left => Rect::from_min_size(Pos2::new(win.left() + gap, win.center().y - h / 2.0), Vec2::new(w, h)),
             Dock::Right => Rect::from_min_size(Pos2::new(win.right() - gap - w, win.center().y - h / 2.0), Vec2::new(w, h)),
         }
@@ -74,7 +75,10 @@ impl App {
 
     /// 展开面板（页面内容）的左上角。
     pub(crate) fn content_origin(&self, win: Rect) -> Pos2 {
-        self.island_rect(win, PW, self.expanded_height()).min
+        // 顶部 / 左右停靠的上沿与高度无关；底部停靠是贴下沿往上长，
+        // 内容必须跟着当前岛体上沿，否则收起态的时钟会被裁到药丸外面。
+        let height=if self.dock().is_bottom(){self.h.pos}else{self.expanded_height()};
+        self.island_rect(win, PW, height).min
     }
 
     /// 侧边停靠的命中区域：收起时是胶囊外扩几点并一直延伸到屏幕边缘，展开时是整个面板。
@@ -89,6 +93,7 @@ impl App {
         match self.dock() {
             Dock::Left => Rect::from_min_max(Pos2::new(win.left(), rect.top()), rect.max),
             Dock::Right => Rect::from_min_max(rect.min, Pos2::new(win.right(), rect.bottom())),
+            Dock::Bottom => Rect::from_min_max(rect.min, Pos2::new(rect.right(), win.bottom())),
             Dock::Top => rect,
         }
     }
@@ -96,10 +101,12 @@ impl App {
     /// 毛玻璃取样点（画布坐标）：岛体外侧上下左右各取几处估计身后明暗。
     pub fn backdrop_points(&self) -> Vec<(f32, f32)> {
         match self.dock() {
-            Dock::Top => {
+            Dock::Top | Dock::Bottom => {
                 let cx = crate::app::WIN_W / 2.0;
                 let bottom = crate::app::WIN_H - 6.0;
-                vec![(cx - 270.0, 6.0), (cx - 270.0, 26.0), (cx + 270.0, 6.0), (cx + 270.0, 26.0), (cx - 130.0, bottom), (cx, bottom), (cx + 130.0, bottom)]
+                let points = vec![(cx - 270.0, 6.0), (cx - 270.0, 26.0), (cx + 270.0, 6.0), (cx + 270.0, 26.0), (cx - 130.0, bottom), (cx, bottom), (cx + 130.0, bottom)];
+                // 底部停靠贴的是下沿，取样点整体上下镜像。
+                if self.dock() == Dock::Bottom { points.into_iter().map(|(x, y)| (x, crate::app::WIN_H - y)).collect() } else { points }
             }
             dock => {
                 let (near, far) = if dock == Dock::Left { (6.0, SIDE_W - 6.0) } else { (SIDE_W - 6.0, 6.0) };

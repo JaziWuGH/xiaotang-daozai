@@ -6,8 +6,8 @@
 use eframe::egui::{self, Color32, Pos2, Rect, Vec2};
 use crate::model::Dock;
 
-/// 左右停靠时，轮廓先在「贴顶」坐标系里生成：x 沿屏幕边缘（= 屏幕 y），
-/// y 是离开边缘的距离（0 = 贴边）；再映射回屏幕。顶部停靠为恒等映射。
+/// 非顶部停靠时，轮廓先在「贴顶」坐标系里生成：y 是离开边缘的距离（0 = 贴边）；
+/// 左右停靠把 x/y 互换，底部停靠把 y 上下镜像。顶部停靠为恒等映射。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EdgeMap { dock: Dock, edge: f32 }
 
@@ -19,6 +19,7 @@ impl EdgeMap {
             Dock::Top => (Self::TOP, rect),
             Dock::Left => (EdgeMap { dock, edge: rect.left() }, Rect::from_min_max(Pos2::new(rect.top(), 0.0), Pos2::new(rect.bottom(), rect.width()))),
             Dock::Right => (EdgeMap { dock, edge: rect.right() }, Rect::from_min_max(Pos2::new(rect.top(), 0.0), Pos2::new(rect.bottom(), rect.width()))),
+            Dock::Bottom => (EdgeMap { dock, edge: rect.bottom() }, Rect::from_min_max(Pos2::new(rect.left(), 0.0), Pos2::new(rect.right(), rect.height()))),
         }
     }
     pub fn apply(self, p: Pos2) -> Pos2 {
@@ -26,9 +27,10 @@ impl EdgeMap {
             Dock::Top => p,
             Dock::Left => Pos2::new(self.edge + p.y, p.x),
             Dock::Right => Pos2::new(self.edge - p.y, p.x),
+            Dock::Bottom => Pos2::new(p.x, self.edge - p.y),
         }
     }
-    fn code(self) -> f32 { match self.dock { Dock::Top => 0.0, Dock::Left => 1.0, Dock::Right => 2.0 } }
+    fn code(self) -> f32 { match self.dock { Dock::Top => 0.0, Dock::Left => 1.0, Dock::Right => 2.0, Dock::Bottom => 3.0 } }
 }
 
 /// 贴着 `dock` 边缘的轮廓（屏幕坐标）。
@@ -137,7 +139,7 @@ impl egui::cache::ComputerMut<FillKey,std::sync::Arc<egui::Mesh>> for FillComput
         let [x0,y0,x1,y1,flare,flare_h,radius,feather,span,dock,edge]=bits.map(f32::from_bits);
         let mut mesh=gradient_mesh(Rect::from_min_max(Pos2::new(x0,y0),Pos2::new(x1,y1)),flare,flare_h,radius,top,bottom,span,feather);
         if dock!=0.0 {
-            let map=EdgeMap{dock:if dock==1.0{Dock::Left}else{Dock::Right},edge};
+            let map=EdgeMap{dock:match dock {1.0=>Dock::Left,2.0=>Dock::Right,_=>Dock::Bottom},edge};
             for v in &mut mesh.vertices {v.pos=map.apply(v.pos);}
         }
         std::sync::Arc::new(mesh)
@@ -290,6 +292,21 @@ mod dock_tests {
         assert!((b.right() - 500.0).abs() < 0.01 && (b.left() - 81.0).abs() < 0.01, "{b:?}");
         assert!(right.iter().filter(|p| p.y < 99.0).all(|p| p.x > 500.0 - 16.5));
         assert_eq!(outline_docked(rect, Dock::Top, 5.0, 8.0, 12.0), outline(rect, 5.0, 8.0, 12.0));
+    }
+
+    #[test]
+    fn bottom_outline_is_the_vertical_mirror_of_top(){
+        let rect = Rect::from_min_size(Pos2::new(100.0, 50.0), Vec2::new(300.0, 120.0));
+        let top = outline(rect, 17.6, 16.0, 33.0);
+        let bottom = outline_docked(rect, Dock::Bottom, 17.6, 16.0, 33.0);
+        assert_eq!(top.len(), bottom.len());
+        for (a, b) in top.iter().zip(bottom.iter()) {
+            assert!((a.x - b.x).abs() < 1e-4, "x 不应改变：{a:?} {b:?}");
+            assert!((a.y + b.y - rect.top() - rect.bottom()).abs() < 1e-3, "y 应以下沿为轴镜像：{a:?} {b:?}");
+        }
+        let bounds = Rect::from_points(&bottom);
+        assert!((bounds.bottom() - rect.bottom()).abs() < 0.01 && (bounds.top() - rect.top()).abs() < 0.01, "轮廓仍落在外接矩形内：{bounds:?}");
+        assert!(bounds.left() < rect.left() - 17.0 && bounds.right() > rect.right() + 17.0, "肩部应沿下沿左右展开：{bounds:?}");
     }
 }
 

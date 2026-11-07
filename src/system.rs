@@ -244,8 +244,14 @@ fn browser_overlaps_island(browser:RECT,island:RECT,dock:crate::model::Dock)->bo
     let scale=(island.right-island.left) as f32/crate::app::CANVAS_W;
     let center=island.left as f32+crate::app::WIN_W*scale/2.0;
     let half=crate::app::PW*scale/2.0;
-    (browser.left as f32)<center+half && (browser.right as f32)>center-half
-        && (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && browser.bottom>island.top
+    let horizontal=(browser.left as f32)<center+half && (browser.right as f32)>center-half;
+    // 底部停靠时岛体贴在画布下沿，遮挡判断也要跟着上下镜像。
+    let vertical=if dock.is_bottom() {
+        (browser.bottom as f32)>island.bottom as f32-crate::app::BAR_H*scale && (browser.top as f32)<island.bottom as f32
+    } else {
+        (browser.top as f32)<island.top as f32+crate::app::BAR_H*scale && (browser.bottom as f32)>island.top as f32
+    };
+    horizontal && vertical
 }
 
 /// 左右停靠：画布是 SIDE_W × SIDE_H，岛体贴在画布的左 / 右边、竖直居中。

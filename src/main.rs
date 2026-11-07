@@ -386,7 +386,7 @@ impl eframe::App for Shell {
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
             let offset=self.app.settings.island_offset_ratio();
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,offset,self.app.settings.dock))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,d.work,offset,self.app.settings.dock))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));

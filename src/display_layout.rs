@@ -3,7 +3,7 @@
 pub struct Bounds { pub left:i32, pub top:i32, pub right:i32, pub bottom:i32 }
 
 #[derive(Clone, Debug)]
-pub struct Display { pub id:String, pub label:String, pub bounds:Bounds, pub primary:bool }
+pub struct Display { pub id:String, pub label:String, pub bounds:Bounds, pub work:Bounds, pub primary:bool }
 
 pub fn selected<'a>(displays:&'a [Display],id:&str)->Option<&'a Display>{
     displays.iter().find(|d|!id.is_empty()&&d.id==id)
@@ -22,11 +22,13 @@ pub fn connected()->Vec<Display>{
             let found=EnumDisplayDevicesW(PCWSTR(info.szDevice.as_ptr()),0,&mut details,EDD_GET_DEVICE_INTERFACE_NAME).as_bool();
             let stable_id=if found{text(&details.DeviceID)}else{String::new()};
             let name=if found{text(&details.DeviceString)}else{String::new()};
-            let number=device.trim_start_matches(r"\\.\DISPLAY");let r=info.monitorInfo.rcMonitor;
+            let number=device.trim_start_matches(r"\\.\DISPLAY");let r=info.monitorInfo.rcMonitor;let w=info.monitorInfo.rcWork;
             let primary=info.monitorInfo.dwFlags&1!=0;
             let label=format!("显示器 {number}{} · {} × {}{}",if name.is_empty(){String::new()}else{format!(" · {name}")},r.right-r.left,r.bottom-r.top,if primary{" · 主屏"}else{""});
             let displays=&mut *(data.0 as *mut Vec<Display>);
-            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},primary});
+            displays.push(Display{id:if stable_id.is_empty(){device}else{stable_id},label,
+                bounds:Bounds{left:r.left,top:r.top,right:r.right,bottom:r.bottom},
+                work:Bounds{left:w.left,top:w.top,right:w.right,bottom:w.bottom},primary});
         }
         BOOL(1)
     }
@@ -66,6 +68,15 @@ pub fn island_origin_offset(m:Bounds, island_width:f32, scale:f32, offset:f32)->
 
 /// 左右停靠：画布贴着屏幕左 / 右边，竖直方向按 `offset`（-1 最上 … 0 居中 … 1 最下）移动，
 /// 可移动范围保证展开面板始终完整留在屏幕内。返回画布左上角（物理像素）。
+/// 底部停靠：与顶部一样水平居中并按 `offset` 微调，画布下沿贴住工作区底边
+/// （`work.bottom` 已排除任务栏），所以岛显示在任务栏上方，不会被任务栏盖住。
+pub fn bottom_origin(m:Bounds, work:Bounds, island_width:f32, canvas_h:f32, scale:f32, offset:f32)->Option<(i32,i32)> {
+    let (x,_)=island_origin_offset(m,island_width,scale,offset)?;
+    if work.bottom<=work.top || !canvas_h.is_finite() || canvas_h<=0.0 {return None;}
+    let h=(canvas_h as f64*scale as f64).round();
+    Some((x,(work.bottom as f64-h).round() as i32))
+}
+
 pub fn side_origin(m:Bounds, dock:crate::model::Dock, canvas:(f32,f32), half_extent:f32, scale:f32, offset:f32)->Option<(i32,i32)> {
     if m.right<=m.left || m.bottom<=m.top || !scale.is_finite() || scale<=0.0 {return None;}
     let (w,h)=((canvas.0*scale) as f64,(canvas.1*scale) as f64);
@@ -74,6 +85,26 @@ pub fn side_origin(m:Bounds, dock:crate::model::Dock, canvas:(f32,f32), half_ext
     let cy=(m.top as f64+m.bottom as f64)/2.0+travel*offset;
     let x=match dock {crate::model::Dock::Right=>m.right as f64-w,_=>m.left as f64};
     Some((x.round() as i32,(cy-h/2.0).round() as i32))
+}
+
+#[cfg(test)]
+mod bottom_tests {
+    use super::*;
+    #[test]
+    fn bottom_origin_hugs_the_work_area_above_the_taskbar(){
+        let m=Bounds{left:0,top:0,right:1920,bottom:1080};
+        let work=Bounds{left:0,top:0,right:1920,bottom:1032};
+        assert_eq!(bottom_origin(m,work,640.0,270.0,1.0,0.0),Some((640,762)));
+        assert_eq!(bottom_origin(m,work,640.0,270.0,1.5,0.0),Some((480,627)),"缩放后画布仍贴工作区底边");
+        for offset in [-1.0,0.0,1.0] {
+            let (x,_)=bottom_origin(m,work,640.0,270.0,1.0,offset).unwrap();
+            let (top_x,_)=island_origin_offset(m,640.0,1.0,offset).unwrap();
+            assert_eq!(x,top_x,"底部与顶部共用同一水平位置");
+        }
+        assert!(bottom_origin(Bounds{left:0,top:0,right:0,bottom:0},work,640.0,270.0,1.0,0.0).is_none());
+        assert!(bottom_origin(m,Bounds{left:0,top:0,right:1920,bottom:0},640.0,270.0,1.0,0.0).is_none());
+        assert!(bottom_origin(m,work,640.0,0.0,1.0,0.0).is_none());
+    }
 }
 
 #[cfg(test)]
@@ -150,8 +181,8 @@ mod tests {
         if !displays.is_empty(){assert_eq!(displays.iter().filter(|d|d.primary).count(),1);}
     }
     #[test] fn display_selection_survives_reordering_disconnect_and_reconnect(){
-        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},primary:true};
-        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},primary:false};
+        let primary=Display{id:"internal".into(),label:"内屏".into(),bounds:Bounds{left:0,top:0,right:1920,bottom:1080},work:Bounds{left:0,top:0,right:1920,bottom:1032},primary:true};
+        let external=Display{id:"external".into(),label:"外屏".into(),bounds:Bounds{left:-2560,top:-400,right:0,bottom:1040},work:Bounds{left:-2560,top:-400,right:0,bottom:1040},primary:false};
         for displays in [vec![primary.clone(),external.clone()],vec![external.clone(),primary.clone()]] {
             assert_eq!(selected(&displays,"").unwrap().id,"internal");
             let target=selected(&displays,"external").unwrap();assert_eq!(target.id,"external");

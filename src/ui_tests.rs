@@ -2528,8 +2528,8 @@ fn display_choice_saves_and_keeps_disconnected_selection(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings_open=true;h.ctx.set_embed_viewports(false);
     let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
     h.app.displays=vec![
-        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,primary:true},
-        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,primary:false},
+        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,work:bounds,primary:true},
+        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,work:bounds,primary:false},
     ];
     let mut raster=crate::preview_raster::Raster::new(690,560);
     fn frame(h:&mut H,raster:&mut crate::preview_raster::Raster,events:Vec<egui::Event>){
@@ -5091,7 +5091,7 @@ fn side_dock_stacks_ai_quota_and_opens_the_account(){
 #[test]
 fn automatic_minimal_hides_unread_hit_area_until_reopened(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for dock in [crate::model::Dock::Top,crate::model::Dock::Left,crate::model::Dock::Right] {
+    for dock in [crate::model::Dock::Top,crate::model::Dock::Left,crate::model::Dock::Right,crate::model::Dock::Bottom] {
         let mut h=H::new();
         h.app.settings.dock=dock;
         h.app.settings.browser_minimal=true;
@@ -5769,6 +5769,99 @@ fn world_clock_page_lists_cities_with_offsets() {
     // 清空城市后给出引导，不留一块空白卡片。
     h.cities.clear();h.frame(vec![]);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="还没有添加城市")));
+}
+
+/// `DAOZAI_BOTTOM_PREVIEW=<目录>` 时导出底部停靠的收起 / 展开态，肉眼核对贴底位置与翻转形状。
+#[test]
+#[ignore = "只在需要出预览图时手动跑"]
+fn render_bottom_dock_preview(){
+    let Ok(dir)=std::env::var("DAOZAI_BOTTOM_PREVIEW") else{return};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name,expanded) in [("collapsed",false),("expanded",true)] {
+        let mut h=H::new();
+        h.app.settings.dock=crate::model::Dock::Bottom;
+        h.app.settings.pet=false;
+        h.app.settings.time_resident=true;
+        // 让悬停自然触发展开，不要手动置 open（会绕过弹簧目标，面板只展开一半）。
+        h.display_clock="16:00:00".into();
+        h.display_date="11月7日 周六".into();
+        h.display_label="北京".into();
+        let mut raster=crate::preview_raster::Raster::new(1280,560);
+        for frame in 0..150 {
+            let t=frame as f64/60.0;
+            let cursor=if expanded {Some(Pos2::new(WIN_W/2.0,WIN_H-18.0))}else{None};
+            let env=Env{t,clock:"03:00:00".into(),today:"2026-11-07".into(),date:"11月7日 周六".into(),
+                display_clock:"16:00:00".into(),display_today:"2026-11-07".into(),display_date:"11月7日 周六".into(),
+                display_label:"北京".into(),media:h.media.clone(),cursor,..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+            });
+            raster.update_textures(&output.textures_delta);
+            if frame==149 {
+                raster.buf.fill([0.10,0.10,0.12,1.0]);
+                raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw(1280,560,rgba).unwrap();
+                image.save(std::path::Path::new(&dir).join(format!("{name}.png"))).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+}
+
+#[test]
+fn dock_options_round_trip_and_bottom_stays_horizontal(){
+    use crate::model::Dock;
+    assert_eq!(Dock::ALL.len(),4,"设置里应有四个停靠档位");
+    for dock in Dock::ALL {assert_eq!(Dock::parse(dock.key()),dock,"{dock:?} 读写不一致");}
+    assert_eq!(Dock::Bottom.label(),"底部");
+    assert!(!Dock::Bottom.is_side() && Dock::Bottom.is_bottom(),"底部是横向布局，不是侧边胶囊");
+    assert!(Dock::Left.is_side() && Dock::Right.is_side() && !Dock::Top.is_side());
+    assert_eq!(Dock::parse("未知值"),Dock::Top);
+}
+
+#[test]
+fn bottom_dock_anchors_the_island_to_the_canvas_bottom(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dock=crate::model::Dock::Bottom;
+    h.app.settings.pet=false;
+    h.app.settings.time_resident=true;
+    for _ in 0..90 {h.frame(vec![]);}
+    assert!(clock_count(&h,"09:41")>=1,"底部停靠收起态仍要显示时间");
+    assert!(h.hit.bottom()>=WIN_H-8.0,"收起态应贴画布下沿：{:?}",h.hit);
+    assert!(h.hit.top()>WIN_H*0.6,"热区不能还留在画布顶部：{:?}",h.hit);
+    assert!((h.hit.center().x-WIN_W/2.0).abs()<2.0,"仍然水平居中");
+    h.hover(Pos2::new(WIN_W/2.0,WIN_H-18.0),1.5);
+    assert!(h.app.open,"底部停靠也要能悬停展开");
+    assert!(h.hit.bottom()>=WIN_H-8.0,"展开后仍贴底：{:?}",h.hit);
+    assert!(h.hit.height()>100.0,"展开后是完整面板：{:?}",h.hit);
+    assert!(h.hit.top()>0.0,"展开后不能顶出画布：{:?}",h.hit);
+}
+
+#[test]
+fn bottom_dock_glass_outline_follows_the_bottom_edge(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.settings.dock=crate::model::Dock::Bottom;
+    h.app.settings.skin=crate::model::Skin::GlassDark;
+    for _ in 0..30 {h.frame(vec![]);}
+    let mut glass=None;
+    let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),..Default::default()};
+    let _=h.ctx.run(raw,|ctx|{
+        egui::CentralPanel::default().show(ctx,|ui|{
+            let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H));
+            glass=h.app.frame(ui,win,&Env{opaque_surface:true,..Default::default()}).glass;
+        });
+    });
+    let shapes=glass.expect("毛玻璃应给出裁剪轮廓");
+    assert!(shapes.iter().any(|s|matches!(s,crate::app::GlassShape::Docked{dock:crate::model::Dock::Bottom,..})),"底部停靠要走镜像轮廓");
+    let pieces=crate::app::blur_pieces(&shapes,2.0);
+    assert!(!pieces.is_empty());
+    assert!(pieces.iter().all(|p|p.y>200.0),"模糊块应落在画布下半部：{:?}",pieces);
 }
 
 /// `DAOZAI_RESIDENT_PREVIEW=<目录>` 时导出极简 / 歌词 / 通知三种收回态，肉眼核对时间席位。
