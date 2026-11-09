@@ -289,6 +289,34 @@ pub fn alpha(c: Color32, a: f32) -> Color32 {
 mod gradient_tests {
     use super::*;
     #[test]
+    fn regression_play_icon_has_no_internal_seam() {
+        for ppp in [1.0,1.25,1.5,2.0] {
+            for scale in [0.9,1.0,1.4] {
+                for offset in [0.0,0.25,0.5,0.75] {
+                    for (size,color) in [11.0,15.0].into_iter().flat_map(|size|[Color32::WHITE,Color32::from_gray(22),Color32::from_white_alpha(128)].map(|color|(size,color))) {
+                        let ctx=egui::Context::default();ctx.set_zoom_factor(ppp);
+                        let center=Pos2::new(30.0+offset,26.0+offset);
+                        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::splat(64.0))),..Default::default()};
+                        let output=ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{
+                            let card=Card::new(ui,Pos2::ZERO,ui.max_rect()).scaled(center.x,center.y,scale);
+                            play_pause(&card,center.x,center.y,size,0.0,color);
+                        });});
+                        let mut raster=crate::preview_raster::Raster::new((64.0*ppp) as usize,(64.0*ppp) as usize);
+                        raster.update_textures(&output.textures_delta);
+                        raster.draw(&ctx.tessellate(output.shapes,ppp),ppp);
+                        let y=(center.y*ppp).floor() as usize;
+                        for dx in [-0.5,0.0,0.5,1.0,1.5] {
+                            let x=((center.x+dx*scale)*ppp).floor() as usize;
+                            let expected=color.a() as f32/255.0;
+                            assert!((raster.buf[y*raster.w+x][3]-expected).abs()<0.02,"播放三角形内部应连续：ppp={ppp}, scale={scale}, offset={offset}, dx={dx}, alpha={}",raster.buf[y*raster.w+x][3]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn long_email_links_do_not_create_hundreds_of_layouts() {
         let ctx=egui::Context::default();
         let text=format!("https://example.com/{}","newsletter-link-".repeat(40));
@@ -416,6 +444,11 @@ pub fn play_pause(c: &Card, cx: f32, cy: f32, size: f32, t: f32, color: Color32)
     let l = |a: (f32, f32), b: (f32, f32)| (cx + a.0 + (b.0 - a.0) * t, cy + a.1 + (b.1 - a.1) * t);
     // 三角拆成左梯形 + 右三角，与两根竖条一一对应插值
     let dx = w * 0.08 * (1.0 - t); // 三角视觉重心右移
+    if t==0.0 {
+        // 静止播放态画完整三角形，公共边不能被两块图形分别羽化。
+        c.poly(&[(cx-w/2.0+dx,cy-h/2.0),(cx+w/2.0+dx,cy),(cx-w/2.0+dx,cy+h/2.0)],color);
+        return;
+    }
     let left = [
         l((-w / 2.0 + dx, -h / 2.0), (-w / 2.0, -h / 2.0)),
         l((dx, -h / 4.0), (-w / 2.0 + bw, -h / 2.0)),
