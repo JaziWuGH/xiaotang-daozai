@@ -1837,7 +1837,10 @@ mod tests {
             let native=netease_playback::Reader::default().poll();
             let chosen=choose_media(system.clone(),native.clone());
             println!("round {round}: system[{}] native[{}] chosen[{}]",brief(system.as_ref()),brief(native.as_ref()),brief(chosen.as_ref()));
-            if round==0 {println!("memory_timeline={:?}",netease_timeline::timeline());}
+            if round==0 {
+                println!("memory_timeline={:?}",netease_timeline::timeline());
+                println!("mode_backend={} play_mode={:?} source={}",MODE_BACKEND.load(std::sync::atomic::Ordering::Relaxed),play_mode(),chosen.as_ref().map(|m|m.source.as_str()).unwrap_or(""));
+            }
             std::thread::sleep(Duration::from_millis(400));
         }
     }

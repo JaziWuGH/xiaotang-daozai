@@ -9,7 +9,10 @@ const MAX_LINE:usize=256*1024;
 static LAST_DURATION_MS:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
 /// 已经点过进度条的目标位置（毫秒，-1 表示没有），轮询线程据此校正本地时间轴。
 static PENDING_SEEK_MS:std::sync::atomic::AtomicI64=std::sync::atomic::AtomicI64::new(-1);
-static MODE_PROBED:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
+/// 上次尝试恢复播放模式的单调时刻（毫秒）。失败要能低频重试，不能一次失败就永久锁死。
+static MODE_PROBE_AT:std::sync::atomic::AtomicU64=std::sync::atomic::AtomicU64::new(0);
+/// UIA 兜底读取是否还在跑，避免窗口不可见时反复起线程。
+static MODE_UIA_BUSY:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
 
 /// 网易云日志里的模式名（"播放模式切换" 事件）。
 fn mode_from_log(name:&str)->Option<PlayMode> {
@@ -114,8 +117,6 @@ impl Playback {
                 if event=="checkPlayPrivilege" && self.media.song_id.is_some(){return;}
                 *self=Self{media:metadata.0,artwork_url:metadata.1,at,observed_at:now,ready:false};
             }else{self.metadata(metadata);}
-        }else if event=="播放模式切换"{
-            if let Some(mode)=mode_from_event(args){super::set_play_mode(mode);}
         }else if event.starts_with("native") && event.contains("load完成"){
             let Some(id)=serde_json::from_str::<serde_json::Value>(args).ok().and_then(|v|song_id(v.get("songId")?))else{return;};
             if self.media.song_id!=Some(id){*self=Self::default();self.media.song_id=Some(id);}
@@ -253,14 +254,19 @@ impl Reader {
     pub(super) fn pending(&self)->bool {
         self.pid!=0 && self.playback.media.song_id.is_some() && (!self.playback.ready || !self.playback.media.is_music())
     }
+    /// 处理一条完整日志行。播放模式是全局状态，必须单独回读：客户端在界面上手动切档时，
+    /// 这一行可能不属于当前进程的事件计数，也不带可用的播放状态，
+    /// 跟着 Playback::line 的 pid / at 过滤一起丢掉就会「客户端变了、岛上不变」。
+    fn ingest_line(playback:&mut Playback,pid:u32,line:&str,now:u64,replay:bool){
+        if let Some(mode)=logged_mode(line){super::set_play_mode(mode);}
+        let observed=if replay{historical_millis(line,now).unwrap_or(now)}else{now};
+        playback.line(line,pid,observed);
+    }
     fn ingest(&mut self,bytes:&[u8],now:u64,replay:bool){
         for byte in bytes.iter().copied().map(decode){
             if byte==b'\n'{
                 if !self.skip_line{
-                    if let Ok(line)=std::str::from_utf8(&self.carry){
-                        let observed=if replay{historical_millis(line,now).unwrap_or(now)}else{now};
-                        self.playback.line(line,self.pid,observed);
-                    }
+                    if let Ok(line)=std::str::from_utf8(&self.carry){Self::ingest_line(&mut self.playback,self.pid,line,now,replay);}
                 }
                 self.carry.clear();self.skip_line=false;
             }else if !self.skip_line{
@@ -374,7 +380,7 @@ fn mode_from_button(name:&str)->Option<PlayMode> {
 }
 
 #[cfg(windows)]
-fn mode_button()->Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
+fn mode_button(attempts:usize)->Option<windows::Win32::UI::Accessibility::IUIAutomationElement> {
     use windows::core::{w,PCWSTR};
     use windows::Win32::System::Com::{CoCreateInstance,CoInitializeEx,CLSCTX_ALL,COINIT_MULTITHREADED};
     use windows::Win32::UI::Accessibility::{CUIAutomation,IUIAutomation,TreeScope_Descendants};
@@ -386,7 +392,8 @@ fn mode_button()->Option<windows::Win32::UI::Accessibility::IUIAutomationElement
         let root=automation.ElementFromHandle(window).ok()?;
         let condition=automation.CreateTrueCondition().ok()?;
         // 首次查询会让网易云异步构建无障碍树，前几次可能只拿到半个树，轮询等它建好。
-        for attempt in 0..6 {
+        // 切换模式时只查一次，免得托盘态每次都白等两秒。
+        for attempt in 0..attempts {
             if attempt>0 {std::thread::sleep(Duration::from_millis(400));}
             let Ok(elements)=root.FindAll(TreeScope_Descendants,&condition) else{continue;};
             for index in 0..elements.Length().unwrap_or(0) {
@@ -403,22 +410,71 @@ fn mode_button()->Option<windows::Win32::UI::Accessibility::IUIAutomationElement
 /// 读当前播放模式；首次读取会让网易云构建无障碍树，耗时约一秒。
 #[cfg(windows)]
 fn read_play_mode()->Option<PlayMode> {
-    let button=mode_button()?;
+    let button=mode_button(6)?;
     let name=unsafe{button.CurrentName().ok()?.to_string()};
     mode_from_button(&name)
 }
 
-/// 点击模式按钮后的下一个模式。3.1.42 实测顺序：
-/// 随机 → 顺序 → 心动 → 列表循环 → 单曲循环 → 随机。
-fn next_mode(mode:PlayMode)->PlayMode {
-    match mode {
-        PlayMode::Random=>PlayMode::Order,
-        PlayMode::Order=>PlayMode::Heart,
-        PlayMode::Heart=>PlayMode::Cycle,
-        PlayMode::Cycle=>PlayMode::OneCycle,
-        PlayMode::OneCycle=>PlayMode::Random,
-        PlayMode::Unknown=>PlayMode::Unknown,
+/// 直接调用底栏模式按钮（UIA Invoke），不依赖按钮的像素位置。
+#[cfg(windows)]
+fn invoke_mode_button()->bool {
+    use windows::Win32::UI::Accessibility::{IUIAutomationInvokePattern,UIA_InvokePatternId};
+    let Some(button)=mode_button(1) else{return false;};
+    unsafe{
+        match button.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) {
+            Ok(pattern)=>pattern.Invoke().is_ok(),
+            Err(_)=>false,
+        }
     }
+}
+
+/// 从一行（已解码的）日志里读「播放模式切换」的真实新值。
+fn logged_mode(line:&str)->Option<PlayMode>{
+    let (_,body)=line.split_once("【playing】,")?;
+    let (event,args)=body.trim().strip_prefix('"')?.split_once("\",")?;
+    if event!="播放模式切换" {return None;}
+    mode_from_event(args)
+}
+
+fn elog_path()->Option<std::path::PathBuf>{
+    Some(std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("NetEase/CloudMusic/cloudmusic.elog"))
+}
+
+fn elog_size()->u64 {
+    elog_path().and_then(|path|std::fs::metadata(path).ok()).map(|meta|meta.len()).unwrap_or(0)
+}
+
+/// 从一段（已解码的）日志文本里取最后一条模式切换事件。
+/// 只有从半行开始时丢弃第一行残片，避免刚好丢掉新增日志里的第一条事件。
+fn last_mode_in(text:&str)->Option<PlayMode>{
+    let mut lines=text.lines();
+    if !text.starts_with('['){lines.next();}
+    lines.filter_map(logged_mode).last()
+}
+
+/// 扫描 `[start, 文件末尾]` 中最多 `limit` 字节，取最后一条模式切换事件。
+fn scan_mode_from(path:&std::path::Path,start:u64,limit:u64)->Option<PlayMode>{
+    let mut file=File::open(path).ok()?;
+    let size=file.metadata().ok()?.len();
+    if size<=start {return None;}
+    let start=start.max(size.saturating_sub(limit));
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes=vec![0u8;(size-start) as usize];
+    file.read_exact(&mut bytes).ok()?;
+    let decoded:Vec<u8>=bytes.into_iter().map(decode).collect();
+    last_mode_in(&String::from_utf8_lossy(&decoded))
+}
+
+/// 只读 `offset` 之后新增的日志，取最后一条模式切换事件。
+/// 用作「客户端真实状态」：心动模式会跳档，岛上按固定顺序猜下一档必然越错越远。
+fn logged_mode_since(offset:u64)->Option<PlayMode>{
+    scan_mode_from(&elog_path()?,offset,256*1024)
+}
+
+/// 启动时恢复最近一次模式：客户端可能好几天没切过模式，256KB 尾部不足以找到事件。
+/// 与 Reader 的历史重放范围保持一致。
+fn last_logged_mode()->Option<PlayMode>{
+    scan_mode_from(&elog_path()?,0,MAX_READ)
 }
 
 /// 底栏按钮行的位置（3.1.42 实测）：播放控制组以暂停键居中，
@@ -455,31 +511,52 @@ fn click_mode_button()->bool {
     true
 }
 
-/// 切到下一个播放模式。点完立刻按固定顺序前移本地状态，图标不用等日志回读就变；
-/// 网易云随后写下的「播放模式切换」事件会以真实值覆盖，偏差最多一帧。
+/// 切到下一个播放模式。状态一律以客户端写下的真实值为准：
+/// 网易云的心动模式会跳档（单曲循环可能直接跳到心动），岛上按固定顺序猜下一档会越错越远。
 #[cfg(windows)]
 pub(super) fn cycle_play_mode()->bool {
-    if !click_mode_button(){return false;}
-    if let Some(mode)=Some(next_mode(super::play_mode())).filter(|mode|*mode!=PlayMode::Unknown){super::set_play_mode(mode);}
+    let before=elog_size();
+    // 窗口消息点击实测最稳（托盘态也有效）；UIA Invoke 只在像素位置失效时兜底。
+    if !click_mode_button() && !invoke_mode_button(){return false;}
+    // 状态一律以客户端真实值为准：心动模式会跳档，岛上按固定顺序猜下一档会越错越远。
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(mode)=logged_mode_since(before){
+            super::set_play_mode(mode);
+            return true;
+        }
+    }
+    if let Some(mode)=read_play_mode(){super::set_play_mode(mode);return true;}
+    // 点击已经投递，日志可能只是落盘慢：不能因为回读慢就弹「没能切换播放模式」。
+    // 轮询线程的独立模式回读通道会在事件写入后把岛上状态同步过来。
+    trace("mode: 切换命令已投递，等待轮询线程回读客户端真实模式");
     true
 }
 
-/// 启动后补一次模式读取（网易云没切过模式时日志里没有事件）。
-/// 只在窗口本来就可见时读，不为了读模式去弹窗口。
+/// 播放模式恢复：主路径是 Reader 增量回读日志，这里只补「启动时尚未读到任何事件」的空隙。
+/// 失败不锁死——窗口收在托盘、UIA 树还没建好时，之后每两秒还能再试，
+/// 否则一次读取失败就会让模式图标永远停在 Unknown。
 #[cfg(windows)]
 pub(super) fn probe_play_mode_once() {
     use std::sync::atomic::Ordering;
     use windows::core::{w,PCWSTR};
     use windows::Win32::UI::WindowsAndMessaging::{FindWindowW,IsWindowVisible};
     if super::play_mode()!=PlayMode::Unknown {return;}
-    if MODE_PROBED.load(Ordering::Relaxed) {return;}
-    // 先便宜地看一眼窗口：收在托盘时 UIA 树是空的，读了也是白读，别为此反复起线程。
+    let now=monotonic_millis();
+    if now.saturating_sub(MODE_PROBE_AT.load(Ordering::Relaxed))<2000 {return;}
+    MODE_PROBE_AT.store(now,Ordering::Relaxed);
+    // 日志不依赖窗口可见性：托盘态启动也能立刻同步，不用等用户切一次模式。
+    if let Some(mode)=last_logged_mode(){
+        super::set_play_mode(mode);
+        return;
+    }
+    // 日志里完全没有事件时才用 UIA 兜底；收在托盘时 UIA 树是空的，读了也是白读。
     let visible=unsafe{FindWindowW(w!("OrpheusBrowserHost"),PCWSTR::null())
         .map(|window|IsWindowVisible(window).as_bool()).unwrap_or(false)};
-    if !visible {return;}
-    if MODE_PROBED.swap(true,Ordering::Relaxed) {return;}
+    if !visible || MODE_UIA_BUSY.swap(true,Ordering::Relaxed) {return;}
     std::thread::spawn(||{
         if let Some(mode)=read_play_mode(){super::set_play_mode(mode);}
+        MODE_UIA_BUSY.store(false,Ordering::Relaxed);
     });
 }
 
@@ -644,15 +721,62 @@ mod tests{
     }
 
     #[test]
-    fn play_mode_cycle_order_matches_the_client(){
+    fn logged_mode_reads_the_clients_real_new_mode(){
         use super::super::PlayMode;
-        // 3.1.42 实测：随机 → 顺序 → 心动 → 列表循环 → 单曲循环 → 随机。
-        assert_eq!(next_mode(PlayMode::Random),PlayMode::Order);
-        assert_eq!(next_mode(PlayMode::Order),PlayMode::Heart);
-        assert_eq!(next_mode(PlayMode::Heart),PlayMode::Cycle);
-        assert_eq!(next_mode(PlayMode::Cycle),PlayMode::OneCycle);
-        assert_eq!(next_mode(PlayMode::OneCycle),PlayMode::Random);
-        assert_eq!(next_mode(PlayMode::Unknown),PlayMode::Unknown,"当前模式未知时不猜下一个");
+        // 客户端实际写下的格式，含「旧 / 新」两个值；只认新值。
+        let line=r#"[39860:46996:1109/085245:15352875:INFO:app.cpp(1231)] [2026-11-09 08:52:45] 【playing】,"播放模式切换","旧播放模式::","playAi","新播放模式::","playCycle""#;
+        assert_eq!(logged_mode(line),Some(PlayMode::Cycle));
+        // 心动模式会跳档（单曲循环 → 心动），岛上不能按固定顺序猜。
+        let line=r#"[1:2:3] 【playing】,"播放模式切换","旧播放模式::","playOneCycle","新播放模式::","playAi""#;
+        assert_eq!(logged_mode(line),Some(PlayMode::Heart));
+        assert_eq!(logged_mode(r#"[1:2:3] 【playing】,"native播放state",1"#),None);
+        assert_eq!(logged_mode("没有模式字段"),None);
+    }
+
+    #[test]
+    fn client_mode_switch_reaches_island_even_without_playback_context(){
+        use super::super::PlayMode;
+        let original=super::super::play_mode();
+        let mut reader=Reader::default();
+        reader.pid=1234; // 与日志行的 pid 不一致：Playback::line 会把整行丢掉
+        super::super::set_play_mode(PlayMode::Unknown);
+        let line=r#"[39860:46996:1109/085245:15352875:INFO:app.cpp(1231)] [2026-11-09 08:52:45] 【playing】,"播放模式切换","旧播放模式::","playAi","新播放模式::","playCycle""#;
+        Reader::ingest_line(&mut reader.playback,reader.pid,line,1_000_000,false);
+        assert_eq!(super::super::play_mode(),PlayMode::Cycle,"客户端切档必须同步到岛上");
+        assert!(reader.playback.media.song_id.is_none(),"播放状态被 pid 过滤丢弃时，模式仍要独立生效");
+        super::super::set_play_mode(original);
+    }
+
+    #[test]
+    fn last_mode_in_keeps_the_first_line_when_it_is_a_whole_event(){
+        use super::super::PlayMode;
+        let order=r#"[1:2:3] 【playing】,"播放模式切换","旧播放模式::","playRandom","新播放模式::","playOrder""#;
+        let heart=r#"[1:2:3] 【playing】,"播放模式切换","旧播放模式::","playOrder","新播放模式::","playAi""#;
+        // 新增日志的第一行就是模式切换时不能被当成半行残片丢掉。
+        assert_eq!(last_mode_in(&format!("{order}\n")),Some(PlayMode::Order));
+        assert_eq!(last_mode_in(&format!("{order}\n{heart}\n")),Some(PlayMode::Heart));
+        assert_eq!(last_mode_in(&format!("半行残片\n{order}\n")),Some(PlayMode::Order));
+        assert_eq!(last_mode_in("[1:2:3] 【playing】,\"native播放state\",1\n"),None);
+    }
+
+    #[test]
+    fn startup_mode_recovery_scans_beyond_a_256kb_tail(){
+        use super::super::PlayMode;
+        // decode 是逐字节双射，反向编码出一份与真实格式一致的 elog。
+        let encode=|byte:u8|(0u8..=255).find(|candidate|decode(*candidate)==byte).unwrap();
+        let mode_line=format!("{}\n",r#"[1:2:3] 【playing】,"播放模式切换","旧播放模式::","playRandom","新播放模式::","playOrder""#);
+        let filler="[1:2:3] 【playing】,\"native播放state\",1\n";
+        let mut plain=mode_line.into_bytes();
+        while plain.len()<300*1024 {plain.extend_from_slice(filler.as_bytes());}
+        let encoded:Vec<u8>=plain.iter().copied().map(encode).collect();
+        let unique=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let path=std::env::temp_dir().join(format!("daozai-mode-recovery-{}-{unique}.elog",std::process::id()));
+        std::fs::write(&path,&encoded).unwrap();
+        let narrow=scan_mode_from(&path,0,256*1024);
+        let wide=scan_mode_from(&path,0,MAX_READ);
+        std::fs::remove_file(&path).ok();
+        assert_eq!(narrow,None,"256KB 尾部找不到久远的模式切换，这是旧实现的盲区");
+        assert_eq!(wide,Some(PlayMode::Order),"启动恢复必须扫到 4MB 范围内的最近一次模式");
     }
 
     #[test]
@@ -664,6 +788,92 @@ mod tests{
         assert_eq!(seek_fraction(50.0,0.0),None,"时长未知时不跳");
         assert_eq!(seek_fraction(50.0,-1.0),None);
         assert_eq!(seek_fraction(f64::NAN,250.0),None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore="实机验收：切换一次播放模式，岛上状态必须与客户端日志的真实值一致"]
+    fn live_netease_mode_switch_matches_client(){
+        let mut reader=Reader::default();
+        let _=reader.poll();
+        let before=elog_size();
+        assert!(cycle_play_mode(),"模式切换命令应成功");
+        let mut real=None;
+        let mut island=super::super::play_mode();
+        // 模拟生产轮询线程：即使日志落盘慢，独立回读通道也要把岛上状态拉齐。
+        for _ in 0..20 {
+            std::thread::sleep(Duration::from_millis(100));
+            let _=reader.poll();
+            real=logged_mode_since(before).or(real);
+            island=super::super::play_mode();
+            if real.is_some() && island==real.unwrap(){break;}
+        }
+        println!("island={island:?} client_log={real:?}");
+        assert!(real.is_some(),"客户端应写下「播放模式切换」事件");
+        assert_eq!(island,real.unwrap(),"岛上显示的模式必须与客户端真实模式一致");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore="实机验收：在客户端点模式按钮后，岛上状态必须跟上"]
+    fn live_client_mode_change_reaches_island(){
+        let mut reader=Reader::default();
+        let _=reader.poll();
+        let initial=super::super::play_mode();
+        let before=elog_size();
+        println!("initial={initial:?} offset={offset} size={size} uia={uia:?} widget={widget} pid={pid:?}",
+            offset=reader.offset,size=before,uia=read_play_mode(),widget=render_widget().is_some(),pid=process_id());
+        // 等价于在客户端底栏点一下模式按钮：只往渲染窗口投递消息，不抢前台。
+        assert!(click_mode_button(),"应能点到客户端的模式按钮");
+        let mut real=None;
+        for round in 0..20 {
+            std::thread::sleep(Duration::from_millis(150));
+            let _=reader.poll();
+            let logged=logged_mode_since(before);
+            let island=super::super::play_mode();
+            if logged.is_some(){real=logged;}
+            println!("round {round}: island={island:?} log={logged:?} size+{grown} offset={offset}",
+                grown=elog_size().saturating_sub(before),offset=reader.offset);
+            if let Some(mode)=real {
+                if island==mode {println!("synced after {round} rounds: {mode:?}");return;}
+            }
+        }
+        println!("final island={:?} log={:?}",super::super::play_mode(),real);
+        panic!("客户端切换模式后岛上没有同步");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore="只读诊断：网易云模式的日志 / UIA / 渲染窗口通道"]
+    fn live_mode_channel_probe(){
+        println!("logged_mode_since(0)={:?}",logged_mode_since(0));
+        println!("read_play_mode={:?}",read_play_mode());
+        println!("render_widget_found={}",render_widget().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore="实机验收：连续多次在客户端切模式，岛上必须每轮都跟上"]
+    fn live_mode_roundtrip_follows_client(){
+        let mut reader=Reader::default();
+        let _=reader.poll();
+        for step in 0..4 {
+            let before=elog_size();
+            let island_before=super::super::play_mode();
+            // 与用户在客户端底栏点一下等价：只往渲染窗口投递消息，不抢前台。
+            assert!(click_mode_button(),"step {step}: 点不到客户端模式按钮");
+            let mut real=None;
+            for _ in 0..14 {
+                std::thread::sleep(Duration::from_millis(120));
+                let _=reader.poll();
+                real=logged_mode_since(before).or(real);
+                if real.is_some() && super::super::play_mode()==real.unwrap(){break;}
+            }
+            let island_after=super::super::play_mode();
+            println!("step {step}: island_before={island_before:?} client={real:?} island_after={island_after:?}");
+            assert!(real.is_some(),"step {step}: 客户端没写下模式切换日志");
+            assert_eq!(island_after,real.unwrap(),"step {step}: 岛上没跟上客户端");
+        }
     }
 
     #[test]
