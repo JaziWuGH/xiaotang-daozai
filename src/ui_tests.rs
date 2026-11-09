@@ -1997,6 +1997,29 @@ fn page_visibility_does_not_reopen_hidden_pages_through_shortcuts_or_drops() {
 }
 
 #[test]
+fn alphabetic_mail_codes_reach_the_card_without_changing_case() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (kind,value) in ["text/plain","text/html"].into_iter().flat_map(|kind|["AbCdEf","WWWWWWWW"].map(|value|(kind,value))) {
+        let mut h=H::new();
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+        let body=if kind=="text/html"{format!("<p>Your verification code:</p><p><b>{value}</b></p>")}else{format!("Your verification code:\n{value}")};
+        let raw=format!("From: Example <security@example.invalid>\r\nSubject: Your verification code\r\nContent-Type: {kind}; charset=utf-8\r\n\r\n{body}");
+        let parsed=crate::mail::parse_message(raw.as_bytes());
+        let code=crate::mail::code_of(&parsed);
+        assert_eq!(code.as_deref(),Some(value));
+        h.app.mail_event(crate::mail::Event::Mail{new:true,item:crate::mail::Item{received_unix:None,account:"test@qq.com".into(),from:"Example".into(),subject:parsed.subject.clone(),time:"09:41".into(),code,summary:crate::mail::body_of(&parsed).into(),links:vec![],meeting:None,uid:43}});
+        h.app.show_page(5);h.hover(H::local(300.0,70.0),1.0);
+        let text=h.shapes.iter().find_map(|s|match &s.shape {egui::Shape::Text(t) if t.galley.text()==value=>Some(t),_=>None}).expect("字母验证码应出现在大卡上");
+        assert!(text.galley.size().x<=120.5,"最长字母码不能挤入邮件列表：{}",text.galley.size().x);
+        if value=="AbCdEf"{assert!(text.galley.job.sections.iter().any(|s|s.format.font_id.size>=23.0));}
+        h.cmds.clear();h.click(H::local(60.0,70.0));
+        assert!(h.cmds.iter().any(|c|matches!(c,crate::app::Cmd::Copy(copied) if copied==value)));
+        h.t+=61.0;h.frame(vec![]);
+        assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()==value)));
+    }
+}
+
+#[test]
 fn regression_microsoft_traditional_mail_creates_code_card() {
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for kind in ["text/plain","text/html"] {

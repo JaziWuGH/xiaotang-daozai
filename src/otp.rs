@@ -114,6 +114,49 @@ const EXPIRE_WORDS: &[&str] = &[
     "有效", "过期", "失效", "expire", "valid", "minutes", "分钟", "小时内", "過期", "分鐘", "小時內",
 ];
 
+/// 纯字母只接受明确的验证码字段，不能靠标题、大小写或强调样式累积成高分。
+fn alphabetic_code_at(hay:&str,start:usize,end:usize,text:&str,emph:&[String])->bool {
+    const PROSE: &[&str]=&[
+        "please","verify","confirm","code","your","this","that","enter","click","continue",
+        "account","email","password","security","valid","invalid","expired","expires","expire",
+        "required","secret","secure","private","unique","ready","active","inactive","pending","sent","received",
+        "request","requested","welcome","thanks","thank","regards","dear","hello","team",
+        "support","help","here","open","login","signin","sign","will","soon","sample","example",
+        "test","token","success","failure","correct","check","located","below","above",
+        "copy","paste","next","back","cancel","close","submit","resend","retry","start","finish",
+        "send","reset","refresh","change","update","updated","enabled","disabled","complete",
+        "only","none","normal","unknown","missing","allowed","denied","blocked",
+        "google","github","openai","apple","amazon",
+    ];
+    let core=text.replace(['-',' '],"");
+    if !(4..=8).contains(&core.len()) || !core.bytes().all(|b|b.is_ascii_alphabetic()) || PROSE.contains(&core.to_ascii_lowercase().as_str()){return false;}
+    let prefix=before(hay,start,64);
+    let Some(label)=strong().find_iter(&prefix).filter(|m|{
+        !m.as_str().eq_ignore_ascii_case("code")
+            && !prefix[..m.start()].chars().next_back().is_some_and(|c|c.is_ascii_alphanumeric())
+            && !prefix[m.end()..].chars().next().is_some_and(|c|c.is_ascii_alphanumeric())
+    }).last() else{return false;};
+    let quote=|c:char|"\"'“”‘’「」`".contains(c);
+    let raw_gap=&prefix[label.end()..];
+    let gap=raw_gap.trim().trim_end_matches(quote).trim().trim_end_matches([':', '：', '=']).trim().to_ascii_lowercase();
+    if !["","is","为","為","是"].contains(&gap.as_str()){return false;}
+    let tail=hay[end..].trim_start_matches(quote).trim_start_matches([' ','\t']);
+    if tail.starts_with(['@','/','\\','_','-']) || tail.strip_prefix('.').is_some_and(|s|s.chars().next().is_some_and(|c|c.is_ascii_alphanumeric())){return false;}
+    let terminal=tail.is_empty() || tail.starts_with(['\r','\n','.',',','，','。',';','；','!','！',')','）']);
+    let line_start=hay[..start].rfind('\n').map(|i|i+1).unwrap_or(0);
+    let line_end=hay[end..].find('\n').map(|i|end+i).unwrap_or(hay.len());
+    let own_line=hay[line_start..line_end].trim().trim_matches(quote)==text;
+    let exact_emphasis=emph.iter().any(|e|e.trim()==text);
+    if !terminal && !exact_emphasis{return false;}
+    if raw_gap.contains('\n') {
+        if !own_line && !exact_emphasis{return false;}
+    }else if !raw_gap.contains([':', '：', '=']) && !(gap!="" && core.bytes().filter(|b|b.is_ascii_uppercase()).count()>=2) && !exact_emphasis{return false;}
+    !has(&around(hay,start,end,6),MONEY_WORDS)
+        && !has(&before(hay,start,20),ORDER_WORDS)
+        && !has(&after(hay,end,8),ORDER_WORDS)
+        && !has(&around(hay,start,end,40),PROMO_WORDS)
+}
+
 /// 从主题 + 正文里挑出最像验证码的一个；`emphasized` 是 HTML 里加粗/大字号片段的纯文本。
 pub fn extract(subject: &str, body: &str, emphasized: &[String]) -> Option<Code> {
     let subject = normalize(subject);
@@ -123,6 +166,8 @@ pub fn extract(subject: &str, body: &str, emphasized: &[String]) -> Option<Code>
     let emph: Vec<String> = emphasized.iter().map(|s| normalize(s)).collect();
 
     let mut best: Option<(i32, usize, bool, Code)> = None;
+    let mut alphabetic:Option<Code>=None;
+    let mut alphabetic_ambiguous=false;
     for m in candidate().find_iter(&hay) {
         let prev = hay[..m.start()].chars().next_back();
         let next = hay[m.end()..].chars().next();
@@ -131,6 +176,13 @@ pub fn extract(subject: &str, body: &str, emphasized: &[String]) -> Option<Code>
             continue;
         }
         let text = m.as_str().to_string();
+        if text.bytes().all(|b|b.is_ascii_alphabetic() || b==b'-' || b==b' ') {
+            if alphabetic_code_at(&hay,m.start(),m.end(),&text,&emph) {
+                if let Some(previous)=&alphabetic {alphabetic_ambiguous|=previous.text!=text;}
+                else{alphabetic=Some(Code{text,score:THRESHOLD});}
+            }
+            continue;
+        }
         let Some((score, strong_signal)) = score_at(&hay, m.start(), m.end(), &text, subject_end, &emph) else {
             continue;
         };
@@ -154,6 +206,7 @@ pub fn extract(subject: &str, body: &str, emphasized: &[String]) -> Option<Code>
         }
     }
     best.map(|(_, _, _, code)| code).filter(|c| c.score >= THRESHOLD)
+        .or_else(||if alphabetic_ambiguous {None}else{alphabetic})
 }
 
 fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize, emph: &[String]) -> Option<(i32, bool)> {
@@ -350,6 +403,56 @@ mod tests {
 
     fn code(subject: &str, body: &str) -> Option<String> {
         extract(subject, body, &[]).map(|c| c.text)
+    }
+
+    #[test]
+    fn alphabetic_codes_require_an_explicit_code_field() {
+        for (subject,body,expected) in [
+            ("Your verification code","Your verification code: QXTRPA","QXTRPA"),
+            ("Your security code","Your security code: qmxrpt.","qmxrpt"),
+            ("","Your verification code is QxTrPa.","QxTrPa"),
+            ("","验证码为：AbCdEf。","AbCdEf"),
+            ("","您的一次性驗證碼為：QXTRPA","QXTRPA"),
+            ("Sign-in","One-time code:\nQXTRPA\nExpires in 5 minutes.","QXTRPA"),
+            ("","OTP:\nABCD-EFGH","ABCD-EFGH"),
+            ("","Verification code\n\nQXTRPA\n","QXTRPA"),
+        ] {assert_eq!(code(subject,body),Some(expected.into()),"{body}");}
+    }
+
+    #[test]
+    fn alphabetic_codes_reject_regular_words_and_non_authentication_fields() {
+        for (subject,body) in [
+            ("Verification code","Your verification code will arrive soon."),
+            ("Verification code","Thanks"),
+            ("","Your verification code is valid."),
+            ("","Your verification code is ready."),
+            ("","Your verification code is useful."),
+            ("","Your verification code is SECURE."),
+            ("","Verification code: Action Required"),
+            ("","Verification code:\nCOPY"),
+            ("","Verification code: NEXT"),
+            ("","Your verification code is NORMAL."),
+            ("","Verification code: PLEASE ENTER THE CODE."),
+            ("","Please verify your email and click CONTINUE."),
+            ("","CODE: GITHUB"),
+            ("","Source code: SAMPLE"),
+            ("","Your promo code: SUMMER"),
+            ("","Verification code: SUMMER. Enjoy a discount."),
+            ("","Verification code: https://example.com/QXTRPA"),
+            ("","Verification code: QXTRPA@example.com"),
+            ("","Verification code: QXTRPA.com"),
+            ("","Verification code: abcdefghijkl"),
+            ("","Verification code: ABC"),
+        ] {assert_eq!(code(subject,body),None,"普通英文不能被放大成验证码：{body}");}
+        let body=html_to_text("<h1>Account verification</h1><p><b>WELCOME</b></p><p>Please sign in.</p>");
+        assert_eq!(extract("Verification code",&body,&["WELCOME".into()]),None,"标题和加粗单词不能单独证明这是验证码");
+    }
+
+    #[test]
+    fn alphabetic_codes_do_not_guess_between_distinct_values() {
+        assert_eq!(code("","Verification code: QXTRPA\nSecurity code: JZKWRT"),None);
+        assert_eq!(code("","Verification code: QXTRPA\nSecurity code: QXTRPA"),Some("QXTRPA".into()));
+        assert_eq!(code("","Verification code: QXTRPA\nVerification code: 123456"),Some("123456".into()));
     }
 
     #[test]
