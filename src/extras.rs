@@ -18,6 +18,7 @@ pub(crate) struct Alert {
     pub duration: f64,
     pub bluetooth: Option<(crate::bt::DeviceKind, bool)>,
     pub meeting: Option<(crate::mail::Meeting, String)>,
+    pub unread: Option<crate::app::Unread>,
 }
 impl Alert {
     pub(crate) fn messenger(&self)->Option<crate::app::Messenger>{
@@ -209,6 +210,7 @@ impl App {
             duration: if transient { 2.5 } else { 8.0 },
             bluetooth: None,
             meeting: None,
+            unread: None,
         };
         self.enqueue_alert(a, system);
     }
@@ -216,7 +218,7 @@ impl App {
         self.enqueue_alert(Alert {
             source: AlertSource::Internal,
             title: "会议提醒".into(), body: format!("{} · {} · {}", meeting.title, meeting.at, source),
-            page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)),
+            page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)), unread: None,
         }, true);
     }
     pub(crate) fn bluetooth_alert(&mut self, device: &crate::bt::Device, connected: bool) {
@@ -232,6 +234,7 @@ impl App {
             page: 5, at: self.t, duration: 2.5,
             bluetooth: Some((device.kind, connected)),
             meeting: None,
+            unread: None,
         };
         self.enqueue_alert(a, false);
     }
@@ -246,7 +249,7 @@ impl App {
             }
             let same_event=|old:&Alert| match (&a.meeting,&old.meeting) {
                 (Some((next,_)),Some((previous,_)))=>crate::calendar::dedupe_key(next)==crate::calendar::dedupe_key(previous),
-                _=>old.source==a.source && old.title==a.title && (a.is_hud() || old.body==a.body),
+                _=>old.source==a.source && old.title==a.title && old.unread==a.unread && (a.is_hud() || old.body==a.body),
             };
             if a.source!=AlertSource::Internal || a.title != "蓝牙设备" { self.alerts.retain(|old| !same_event(old)); }
             if (a.source!=AlertSource::Internal || a.title != "蓝牙设备") && self.notice.as_ref().is_some_and(same_event) {
@@ -264,10 +267,23 @@ impl App {
         self.pending_messengers.retain(|u|u.source!=source);
         self.clear_messenger_notices(source);
     }
-    /// 某个账号（进程）的窗口被打开：只清它自己；分不出账号的条目（pid 0）一并清掉。
+    /// 只清已查看的账号；无法确认账号的 QQ 提醒由用户明确关闭。
     pub fn viewed_client(&mut self,source:crate::app::Messenger,pid:u32){
-        self.pending_messengers.retain(|u|u.source!=source || pid!=0 && u.pid!=0 && u.pid!=pid);
+        self.pending_messengers.retain(|u|u.source!=source || if source==crate::app::Messenger::Qq{pid==0 || u.pid!=pid}else{pid!=0 && u.pid!=0 && u.pid!=pid});
+        if pid!=0{self.clear_account_notices(source,pid);}
+        if source==crate::app::Messenger::Wechat{self.clear_account_notices(source,0);}
         if !self.pending_messengers.iter().any(|u|u.source==source){self.clear_messenger_notices(source);}
+    }
+    pub fn discard_unread(&mut self,unread:crate::app::Unread){
+        if !self.pending_messengers.contains(&unread){return;}
+        self.pending_messengers.retain(|current|*current!=unread);
+        self.clear_account_notices(unread.source,unread.pid);
+        if !self.pending_messengers.iter().any(|current|current.source==unread.source){self.clear_messenger_notices(unread.source);}
+    }
+    fn clear_account_notices(&mut self,source:crate::app::Messenger,pid:u32){
+        let matches=|notice:&Alert|notice.unread.is_some_and(|u|u.source==source && u.pid==pid);
+        self.alerts.retain(|notice|!matches(notice));
+        if self.notice.as_ref().is_some_and(matches){self.notice=None;self.notification_bell_until=0.0;}
     }
     fn clear_messenger_notices(&mut self,source:crate::app::Messenger){
         self.alerts.retain(|a|a.messenger()!=Some(source));
@@ -291,14 +307,18 @@ impl App {
         self.mark_messenger(crate::app::Messenger::Wechat,pid,window);
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
-        self.enqueue_alert(Alert{source:AlertSource::Wechat,title:"微信".into(),body:"有新消息 · 请到微信查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
+        self.enqueue_alert(Alert{source:AlertSource::Wechat,title:"微信".into(),body:"有新消息 · 请到微信查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:Some(crate::app::Unread{source:crate::app::Messenger::Wechat,pid,window})},false);
     }
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
+        self.receive_notification_from(app,id,body,None);
+    }
+    pub fn receive_notification_from(&mut self,app:String,id:String,body:String,unread:Option<crate::app::Unread>){
         if !self.settings.read_notifications || id.is_empty() || (self.settings.qq_only && id!="QQ"){return;}
         // 岛仔自己发出的系统提醒会被通知中心回传；已在历史里的同一内容不再入队，避免重复显示。
         if self.history.iter().any(|a|format!("{} · {}",a.title,a.body)==body){return;}
         if !self.notification_apps.observe(&id,&app) || !self.settings.notifications{return;}
-        if id=="QQ"{self.mark_messenger(crate::app::Messenger::Qq,0,0);}
+        let unread=(id=="QQ").then(||unread.filter(|u|u.source==crate::app::Messenger::Qq && u.pid!=0).unwrap_or(crate::app::Unread::of(crate::app::Messenger::Qq)));
+        if let Some(unread)=unread{self.mark_messenger(unread.source,unread.pid,unread.window);}
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
         let title=app.chars().filter(|c|!c.is_control()).take(80).collect();
@@ -307,7 +327,13 @@ impl App {
             if let Some(code)=crate::otp::extract("",&text,&[]) {text=crate::mail_privacy::mask(&text,&code.text);}
             text
         }else{"收到新通知 · 内容已隐藏".into()};
-        self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
+        self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread},false);
+    }
+    pub fn reveal_qq_notice(&mut self,unread:crate::app::Unread){
+        if unread.source!=crate::app::Messenger::Qq || !self.pending_messengers.contains(&unread){return;}
+        let body=if unread.pid==0{"消息账号暂无法确认"}else{"暂时无法打开对应窗口"};
+        self.notice=Some(Alert{source:AlertSource::External("QQ".into()),title:"QQ".into(),body:body.into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:Some(unread)});
+        self.notification_bell_at=self.t;self.notification_bell_until=self.t+4.5;
     }
     pub(crate) fn tick_alerts(&mut self) {
         self.pending_messengers.retain(|u|self.settings.notifications && match u.source {
@@ -348,8 +374,11 @@ impl App {
             nc.circle(31.0,14.0,2.6,Color32::from_rgb(255,72,72));
             nc.centered_text(44.0,14.0,&a.title,11.0,W::Semibold,theme::WHITE,H::Left);
             nc.centered_text(44.0,30.0,&nc.fit(&a.body,10.5,W::Regular,154.0),10.5,W::Regular,theme::GRAY,H::Left);
-            if notice_button(&nc,206.0,12.0,52.0,"查看","messenger-view"){_cmds.push(Cmd::ViewMessenger(self.latest_unread(source)));}
-            if notice_button(&nc,265.0,12.0,52.0,"关闭","messenger-dismiss"){self.notice=None;self.notification_bell_until=0.0;}
+            if notice_button(&nc,206.0,12.0,52.0,"查看","messenger-view"){_cmds.push(Cmd::ViewMessenger(a.unread.unwrap_or_else(||self.latest_unread(source))));}
+            if notice_button(&nc,265.0,12.0,52.0,"关闭","messenger-dismiss"){
+                if source==crate::app::Messenger::Qq{if let Some(unread)=a.unread{self.discard_unread(unread);}}
+                self.notice=None;self.notification_bell_until=0.0;
+            }
             return;
         }
         if a.source!=AlertSource::Internal {

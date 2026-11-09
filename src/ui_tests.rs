@@ -5757,6 +5757,179 @@ fn settings_gallery(){
 }
 
 #[test]
+#[ignore="按需导出消息提醒与账号状态提示的实际样式"]
+fn messenger_notice_status_gallery(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MESSENGER_PREVIEW").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    for case in 0..15{
+        let mut h=H::new();h.app.settings.pet=true;h.app.settings.wechat_notifications=true;
+        h.app.settings.read_notifications=true;h.app.settings.notification_preview=true;
+        h.app.settings.bluetooth_notifications=true;
+        let ppp=2.0;let (w,height)=(crate::app::CANVAS_W,WIN_H);
+        let mut raster=crate::preview_raster::Raster::new((w*ppp) as usize,(height*ppp) as usize);
+        for frame in 0..90{
+            h.t=frame as f64/60.0;
+            if frame==40{match case{
+                0=>h.app.receive_wechat_reminder_from(100,0),
+                1=>h.app.receive_notification("QQ".into(),"QQ".into(),"有新消息 · 请到 QQ 查看".into()),
+                2=>{for pid in [100,200,300]{h.app.receive_wechat_reminder_from(pid,0);}h.app.alerts.clear();h.app.notice=None;h.app.notification_bell_until=0.0;},
+                3=>h.app.messenger_unavailable("QQ 账号已退出"),
+                4=>h.app.messenger_unavailable("微信 账号已退出"),
+                5=>h.app.messenger_unavailable("暂时无法确认此 QQ 消息的账号"),
+                6=>h.app.messenger_unavailable("QQ 窗口暂时无法打开"),
+                7=>{h.app.show_page(4);h.app.messenger_unavailable("QQ 账号已退出");},
+                8=>h.app.alert("大写锁定","已开启",5,false),
+                9=>h.app.alert("系统音量","音量 60%",5,false),
+                10=>h.app.bluetooth_alert(&crate::bt::Device{id:"preview".into(),name:"耳机".into(),battery:Some(80),kind:crate::bt::DeviceKind::Headphones},true),
+                11=>h.app.alert("电量偏低","剩余 15% · 请连接电源",5,false),
+                12=>{
+                    let start=chrono::Local::now()+chrono::Duration::minutes(10);
+                    h.app.meeting_alert(crate::mail::Meeting{all_day:false,title:"团队会议".into(),start:start.timestamp(),end:None,at:start.format("%m-%d %H:%M").to_string(),uid:"preview".into()},"本机日程".into(),7);
+                },
+                13=>h.app.alert("喝水时间到了","休息一下，喝 250 ml 水吧",2,false),
+                14=>h.app.alert("待办到时间了","整理本周资料",4,false),
+                _=>unreachable!(),
+            }}
+            let cursor=(case==7).then(||H::local(160.0,12.0));
+            let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-08".into(),date:"11月8日 周日".into(),cursor,volume:(case==9).then_some((60,false)),media:h.media.clone(),..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,height))),time:Some(h.t),focused:true,
+                events:cursor.map(|p|vec![egui::Event::PointerMoved(p)]).unwrap_or_default(),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{
+                h.app.frame(ui,Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H)),&env);
+            });});
+            raster.update_textures(&output.textures_delta);
+            if frame==89{
+                raster.buf.fill([0.93,0.95,0.97,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw((w*ppp)as u32,(height*ppp)as u32,rgba).unwrap();
+                image::imageops::crop_imm(&image,100,0,1560,if case==7||case==12{440}else{260}).to_image().save(dest.join(format!("{case:02}.png"))).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    }
+}
+
+#[test]
+fn qq_unknown_reminders_survive_viewing_other_accounts(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.read_notifications=true;
+    h.app.receive_notification("QQ".into(),"QQ".into(),"未确认账号的消息".into());
+    h.app.viewed_client(crate::app::Messenger::Qq,200);
+    assert_eq!(h.app.pending_messengers,[crate::app::Unread::of(crate::app::Messenger::Qq)]);
+}
+
+#[test]
+fn qq_bound_notices_open_their_original_account_and_clear_independently(){
+    use crate::app::{Cmd,Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.read_notifications=true;
+    let a=Unread{source:Messenger::Qq,pid:100,window:11};let b=Unread{source:Messenger::Qq,pid:200,window:22};
+    h.app.receive_notification_from("QQ".into(),"QQ".into(),"有新消息".into(),Some(a));h.frame(vec![]);
+    h.app.receive_notification_from("QQ".into(),"QQ".into(),"有新消息".into(),Some(b));
+    assert_eq!(h.app.pending_messengers,[a,b]);
+    for _ in 0..45{h.frame(vec![]);}
+    h.click_text("查看");assert!(h.cmds.contains(&Cmd::ViewMessenger(a)),"横幅应打开它自己的账号，不能取最近新增的另一个账号");
+    h.app.viewed_client(Messenger::Qq,200);h.frame(vec![]);
+    assert_eq!(h.app.pending_messengers,[a]);
+    h.cmds.clear();h.click_text("查看");assert!(h.cmds.contains(&Cmd::ViewMessenger(a)));
+    h.app.discard_unread(a);h.frame(vec![]);assert!(h.app.pending_messengers.is_empty());assert!(h.app.notice.is_none());
+}
+
+#[test]
+fn qq_unknown_notice_can_close_without_dismissing_a_bound_account(){
+    use crate::app::{Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.read_notifications=true;
+    h.app.receive_notification("QQ".into(),"QQ".into(),"未确认账号".into());h.frame(vec![]);
+    let b=Unread{source:Messenger::Qq,pid:200,window:22};
+    h.app.receive_notification_from("QQ".into(),"QQ".into(),"另一账号的消息".into(),Some(b));
+    for _ in 0..45{h.frame(vec![]);}
+    h.click_text("关闭");h.frame(vec![]);
+    assert_eq!(h.app.pending_messengers,[b]);
+}
+
+#[test]
+fn qq_expired_unidentified_notice_can_be_reopened_and_explicitly_cleared(){
+    use crate::app::{Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.read_notifications=true;
+    let unread=Unread::of(Messenger::Qq);
+    h.app.receive_notification("QQ".into(),"QQ".into(),"测试消息".into());
+    for _ in 0..360{h.frame(vec![]);}assert!(h.app.notice.is_none());
+    h.app.reveal_qq_notice(unread);for _ in 0..45{h.frame(vec![]);}
+    h.click_text("关闭");h.frame(vec![]);assert!(h.app.pending_messengers.is_empty());
+}
+
+#[test]
+fn qq_unknown_reminders_are_not_numbered_as_another_known_account(){
+    use crate::app::{Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.read_notifications=true;
+    for (pid,window) in [(100,11),(0,0),(200,22)]{
+        h.app.receive_notification_from("QQ".into(),"QQ".into(),"有新消息".into(),(pid!=0).then_some(Unread{source:Messenger::Qq,pid,window}));
+    }
+    assert_eq!((h.app.unread_tag(0),h.app.unread_tag(1),h.app.unread_tag(2)),(Some(1),None,Some(2)));
+    h.app.alerts.clear();h.app.notice=None;h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text)if text.galley.text()=="?")));
+}
+
+#[test]
+fn unavailable_messenger_status_stays_visible_when_the_island_is_collapsed(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for message in ["QQ 账号已退出","微信 账号已退出","暂时无法确认此 QQ 消息的账号"]{
+        let mut h=H::new();h.hover(Pos2::new(600.0,180.0),1.0);
+        h.app.messenger_unavailable(message);h.hover(Pos2::new(600.0,180.0),0.3);
+        let bounds=h.shapes.iter().find_map(|shape|match &shape.shape{
+            egui::Shape::Text(text) if text.galley.text()==message=>Some(text.visual_bounding_rect()),_=>None,
+        }).expect("岛收起时仍应完整显示账号状态提示");
+        assert!(h.app.progress()<0.02,"提示不应展开岛体");
+        assert!(h.region.contains_rect(bounds),"原生窗口区域应包含提示");
+        assert!(!h.hit.intersects(bounds),"提示不应拦截鼠标");
+    }
+}
+
+#[test]
+fn exited_messenger_unreads_clear_their_badges_and_notifications(){
+    use crate::app::{Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.wechat_notifications=true;h.app.settings.read_notifications=true;
+    h.app.receive_wechat_reminder_from(100,11);h.frame(vec![]);
+    assert_eq!(h.app.notice.as_ref().and_then(|notice|notice.messenger()),Some(Messenger::Wechat));
+    h.app.receive_wechat_reminder_from(200,22);h.app.receive_wechat_reminder_from(300,33);
+    h.app.receive_notification("QQ".into(),"QQ".into(),"测试".into());
+    for (pid,window) in [(200,22),(100,11)]{
+        h.app.discard_unread(Unread{source:Messenger::Wechat,pid,window});h.frame(vec![]);
+        assert!(h.app.pending_messengers.contains(&Unread{source:Messenger::Wechat,pid:300,window:33}));
+        assert_eq!(h.app.notice.as_ref().and_then(|notice|notice.messenger()),Some(Messenger::Wechat));
+    }
+    h.app.discard_unread(Unread{source:Messenger::Wechat,pid:300,window:33});h.frame(vec![]);
+    assert_eq!(h.app.pending_messengers,[Unread::of(Messenger::Qq)]);
+    assert!(h.app.alerts.iter().all(|notice|notice.messenger()!=Some(Messenger::Wechat)));
+    assert_ne!(h.app.notice.as_ref().and_then(|notice|notice.messenger()),Some(Messenger::Wechat));
+    h.app.discard_unread(Unread::of(Messenger::Qq));h.frame(vec![]);
+    assert!(h.app.pending_messengers.is_empty());
+    assert!(h.app.alerts.iter().all(|notice|notice.messenger()!=Some(Messenger::Qq)));
+    assert_ne!(h.app.notice.as_ref().and_then(|notice|notice.messenger()),Some(Messenger::Qq));
+}
+
+#[test]
+fn stale_exit_results_preserve_new_windows_and_unidentified_accounts(){
+    use crate::app::{Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.settings.wechat_notifications=true;
+    let old=Unread{source:Messenger::Wechat,pid:100,window:11};
+    h.app.receive_wechat_reminder_from(old.pid,old.window);h.app.receive_wechat_reminder_from(100,12);
+    h.app.receive_wechat_reminder();h.app.discard_unread(old);
+    assert_eq!(h.app.pending_messengers,[Unread{window:12,..old},Unread::of(Messenger::Wechat)]);
+    h.app.discard_unread(Unread{window:12,..old});h.frame(vec![]);
+    assert_eq!(h.app.pending_messengers,[Unread::of(Messenger::Wechat)]);
+    h.app.discard_unread(Unread::of(Messenger::Wechat));h.frame(vec![]);
+    assert!(h.app.pending_messengers.is_empty());
+}
+
+#[test]
 fn messenger_notifications_keep_separate_badges_until_the_client_is_viewed(){
     use crate::app::{Cmd,Messenger,Unread};
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
@@ -5833,6 +6006,8 @@ fn messenger_accounts_get_number_tags_and_clear_one_by_one(){
     assert_eq!(h.app.pending_messengers,[Unread{source:Messenger::Wechat,pid:100,window:12},Unread::of(Messenger::Qq)]);
     assert_eq!(h.app.unread_tag(0),None,"剩一个账号就不再编号");
     h.app.viewed_client(Messenger::Qq,4321);
+    assert!(h.app.pending_messengers.contains(&Unread::of(Messenger::Qq)),"查看其他 QQ 不能清除无法归属的提醒");
+    h.app.discard_unread(Unread::of(Messenger::Qq));
     assert_eq!(h.app.pending_messengers,[Unread{source:Messenger::Wechat,pid:100,window:12}]);
     // 四个以上：胶囊仍与面板等高，滚轮翻到后面的图标。
     for pid in [300,400,500]{h.app.receive_wechat_reminder_from(pid,0);}

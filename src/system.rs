@@ -270,7 +270,7 @@ pub fn browser_at_top(island:HWND,settings:&crate::model::Settings)->Option<bool
 pub enum Incoming {
     Revoked,
     Status(String),
-    Message(String, String, String),
+    Message(String, String, String, Option<crate::wechat::QqTarget>),
 }
 #[path="qq_toast_source.rs"]
 mod qq_toast_source;
@@ -367,6 +367,7 @@ pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> 
             let listener = UserNotificationListener::Current()?;
             let qq_status=qq_channel_status();
             let mut baseline=NotificationBaseline::default();
+            let mut qq_accounts=crate::wechat::QqAccounts::default();qq_accounts.sample();
             let mut last_status=String::new();
             loop {
                 if stopped.try_recv()!=Err(mpsc::TryRecvError::Empty){return Ok(());}
@@ -376,6 +377,7 @@ pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> 
                     return Ok(());
                 }
                 let items=listener.GetNotificationsAsync(NotificationKinds::Toast)?.get()?;
+                qq_accounts.sample();
                 let mut current=HashMap::new();
                 let mut messages=Vec::new();
                 for i in 0..items.Size()? {
@@ -394,13 +396,15 @@ pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> 
                     current.insert(number,version);
                     if baseline.changed(number,version){
                         let body=if qq && body.trim().is_empty(){"有新消息".into()}else{body};
-                        if !body.trim().is_empty(){messages.push((created,app,id,body));}
+                        let target=if qq{qq_accounts.target(number,created)}else{None};
+                        if !body.trim().is_empty(){messages.push((created,app,id,body,target));}
                     }
                 }
+                qq_accounts.retain(|id,created|current.get(&id).is_some_and(|item|item.created==created));
                 baseline.previous=Some(current);
                 messages.sort_by_key(|item|item.0);
-                for (_,app,id,body) in messages {
-                    if !send(Incoming::Message(app,id,body)){return Ok(());}
+                for (_,app,id,body,target) in messages {
+                    if !send(Incoming::Message(app,id,body,target)){return Ok(());}
                 }
                 let status=if qq_only{format!("仅监听 QQ · {qq_status}")}else{format!("正在监听 Windows 通知 · 当前可见 {} 条\n{qq_status}",items.Size()?)};
                 if status!=last_status {

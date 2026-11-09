@@ -130,7 +130,7 @@ impl Messenger {
     pub fn name(self)->&'static str {match self {Self::Wechat=>"微信",Self::Qq=>"QQ"}}
 }
 
-/// 一条未读：来源、账号所在进程（QQ 通知分不出账号，记为 0）和发出提醒的窗口（没有时为 0）。
+/// 一条未读：来源、账号所在进程（无法确认时为 0）和关联窗口（没有时为 0）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unread { pub source: Messenger, pub pid: u32, pub window: isize }
 impl Unread {
@@ -838,6 +838,11 @@ impl App {
     pub fn say(&mut self, msg: impl Into<String>) {
         self.toast = Some((msg.into(), self.t));
         self.toast_below = false;
+    }
+
+    pub fn messenger_unavailable(&mut self, message: impl Into<String>) {
+        self.say(message);
+        self.toast_below = true;
     }
 
     pub(crate) fn code_copied(&mut self, _code:&str) {
@@ -1935,13 +1940,16 @@ impl App {
     fn messenger_stack_appear(&self)->f32 {1.0-smoothstep(0.04,0.30,self.progress())}
     /// 同一来源有多个账号时给图标编号（1、2…）；只有一个账号不编号。
     pub(crate) fn unread_tag(&self,i:usize)->Option<usize>{
-        let source=self.pending_messengers.get(i)?.source;
-        let same=self.pending_messengers.iter().filter(|u|u.source==source).count();
-        (same>1).then(||self.pending_messengers[..=i].iter().filter(|u|u.source==source).count())
+        let unread=self.pending_messengers.get(i)?;let source=unread.source;
+        if source==Messenger::Qq && unread.pid==0{return None;}
+        let known=|u:&&Unread|u.source==source && (source!=Messenger::Qq || u.pid!=0);
+        let same=self.pending_messengers.iter().filter(known).count();
+        (same>1).then(||self.pending_messengers[..=i].iter().filter(known).count())
     }
     fn unread_id(&self,i:usize)->String{
         let name=self.pending_messengers[i].source.name();
-        match self.unread_tag(i){Some(n) if n>1=>format!("{name}{n}"),_=>name.to_string()}
+        let n=self.pending_messengers[..=i].iter().filter(|u|u.source==self.pending_messengers[i].source).count();
+        if n>1{format!("{name}{n}")}else{name.to_string()}
     }
     /// 展开胶囊高度：一个是圆，两个是短胶囊，三个及以上与面板等高（多出的滚动）。
     fn unread_capsule_height(&self,panel_h:f32)->f32 {
@@ -2021,11 +2029,13 @@ impl App {
             let scale=if u.source==Messenger::Wechat {1.0}else{1.12};
             crate::extras::messenger_icon(&inner.scaled(x,cy,scale),x,cy,u.source);
             inner.circle(x+10.0,cy-9.0,2.6,Color32::from_rgb(255,72,72));
-            if let Some(tag)=self.unread_tag(i){
+            let tag=self.unread_tag(i).map(|tag|tag.to_string()).or_else(||(u.source==Messenger::Qq && u.pid==0).then(||"?".to_string()));
+            if let Some(tag)=tag{
                 inner.circle(x+10.0,cy+8.5,6.0,Color32::from_gray(238));
-                inner.centered_text(x+10.0,cy+8.5,&tag.to_string(),8.5,W::Bold,Color32::from_gray(28),H::Center);
+                inner.centered_text(x+10.0,cy+8.5,&tag,8.5,W::Bold,Color32::from_gray(28),H::Center);
             }
-            let name=match self.unread_tag(i){Some(n)=>format!("{} · 账号 {n}",u.source.name()),None=>u.source.name().to_string()};
+            let name=if u.source==Messenger::Qq && u.pid==0{"QQ · 账号未确认".to_string()}
+                else{match self.unread_tag(i){Some(n)=>format!("{} · 账号 {n}",u.source.name()),None=>u.source.name().to_string()}};
             let button=inner.hit(0.0,cy-slot/2.0,UNREAD_W,slot,self.unread_id(i)).on_hover_text(format!("查看{name}"));
             if button.clicked(){cmds.push(Cmd::ViewMessenger(u));}
         }
