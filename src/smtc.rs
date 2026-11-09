@@ -310,6 +310,17 @@ fn choose_media(system:Option<NowPlaying>,native:Option<NowPlaying>)->Option<Now
                 if media.song_id.is_none(){media.song_id=fallback.song_id;}
                 if media.artwork.is_none(){media.artwork=system.artwork.clone().or_else(||native.artwork.clone());}
             }
+            // 网易云的系统媒体会话长期不上报时间轴（Position / EndTime 恒为 0，也没有采样时刻）。
+            // 上面按事件时间选出的可能只是「元数据更新」的那一路；SMTC 时间戳或歌名写法一抖动，
+            // 就会选中它并同时丢掉歌词滚动、总时长和进度条跳转。同一首歌的时间轴始终以本机日志为准。
+            let same_track=same || media.title==native.title;
+            if same_track && native.duration>0.0 && native.sampled_at.is_some() {
+                media.position=native.position;
+                media.duration=native.duration;
+                media.sampled_at=native.sampled_at;
+                if media.event_time_ms.is_none(){media.event_time_ms=native.event_time_ms;}
+                if media.song_id.is_none(){media.song_id=native.song_id;}
+            }
             return Some(media);
         }
     }
@@ -1331,6 +1342,40 @@ mod tests {
     }
 
     #[test]
+    fn netease_timeline_survives_newer_smtc_event_and_artist_spelling(){
+        let start=std::time::Instant::now();
+        // 网易云的 SMTC 会话不上报时间轴：位置、时长为 0，也没有采样时刻。
+        let system=NowPlaying{source:"cloudmusic.exe".into(),title:"留不住的夏天".into(),artist:"黄霄雲".into(),
+            playing:true,event_time_ms:Some(9_000),..Default::default()};
+        let native=NowPlaying{title:"留不住的夏天".into(),artist:"黄霄雲".into(),playing:true,
+            position:98.0,duration:216.0,sampled_at:Some(start),event_time_ms:Some(1_000),song_id:Some(42),..system.clone()};
+        // SMTC 事件时间更新时旧逻辑会选 system，歌词、总时长和拖动会一起失效。
+        let selected=choose_media(Some(system.clone()),Some(native.clone())).unwrap();
+        assert_eq!(selected.duration,216.0,"总时长必须来自本机日志");
+        assert_eq!(selected.position,98.0,"播放位置必须来自本机日志");
+        assert!(selected.sampled_at.is_some(),"没有采样时刻就无法连续外推、歌词不会滚动");
+        assert_eq!(selected.song_id,Some(42));
+        // 歌手署名写法对不上（same_song=false）但歌名一致时同样要保住时间轴。
+        let mismatched=NowPlaying{artist:"黄霄雲 / 合唱".into(),..system};
+        let selected=choose_media(Some(mismatched),Some(native)).unwrap();
+        assert_eq!(selected.duration,216.0);
+        assert!(selected.sampled_at.is_some());
+    }
+
+    #[test]
+    fn netease_timeline_is_not_carried_over_to_a_different_track(){
+        let start=std::time::Instant::now();
+        let system=NowPlaying{source:"cloudmusic.exe".into(),title:"新歌".into(),artist:"歌手".into(),
+            playing:true,event_time_ms:Some(9_000),..Default::default()};
+        let native=NowPlaying{title:"旧歌".into(),artist:"歌手".into(),playing:true,
+            position:200.0,duration:216.0,sampled_at:Some(start),event_time_ms:Some(1_000),..system.clone()};
+        let selected=choose_media(Some(system),Some(native)).unwrap();
+        assert_eq!(selected.title,"新歌");
+        assert_eq!(selected.duration,0.0,"切歌瞬间不能把上一首的时长套到新歌上");
+        assert!(selected.sampled_at.is_none());
+    }
+
+    #[test]
     fn unchanged_cover_does_not_start_a_worker_on_every_poll(){
         let _serial=ARTWORK_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::ARTWORK);
         let mut cache=ArtworkCache::default();
@@ -1774,6 +1819,26 @@ mod tests {
             if source!=keep {
                 println!("暂停 {source}: {:?}",media_result(||session.TryPauseAsync()));
             }
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore="只读诊断：连续观察 SMTC / 网易云日志 / 合并后的时间轴"]
+    fn live_media_timeline_diagnostic(){
+        let _apartment=init_winrt();
+        let brief=|m:Option<&NowPlaying>|match m{
+            Some(m)=>format!("{} pos={:.2} dur={:.2} sampled={} event={:?}",m.title,m.position,m.duration,m.sampled_at.is_some(),m.event_time_ms),
+            None=>"None".into(),
+        };
+        for round in 0..6 {
+            let mut artwork=ArtworkCache::default();
+            let system=query(&mut artwork);
+            let native=netease_playback::Reader::default().poll();
+            let chosen=choose_media(system.clone(),native.clone());
+            println!("round {round}: system[{}] native[{}] chosen[{}]",brief(system.as_ref()),brief(native.as_ref()),brief(chosen.as_ref()));
+            if round==0 {println!("memory_timeline={:?}",netease_timeline::timeline());}
+            std::thread::sleep(Duration::from_millis(400));
         }
     }
 

@@ -773,6 +773,29 @@ fn kugou_position_advances_without_duration_and_respects_pause_and_seek(){
 }
 
 #[test]
+fn music_seek_bar_jumps_when_duration_is_known(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.show_page(0);
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),
+        position:10.0,duration:221.0,playing:true,..Default::default()};
+    h.hover(H::local(300.0,60.0),0.8);
+    h.app.show_lyrics=false;
+    h.frame(vec![]);
+    // 进度条（无歌词态）是 x=96..317、y=92.6；点正中应当跳到一半。
+    h.cmds.clear();
+    h.click(H::local(206.5,92.6));
+    let seek=h.cmds.iter().find_map(|cmd|match cmd{crate::app::Cmd::Media(crate::smtc::Transport::Seek(s))=>Some(*s),_=>None});
+    assert!(seek.is_some_and(|s|(s-110.5).abs()<12.0),"点进度条中段应定位到约一半，实际 {seek:?}");
+    // 时长未知时保持原行为：不猜位置、不盲跳。
+    h.media.duration=0.0;
+    h.cmds.clear();
+    h.click(H::local(206.5,92.6));
+    assert!(!h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Media(crate::smtc::Transport::Seek(_)))),
+        "总时长未知时不应发出定位命令");
+}
+
+#[test]
 fn music_volume_slider_follows_hover_and_speaker_click_mutes(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();

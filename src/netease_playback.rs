@@ -238,6 +238,17 @@ pub(super) struct Reader {
     playback:Playback,lookup:(Option<u64>,u64),cover:CoverCache,
     queue_print:Vec<Option<(std::time::SystemTime,u64)>>,
 }
+/// 点过进度条后把本地时间轴对齐到目标位置。必须一并重置推进起点：
+/// 否则「上次播放事件到现在的整段时间」会再加到目标位置上，进度直接冲到歌曲末尾。
+fn apply_pending_seek(playback:&mut Playback,now:u64){
+    let pending=PENDING_SEEK_MS.swap(-1,std::sync::atomic::Ordering::Relaxed);
+    if pending>=0 && playback.media.song_id.is_some() {
+        playback.media.position=pending as f64/1000.0;
+        playback.at=now;
+        playback.observed_at=now;
+    }
+}
+
 impl Reader {
     pub(super) fn pending(&self)->bool {
         self.pid!=0 && self.playback.media.song_id.is_some() && (!self.playback.ready || !self.playback.media.is_music())
@@ -289,11 +300,7 @@ impl Reader {
         // 因为这个版本的日志不再上报 setPlayingPosition，拖完不校正就会继续按旧起点外推。
         let duration=self.playback.media.duration;
         if duration>0.0 {LAST_DURATION_MS.store((duration*1000.0) as u64,std::sync::atomic::Ordering::Relaxed);}
-        let pending=PENDING_SEEK_MS.swap(-1,std::sync::atomic::Ordering::Relaxed);
-        if pending>=0 && self.playback.media.song_id.is_some() {
-            self.playback.media.position=pending as f64/1000.0;
-            self.playback.at=now;
-        }
+        apply_pending_seek(&mut self.playback,now);
         self.playback.snapshot(now)
     }
     pub(super) fn poll(&mut self)->Option<NowPlaying>{
@@ -657,6 +664,24 @@ mod tests{
         assert_eq!(seek_fraction(50.0,0.0),None,"时长未知时不跳");
         assert_eq!(seek_fraction(50.0,-1.0),None);
         assert_eq!(seek_fraction(f64::NAN,250.0),None);
+    }
+
+    #[test]
+    fn pending_seek_resets_the_playback_clock_origin(){
+        let mut state=Playback::default();
+        state.media.song_id=Some(7);
+        state.media.playing=true;
+        state.media.duration=216.0;
+        state.media.position=10.0;
+        state.observed_at=1_000_000;
+        state.ready=true;
+        let now=1_000_000+300_000;
+        PENDING_SEEK_MS.store(49_680,std::sync::atomic::Ordering::Relaxed);
+        apply_pending_seek(&mut state,now);
+        assert_eq!(state.position(now),49.68,"定位后应从目标秒数开始，不能叠加旧起点以来的整段时间");
+        assert_eq!(state.position(now+2_000),51.68,"定位后进度要继续连续推进");
+        assert_eq!(state.observed_at,now);
+        assert_eq!(PENDING_SEEK_MS.load(std::sync::atomic::Ordering::Relaxed),-1,"目标只消费一次");
     }
 
     #[test]

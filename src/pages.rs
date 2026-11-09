@@ -19,6 +19,12 @@ fn mmss(secs: f64) -> String {
     format!("{:02}:{:02}", s / 60, s % 60)
 }
 
+/// 进度条右端显示歌曲的完整总时长（结束时间）；时长未知时给占位，
+/// 不再显示随播放不断变化的「剩余时间」，免得看不出这首歌到底多长。
+fn end_time(duration: f64, has: bool) -> String {
+    if has && duration.is_finite() && duration > 0.0 { mmss(duration) } else { "--:--".into() }
+}
+
 /// 音乐页音量滑条：喇叭正上方的一整条竖向热区（贴右缘、避开歌词文本）。
 const VOL_BAR:(f32,f32,f32,f32)=(348.0,34.0,30.0,72.0);
 /// 竖向轨道上下端（y 越小音量越大）。
@@ -162,8 +168,7 @@ impl App {
         let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
         let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
         c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
-        let remaining=if has && np.duration<=0.0{"--:--".into()}else{format!("-{}",mmss((np.duration-position).max(0.0)))};
-        c.text(right,time_y,&remaining,time_size,W::Regular,tc,H::Right);
+        c.text(right,time_y,&end_time(np.duration,has),time_size,W::Regular,tc,H::Right);
         let (bh,_)=c.hover_t(&bar);
         let bh=if has {bh}else{0.0};
         let th=lerp(3.5,5.0,bh);
@@ -1217,5 +1222,23 @@ impl App {
                 self.code_copied(code);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{end_time, mmss};
+
+    #[test]
+    fn music_end_time_shows_full_duration_not_a_running_remainder() {
+        assert_eq!(end_time(221.0, true), "03:41");
+        assert_eq!(end_time(216.0, true), "03:36");
+        assert_eq!(mmss(0.0), "00:00");
+        assert_eq!(mmss(3723.0), "62:03");
+        // 时长缺失、无效或没有歌曲时只给占位，不猜一个会变的剩余时间。
+        for duration in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(end_time(duration, true), "--:--");
+        }
+        assert_eq!(end_time(221.0, false), "--:--");
     }
 }
