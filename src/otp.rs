@@ -20,8 +20,8 @@ fn strong() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         Regex::new(concat!(
-            r"(?i)验证码|校验码|确认码|动态码|动态密码|安全码|登录码|激活码|",
-            r"一次性(?:密码|口令)|otp|one[-\s]?time\s+(?:code|password|passcode)|",
+            r"(?i)[验驗][证證][码碼]|校[验驗][码碼]|[确確][认認][码碼]|[动動][态態](?:密)?[码碼]|安全[码碼]|登[录錄入][码碼]|激活[码碼]|",
+            r"一次性(?:密[码碼]|口令)|otp|one[-\s]?time\s+(?:code|password|passcode)|",
             r"verification\s+code|security\s+code|auth(?:entication)?\s+code|",
             r"passcode|\bcode\b|認証コード|인증번호"
         ))
@@ -33,7 +33,7 @@ fn weak() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         Regex::new(concat!(
-            r"(?i)登录|登陆|验证|校验|身份|确认|安全|",
+            r"(?i)登[录錄入陆陸]|[验驗][证證]|校[验驗]|身份|[确確][认認]|安全|",
             r"sign[-\s]?in|log[-\s]?in|verify|verification|confirm|authenticate"
         ))
         .expect("weak keyword regex")
@@ -99,17 +99,19 @@ fn has(win: &str, words: &[&str]) -> bool {
 const ORDER_WORDS: &[&str] = &[
     "订单", "单号", "快递", "运单", "物流", "包裹", "编号", "序号", "发票", "金额", "合计",
     "实付", "应付", "电话", "手机号", "会议号", "会议", "卡尾号", "尾号", "邮编", "sku",
+    "訂單", "單號", "快遞", "運單", "編號", "序號", "發票", "金額", "合計", "實付", "應付", "電話", "手機號", "會議", "尾號", "郵編",
     "order", "track", "invoice", "amount", "phone", "meeting", "card ending",
 ];
 
-const MONEY_WORDS: &[&str] = &["¥", "￥", "$", "€", "元", "价格", "金额", "合计", "实付", "应付"];
+const MONEY_WORDS: &[&str] = &["¥", "￥", "$", "€", "元", "价格", "金额", "合计", "实付", "应付", "價格", "金額", "合計", "實付", "應付"];
 
 const PROMO_WORDS: &[&str] = &[
     "优惠", "折扣", "促销", "满减", "券", "红包", "coupon", "promo", "discount", "sale",
+    "優惠", "促銷", "滿減", "紅包",
 ];
 
 const EXPIRE_WORDS: &[&str] = &[
-    "有效", "过期", "失效", "expire", "valid", "minutes", "分钟", "小时内",
+    "有效", "过期", "失效", "expire", "valid", "minutes", "分钟", "小时内", "過期", "分鐘", "小時內",
 ];
 
 /// 从主题 + 正文里挑出最像验证码的一个；`emphasized` 是 HTML 里加粗/大字号片段的纯文本。
@@ -280,7 +282,7 @@ fn score_at(hay: &str, start: usize, end: usize, text: &str, subject_end: usize,
     if is_emph {
         score += 25;
     }
-    if has(&b40, &["验证码是", "验证码为", "校验码是", "code is", "code:"]) {
+    if has(&b40, &["验证码是", "验证码为", "校验码是", "驗證碼是", "驗證碼為", "校驗碼是", "code is", "code:"]) {
         score += 5;
     }
     if has(&a40, EXPIRE_WORDS) || has(&b60, EXPIRE_WORDS) {
@@ -348,6 +350,20 @@ mod tests {
 
     fn code(subject: &str, body: &str) -> Option<String> {
         extract(subject, body, &[]).map(|c| c.text)
+    }
+
+    #[test]
+    fn regression_traditional_verification_codes() {
+        let body="我們收到您要申請一次性驗證碼來與 Microsoft 帳戶搭配使用。\n您的一次性驗證碼為：431872\n僅在官方網站或應用程式上輸入此代碼。不要與任何人分享。";
+        assert_eq!(code("您的一次性驗證碼",body),Some("431872".into()));
+        for (subject,body,expected) in [
+            ("登入驗證碼","您的一次性驗證碼為：4318729","4318729"),
+            ("", "您的驗證碼為 431872，請勿分享。","431872"),
+            ("", "您的動態密碼：482913，5 分鐘內有效。","482913"),
+        ] {assert_eq!(code(subject,body),Some(expected.into()),"{body}");}
+        for body in ["驗證碼通知：訂單號 431872 已出貨","驗證碼通知：電話 431872","驗證碼通知：金額 431872","驗證碼請見圖片"] {
+            assert_eq!(code("",body),None,"不能把普通数字当成验证码：{body}");
+        }
     }
 
     #[test]

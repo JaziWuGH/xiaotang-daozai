@@ -1997,6 +1997,28 @@ fn page_visibility_does_not_reopen_hidden_pages_through_shortcuts_or_drops() {
 }
 
 #[test]
+fn regression_microsoft_traditional_mail_creates_code_card() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for kind in ["text/plain","text/html"] {
+        let mut h=H::new();
+        h.app.mail.accounts=vec![crate::mail::Account{custom:None,email:"test@qq.com".into(),provider:crate::mail::Provider::Qq,enabled:true}];
+        let body="我們收到您要申請一次性驗證碼來與 Microsoft 帳戶搭配使用。\n您的一次性驗證碼為：431872\n僅在官方網站或應用程式上輸入此代碼。不要與任何人分享。";
+        let body=if kind=="text/html" {format!("<p>{}</p>",body.replace('\n',"</p><p>"))}else{body.into()};
+        let raw=format!("From: Microsoft <account-security@example.invalid>\r\nSubject: 您的一次性驗證碼\r\nMIME-Version: 1.0\r\nContent-Type: {kind}; charset=utf-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n{body}");
+        let parsed=crate::mail::parse_message(raw.as_bytes());
+        let code=crate::mail::code_of(&parsed);
+        assert_eq!(code.as_deref(),Some("431872"),"{kind} 邮件应提取出验证码");
+        h.app.mail_event(crate::mail::Event::Mail{new:true,item:crate::mail::Item{received_unix:None,account:"test@qq.com".into(),from:parsed.from.clone(),subject:parsed.subject.clone(),time:"08:59".into(),code,summary:crate::mail::body_of(&parsed).into(),links:vec![],meeting:None,uid:42}});
+        h.app.show_page(5);h.hover(H::local(300.0,70.0),1.0);
+        assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()=="431872"&&t.galley.job.sections.iter().any(|s|s.format.font_id.size>=23.0))),"新收到的繁体验证码应出现在大卡里");
+        h.cmds.clear();h.click(H::local(60.0,70.0));
+        assert!(h.cmds.iter().any(|cmd|matches!(cmd,crate::app::Cmd::Copy(value) if value=="431872")),"大卡应支持点击复制");
+        h.t+=61.0;h.frame(vec![]);
+        assert!(!h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if t.galley.text()=="431872")),"繁体验证码同样应按隐私设置自动隐藏");
+    }
+}
+
+#[test]
 fn mail_page_shows_code_and_copies_on_click() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = H::new();
