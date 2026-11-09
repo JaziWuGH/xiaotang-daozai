@@ -391,9 +391,9 @@ impl App {
                 if due {
                     let index=lyrics.index_at(self.lyric_position());
                     crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"media.log",
-                        &format!("{} pos={:.2} dur={:.2} lyr={:.2} playing={} synced={} lines={} index={:?}",
-                            self.media.title,self.media.position,self.media.duration,self.lyric_position(),self.media.playing,
-                            lyrics.synced,lyrics.lines.len(),index));
+                        &format!("{} [{} sid={:?}] pos={:.2} dur={:.2} lyr={:.2} playing={} synced={} lines={} index={:?}",
+                            self.media.title,self.media.source,self.media.song_id,self.media.position,self.media.duration,
+                            self.lyric_position(),self.media.playing,lyrics.synced,lyrics.lines.len(),index));
                 }
             }
             let current=if lyrics.synced {lyrics.index_at(self.lyric_position())}else{Some(0)};

@@ -244,7 +244,14 @@ pub(super) struct Reader {
     pid:u32,offset:u64,prefix:Vec<u8>,carry:Vec<u8>,skip_line:bool,
     playback:Playback,lookup:(Option<u64>,u64),cover:CoverCache,
     queue_print:Vec<Option<(std::time::SystemTime,u64)>>,
+    // 增量读取的状态会「退化」：日志轮换、播放器换进程、只写半首歌的事件之后，
+    // 元数据事件已经读过就不会再来，解析出来的状态会永久停在「没有歌」上。
+    // 这两个字段控制尾部重放自愈：最近一次重放时刻与连续失败次数（失败后退避）。
+    recover_at:Option<u64>,recover_fail:u8,
 }
+/// 状态不可用时的尾部重放间隔：连续失败就退避，避免「本来没在放歌」时反复解码 4MB。
+const RECOVER_BASE_MS:u64=3000;
+const RECOVER_MAX_STEPS:u32=4;
 /// 点过进度条后把本地时间轴对齐到目标位置。必须一并重置推进起点：
 /// 否则「上次播放事件到现在的整段时间」会再加到目标位置上，进度直接冲到歌曲末尾。
 fn apply_pending_seek(playback:&mut Playback,now:u64){
@@ -302,7 +309,9 @@ impl Reader {
             let root=path.parent()?;
             // 队列文件可达 8MB：同一首歌且文件没有变化时不重复解析（这首歌本来就没有封面时会一直满足上面的条件）。
             let print=queue_fingerprint(root);
-            if self.lookup.0!=id || self.queue_print!=print {
+            // 上次补齐失败（时长仍为 0）时不能因为「同一首歌、队列文件没变」就永久跳过解析：
+            // 续播时队列文件本来就不会再变，跳过等于把这首歌永久钉在「没有时长」上。
+            if self.lookup.0!=id || self.queue_print!=print || self.playback.media.duration<=0.0 {
                 self.queue_print=print;
                 if let Some(metadata)=queue_track(root,id?){self.playback.metadata(metadata);}
             }
@@ -315,10 +324,34 @@ impl Reader {
         apply_pending_seek(&mut self.playback,now);
         self.playback.snapshot(now)
     }
+    /// 增量状态不可用时用尾部重放自愈：日志轮换 / 换进程 / 元数据事件被读走之后，
+    /// 只靠新增行永远补不回来，只能重放最近 4MB 把当前这首歌的事件重新走一遍。
+    /// 失败按 3s→6s→12s→24s→48s 退避，正常播放时影响为零。
+    fn recover(&mut self,now:u64)->bool{
+        if self.pid==0 {return false;}
+        let wait=RECOVER_BASE_MS<<self.recover_fail.min(RECOVER_MAX_STEPS as u8) as u32;
+        if self.recover_at.is_some_and(|at|now.saturating_sub(at)<wait) {return false;}
+        self.recover_at=Some(now);
+        self.recover_fail=self.recover_fail.saturating_add(1);
+        // 只重置解析状态：pid、封面缓存保留；offset 归零让 read() 重放尾部窗口。
+        self.offset=0;self.carry.clear();self.skip_line=false;
+        self.playback=Playback::default();self.lookup=(None,0);
+        true
+    }
     pub(super) fn poll(&mut self)->Option<NowPlaying>{
         let path=std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("NetEase/CloudMusic/cloudmusic.elog");
         let sampled=std::time::Instant::now();
-        let mut media=self.read(&path,process_id(),monotonic_millis())?;
+        let now=monotonic_millis();
+        let mut media=self.read(&path,process_id(),now);
+        // 除了「完全读不到歌」，也要覆盖「读到了但缺元数据」（没有时长/没有 song_id）：
+        // 长时间增量读取时，队列补齐一旦被去抖跳过就再也补不回来，表现就是时长 0、进度不动。
+        let stale=media.as_ref().is_none_or(|m|m.duration<=0.0 || m.song_id.is_none());
+        if stale && self.recover(now){
+            media=self.read(&path,process_id(),now);
+        }
+        // 只有恢复到完整可用的状态才清零退避，否则会退化成每 3 秒解码一次 4MB。
+        if media.as_ref().is_some_and(|m|m.duration>0.0 && m.song_id.is_some()){self.recover_fail=0;}
+        let Some(mut media)=media else{return None;};
         if self.cover.url==self.playback.artwork_url{media.artwork=self.cover.image.clone();}
         media.sampled_at=Some(sampled);Some(media)
     }
@@ -979,6 +1012,41 @@ mod tests{
         let media=state.snapshot(7000).unwrap();assert!(media.playing);assert_eq!(media.position,31.5);assert_eq!(media.song_id,Some(123));
         state.line(&event(7,8000,"\"setPlayingPosition\",NaN"),7,8000);assert_eq!(state.snapshot(8000).unwrap().position,32.5);
         state.line(&event(7,9000,"\"exitApp\""),7,9000);assert!(state.snapshot(10000).is_none());
+    }
+    #[test]
+    fn reader_recovers_after_incremental_state_is_lost(){
+        let dir=std::env::temp_dir().join(format!("daozai-elog-recover-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path=dir.join("cloudmusic.elog");
+        let raw=encode(&(event(7,1000,&metadata())
+            +&event(7,2000,"\"native播放资源load完成，开始播放\",{\"songId\":\"123\"}")
+            +&event(7,3000,"\"setPlayingPosition\",40")));
+        std::fs::write(&path,&raw).unwrap();
+        let mut reader=Reader::default();
+        assert!(reader.read(&path,Some(7),4000).is_some());
+        assert_eq!(reader.playback.media.position,40.0);
+        assert_eq!(reader.playback.media.title,"测试歌曲");
+        // 模拟长时间增量读取后的退化：元数据事件早已读走，后面只剩位置事件，状态永远补不回来。
+        reader.playback=Playback::default();
+        assert!(reader.read(&path,Some(7),5000).is_none());
+        assert!(reader.recover(6000),"状态不可用时应触发尾部重放");
+        assert_eq!(reader.offset,0);
+        assert!(reader.read(&path,Some(7),6000).is_some());
+        assert_eq!(reader.playback.media.position,40.0,"重放后应恢复当前歌曲与进度");
+        assert_eq!(reader.playback.media.title,"测试歌曲");
+        assert!(!reader.recover(6100),"冷却期内不应反复解码 4MB");
+        std::fs::remove_file(path).unwrap();std::fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn recovery_backs_off_while_nothing_is_playing(){
+        let mut reader=Reader{pid:7,..Default::default()};
+        assert!(reader.recover(0));
+        assert!(!reader.recover(2_000));
+        assert!(reader.recover(6_000));
+        assert!(!reader.recover(7_000));
+        assert!(reader.recover(18_000),"连续失败后间隔应按倍数拉长");
+        let mut idle=Reader::default();
+        assert!(!idle.recover(0),"没有网易云进程时不做尾部重放");
     }
     #[test]
     fn native_log_handles_partial_utf8_and_new_process_without_stale_tracks(){
