@@ -410,6 +410,31 @@ unsafe fn reveal_taskbar(ui:&windows::Win32::UI::Accessibility::IUIAutomation,ta
     wait()
 }
 
+unsafe fn tray_overflow_button(ui:&windows::Win32::UI::Accessibility::IUIAutomation,taskbar:HWND)->Option<windows::Win32::UI::Accessibility::IUIAutomationElement>{
+    use windows::Win32::UI::Accessibility::*;
+    let usable=|item:&IUIAutomationElement|item.CurrentIsEnabled().is_ok_and(|b|b.as_bool())
+        && item.CurrentIsOffscreen().is_ok_and(|b|!b.as_bool())
+        && item.CurrentNativeWindowHandle().map_or(true,|h|h.0.is_null() || IsWindowVisible(h).as_bool())
+        && item.CurrentBoundingRectangle().is_ok_and(|r|r.right>r.left && r.bottom>r.top && r.right-r.left<=200 && r.bottom-r.top<=200)
+        && item.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId).is_ok();
+    let legacy=FindWindowExW(taskbar,None,w!("TrayNotifyWnd"),PCWSTR::null()).ok()
+        .and_then(|tray|FindWindowExW(tray,None,w!("Button"),PCWSTR::null()).ok())
+        .and_then(|button|ui.ElementFromHandle(button).ok());
+    if let Some(button)=legacy.filter(usable){return Some(button);}
+    let items=ui.ElementFromHandle(taskbar).ok()?.FindAll(TreeScope_Descendants,&ui.CreateTrueCondition().ok()?).ok()?;
+    let mut found=None;
+    for i in 0..items.Length().ok()?{
+        let Ok(item)=items.GetElement(i) else{continue;};
+        if item.CurrentControlType().ok()!=Some(UIA_ButtonControlTypeId)
+            || !item.CurrentName().is_ok_and(|name|matches!(name.to_string().trim().to_ascii_lowercase().as_str(),"显示隐藏的图标"|"顯示隱藏的圖示"|"show hidden icons"))
+            || !usable(&item){continue;}
+        // 多个不同的折叠按钮时不猜，避免打开错误的通知区域。
+        if let Some(previous)=&found{if !ui.CompareElements(previous,&item).ok()?.as_bool(){return None;}}
+        found=Some(item);
+    }
+    found
+}
+
 /// 微信缩在托盘时：通过无障碍接口按下该账号自己的托盘按钮，由微信自己唤起主窗口。
 /// 不移动鼠标、不向微信发送内部消息、不注入、不读取内容；定位不到唯一按钮就放弃。
 /// 兼容新版 Win11 托盘与 Windows 10 / 早期 Win11 的旧式托盘。会阻塞几百毫秒，必须在后台线程调用。
@@ -442,6 +467,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
             let mut covering=Vec::new();
             for i in 0..count {
                 let Ok(item)=items.GetElement(i) else {continue};
+                if !item.CurrentIsEnabled().is_ok_and(|b|b.as_bool()) || !item.CurrentIsOffscreen().is_ok_and(|b|!b.as_bool()){continue;}
                 let Ok(r)=item.CurrentBoundingRectangle() else {continue};
                 if !rect_center_inside(icon,r) {continue;}
                 if covering.len()<8 {covering.push(describe_element(&item));}
@@ -516,6 +542,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
                         if !item.CurrentName().is_ok_and(|s|wechat_tray_name(&s.to_string())){continue;}
                         let Ok(r)=item.CurrentBoundingRectangle() else{continue;};
                         if r.right<=r.left || r.bottom<=r.top || r.right-r.left>200 || r.bottom-r.top>200 || item.CurrentIsOffscreen().map_or(true,|b|b.as_bool())
+                            || !item.CurrentIsEnabled().is_ok_and(|b|b.as_bool())
                             || item.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId).is_err(){continue;}
                         if !buttons.iter().any(|(_,old):&(RECT,IUIAutomationElement)|ui.CompareElements(old,&item).is_ok_and(|same|same.as_bool())){buttons.push((r,item));}
                     }
@@ -531,14 +558,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
             let mut target=by_exclusion();
             let mut opened=None;
             if target.is_none() && overflow_open().is_none(){
-                let tray=FindWindowExW(taskbar,None,w!("TrayNotifyWnd"),PCWSTR::null()).ok();
-                let legacy=tray.and_then(|h|FindWindowExW(h,None,w!("Button"),PCWSTR::null()).ok()).and_then(|h|ui.ElementFromHandle(h).ok());
-                let chevron=legacy.or_else(||{
-                    let items=ui.ElementFromHandle(taskbar).ok()?.FindAll(TreeScope_Descendants,&all).ok()?;
-                    (0..items.Length().ok()?).filter_map(|i|items.GetElement(i).ok()).find(|item|
-                        item.CurrentClassName().is_ok_and(|c|c.to_string()=="SystemTray.NormalButton")
-                        && item.CurrentName().is_ok_and(|n|matches!(n.to_string().to_lowercase().as_str(),"显示隐藏的图标"|"顯示隱藏的圖示"|"show hidden icons")))
-                });
+                let chevron=tray_overflow_button(&ui,taskbar);
                 if let Some(button)=chevron.filter(|b|invoke(b)){
                     opened=Some(button);
                     for _ in 0..12{
@@ -579,11 +599,9 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
             log.step("命中的是折叠按钮，继续在折叠区里找");
             chevron=button;from_chevron=true;
         } else {
-            // 旧式托盘：收起的图标位置在隐藏的折叠窗口里，先用「显示隐藏的图标」按钮展开。
-            let tray=FindWindowExW(taskbar,None,w!("TrayNotifyWnd"),PCWSTR::null()).ok();
-            let button=tray.and_then(|t|FindWindowExW(t,None,w!("Button"),PCWSTR::null()).ok());
-            log.step(format!("任务栏上未命中；旧式折叠按钮：{}",button.map(|b|format!("{:#x}",b.0 as usize)).unwrap_or("无".into())));
-            let Some(element)=button.and_then(|b|ui.ElementFromHandle(b).ok()) else {return Err(log.fail("T3","任务栏上找不到微信托盘按钮"));};
+            // 图标可能仍报告收起时的位置；两种识别路径都通过系统折叠按钮展开后重新定位。
+            let Some(element)=tray_overflow_button(&ui,taskbar) else {return Err(log.fail("T3","任务栏上找不到微信托盘按钮或隐藏图标按钮"));};
+            log.step(format!("任务栏上未命中；折叠按钮：{}",describe_element(&element)));
             if !was_open && !invoke(&element){return Err(log.fail("T5","折叠按钮无法按下"));}
             chevron=element;from_chevron=false;
         }
@@ -596,8 +614,7 @@ pub fn open_wechat_from_tray(unread:crate::app::Unread)->Result<(),String>{
             let Some(inside)=tray_rect(host,id).filter(|r|!from_chevron || !rect_center_inside(*r,icon)) else {continue};
             if let Some(button)=button_at(overflow,inside,&mut log){
                 log.step(format!("折叠区 {} 图标位置：{}",class_name(overflow),show_rect(inside)));
-                pressed=still_over_icon(&button,host,id) && invoke(&button);
-                break;
+                if still_over_icon(&button,host,id) && invoke(&button){pressed=true;break;}
             }
         }
         if pressed {return confirmed(account.pid,&mut log);}
@@ -945,6 +962,116 @@ mod tests {
         assert!(parents.contains_key(&std::process::id()));
         assert!(!ancestors(std::process::id(),&parents).is_empty(),"测试进程应有父进程");
     }
+    struct TrayFixture {window:HWND,thread:Option<std::thread::JoinHandle<()>>,clicks:std::sync::Arc<std::sync::atomic::AtomicUsize>}
+    impl TrayFixture {
+        fn new(legacy:bool,buttons:&[(&str,bool,bool)])->Self{
+            use std::sync::{Arc,atomic::{AtomicUsize,Ordering}};
+            let buttons=buttons.iter().map(|(name,enabled,visible)|(name.to_string(),*enabled,*visible)).collect::<Vec<_>>();
+            let clicks=Arc::new(AtomicUsize::new(0));let received=clicks.clone();
+            let (tx,rx)=std::sync::mpsc::channel();
+            let thread=std::thread::spawn(move||unsafe{
+                use windows::Win32::{Foundation::COLORREF,System::LibraryLoader::GetModuleHandleW,UI::Input::KeyboardAndMouse::EnableWindow};
+                unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{
+                    if m==WM_COMMAND {
+                        let clicks=GetWindowLongPtrW(h,GWLP_USERDATA) as *const AtomicUsize;
+                        if !clicks.is_null(){(*clicks).fetch_add(1,Ordering::SeqCst);}
+                    }
+                    if m==WM_DESTROY{PostQuitMessage(0);}
+                    DefWindowProcW(h,m,w,l)
+                }
+                unsafe extern "system" fn child_proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
+                let instance=GetModuleHandleW(None).unwrap().into();
+                RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:w!("DaozaiTrayFixture"),..Default::default()});
+                RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(child_proc),hInstance:instance,lpszClassName:w!("TrayNotifyWnd"),..Default::default()});
+                // 透明窗口只提供系统无障碍控件，不显示界面，也不抢占前台。
+                let window=CreateWindowExW(WS_EX_LAYERED|WS_EX_NOACTIVATE|WS_EX_TOOLWINDOW,w!("DaozaiTrayFixture"),w!(""),WS_POPUP,10,10,240,220,None,None,instance,None).unwrap();
+                SetLayeredWindowAttributes(window,COLORREF(0),0,LWA_ALPHA).unwrap();
+                SetWindowLongPtrW(window,GWLP_USERDATA,Arc::as_ptr(&received) as isize);
+                let parent=if legacy{CreateWindowExW(WINDOW_EX_STYLE(0),w!("TrayNotifyWnd"),w!(""),WS_CHILD|WS_VISIBLE,0,0,240,220,window,None,instance,None).unwrap()}else{window};
+                for (i,(name,enabled,visible)) in buttons.iter().enumerate(){
+                    let style=WS_CHILD|if *visible{WS_VISIBLE}else{WINDOW_STYLE(0)};
+                    let button=CreateWindowExW(WINDOW_EX_STYLE(0),w!("Button"),&windows::core::HSTRING::from(name),style,4,4+i as i32*40,200,32,parent,None,instance,None).unwrap();
+                    let _=EnableWindow(button,*enabled);
+                }
+                let _=ShowWindow(window,SW_SHOWNOACTIVATE);tx.send(window.0 as isize).unwrap();
+                let mut message=MSG::default();while GetMessageW(&mut message,None,0,0).0>0{let _=TranslateMessage(&message);DispatchMessageW(&message);}
+            });
+            Self{window:HWND(rx.recv_timeout(Duration::from_secs(5)).unwrap() as *mut _),thread:Some(thread),clicks}
+        }
+    }
+    impl Drop for TrayFixture{fn drop(&mut self){unsafe{let _=PostMessageW(self.window,WM_CLOSE,WPARAM(0),LPARAM(0));}if let Some(thread)=self.thread.take(){thread.join().unwrap();}}}
+
+    #[test]
+    fn tray_overflow_button_supports_legacy_and_modern_layouts(){unsafe{
+        use windows::Win32::{System::Com::*,UI::Accessibility::*};
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let ui:IUIAutomation=CoCreateInstance(&CUIAutomation8,None,CLSCTX_INPROC_SERVER).unwrap();
+        for legacy in [true,false]{
+            let fixture=TrayFixture::new(legacy,&[("显示隐藏的图标",true,true)]);
+            let button=tray_overflow_button(&ui,fixture.window).unwrap_or_else(||panic!("未找到折叠按钮，旧式布局={legacy}"));
+            assert_eq!(button.CurrentName().unwrap().to_string(),"显示隐藏的图标");
+            button.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId).unwrap().Invoke().unwrap();
+            if !legacy{
+                let until=Instant::now()+Duration::from_secs(2);
+                while fixture.clicks.load(std::sync::atomic::Ordering::SeqCst)==0 && Instant::now()<until{std::thread::sleep(Duration::from_millis(10));}
+                assert_eq!(fixture.clicks.load(std::sync::atomic::Ordering::SeqCst),1);
+            }
+        }
+    }}
+
+    #[test]
+    fn tray_overflow_button_rejects_unusable_or_ambiguous_controls(){unsafe{
+        use windows::Win32::{System::Com::*,UI::Accessibility::*};
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let ui:IUIAutomation=CoCreateInstance(&CUIAutomation8,None,CLSCTX_INPROC_SERVER).unwrap();
+        for legacy in [true,false]{
+            for buttons in [vec![("显示隐藏的图标",false,true)],vec![("显示隐藏的图标",true,false)]]{
+                let fixture=TrayFixture::new(legacy,&buttons);
+                assert!(tray_overflow_button(&ui,fixture.window).is_none(),"不得点击不可用的按钮：{buttons:?}");
+            }
+        }
+        for buttons in [vec![("微信",true,true)],vec![("显示隐藏的图标",true,true),("Show hidden icons",true,true)]]{
+            let fixture=TrayFixture::new(false,&buttons);
+            assert!(tray_overflow_button(&ui,fixture.window).is_none(),"不得点击不确定的按钮：{buttons:?}");
+        }
+        for name in ["Show hidden icons","顯示隱藏的圖示"]{
+            let fixture=TrayFixture::new(false,&[(name,true,true)]);
+            assert!(tray_overflow_button(&ui,fixture.window).is_some(),"未识别系统语言：{name}");
+        }
+    }}
+
+    #[test]
+    fn tray_overflow_lookup_recovers_after_taskbar_reveal_without_cached_coordinates(){unsafe{
+        use windows::Win32::{Foundation::RECT,Graphics::Gdi::*,System::Com::*,UI::Accessibility::*};
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let ui:IUIAutomation=CoCreateInstance(&CUIAutomation8,None,CLSCTX_INPROC_SERVER).unwrap();
+        let fixture=TrayFixture::new(false,&[("显示隐藏的图标",true,true)]);
+        assert!(taskbar_fully_shown(fixture.window));
+        let rect=window_rect(fixture.window);
+        let mut monitor=MONITORINFO{cbSize:std::mem::size_of::<MONITORINFO>() as u32,..Default::default()};
+        GetMonitorInfoW(MonitorFromWindow(fixture.window,MONITOR_DEFAULTTONEAREST),&mut monitor).ok().unwrap();
+        SetWindowPos(fixture.window,None,rect.left,monitor.rcMonitor.bottom-1,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE).unwrap();
+        assert!(!taskbar_fully_shown(fixture.window),"仅露出一个像素时应等待任务栏展开");
+        SetWindowPos(fixture.window,None,rect.left,rect.top,0,0,SWP_NOSIZE|SWP_NOZORDER|SWP_NOACTIVATE).unwrap();
+        assert!(taskbar_fully_shown(fixture.window));
+        let button=tray_overflow_button(&ui,fixture.window).expect("任务栏展开后应重新查找新版折叠按钮");
+        let bounds=button.CurrentBoundingRectangle().unwrap();
+        let reported=RECT{left:17,top:1631,right:57,bottom:1671};
+        assert!(!button_sized(reported,bounds),"用户日志中的旧坐标不应命中新按钮");
+        assert!(button_sized(bounds,bounds));
+    }}
+
+    #[test]
+    #[ignore="只读检查本机任务栏，需要通知区域含有隐藏图标"]
+    fn local_tray_overflow_button_is_discoverable(){unsafe{
+        use windows::Win32::{System::Com::*,UI::Accessibility::*};
+        let _=CoInitializeEx(None,COINIT_MULTITHREADED);
+        let ui:IUIAutomation=CoCreateInstance(&CUIAutomation8,None,CLSCTX_INPROC_SERVER).unwrap();
+        let taskbar=FindWindowW(w!("Shell_TrayWnd"),PCWSTR::null()).unwrap();
+        let button=tray_overflow_button(&ui,taskbar).expect("未找到本机隐藏图标按钮");
+        println!("本机折叠按钮：{} · {}",button.CurrentClassName().unwrap(),show_rect(button.CurrentBoundingRectangle().unwrap()));
+    }}
+
     #[test]
     fn tray_buttons_match_by_icon_center(){
         use windows::Win32::Foundation::RECT;
