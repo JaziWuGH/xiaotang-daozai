@@ -7,18 +7,42 @@
 安装 Rust stable、Visual Studio C++ 构建工具和 Windows SDK，克隆仓库后运行：
 
 ```powershell
-cargo build --locked --bin daozai
-cargo test --locked --all-targets --features record -- --test-threads=1
+cargo +stable-x86_64-pc-windows-msvc build --locked --bin daozai --target x86_64-pc-windows-msvc
+cargo +stable-x86_64-pc-windows-msvc test --locked --all-targets --features record --target x86_64-pc-windows-msvc -- --test-threads=1
 ```
 
 为开发实例指定独立目录，避免覆盖日常使用数据：
 
 ```powershell
 $env:DAOZAI_DATA_DIR = Join-Path $env:TEMP 'daozai-development'
-cargo run --locked --bin daozai
+cargo +stable-x86_64-pc-windows-msvc run --locked --bin daozai --target x86_64-pc-windows-msvc
 ```
 
 常规测试使用合成数据。带 `#[ignore]` 的真实账号测试或截图导出测试须按需要显式运行；不要在公共 CI 中连接私人账号。
+
+## 任务与版本流程
+
+1. 从最新 `main` 为一个独立问题建立任务分支，例如 `fix/wechat-tray`。记录复现方式、预期行为和验收条件。同一问题续修沿用分支；并行任务使用不同 worktree。
+2. 完成一个完整修复并验证后提交，标题说明具体问题。修复代码与对应测试一起提交，用户可感知的改动同步写入 `CHANGELOG.md` 的「未发布」条目。
+3. 将任务分支推送至 GitHub 并创建 PR，说明问题、结果和验证。审查整个分支相对目标分支的差异；审查后继续修改时，追加提交并重新检查受影响部分。
+4. Windows CI 检查通过、问题完成审查后合并到 `main`。一次正式版可以积累多个已经完成的任务；提交和合并不要求立即发版。
+5. 正式发布时确定版本号，将「未发布」内容整理到该版本，核验最终提交的测试与安装包，再关联同一提交的 Tag 和 GitHub Release。已发布 Tag 保持不变。
+
+收到外部 PR 时，先确认问题和改动范围，在独立工作区检出并验证，再决定接受、请求修改或关闭。合并只更新源码；当前 CI 执行测试、打包验证与安装测试，不会自动创建正式 Release。
+
+## 查看未发布内容
+
+以 GitHub 最新正式 Release 对应的 Tag 为基线，结合提交历史与最终代码差异，检查主分支、任务分支和本地未提交内容。未合并不代表未提交，已经提交也可能仍未发布。其他活动分支或 worktree 中的工作须单独列出。
+
+例如上一正式版是 `v0.6.63` 时，查看当前分支：
+
+```powershell
+git log --oneline v0.6.63..HEAD
+git diff --stat v0.6.63 HEAD
+git status --short
+```
+
+可以直接要求：「汇总岛仔相对上一正式版的全部未发布改动，按功能列出，并区分已合并、未合并、未提交，说明验证结果和待验收事项。」
 
 ## 代码导航
 
