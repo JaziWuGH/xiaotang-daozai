@@ -1,5 +1,10 @@
 # 更新记录
 
+## 未发布
+
+- AI 额度新增 Kiro：一键连接本机 Kiro（只读识别 `%USERPROFILE%\.aws\sso\cache\kiro-auth-token.json` 登录缓存，不回写、不自动续期），调用 `GetUsageLimits` 查询月度套餐与超额额度的剩余点数（如 `904.1 / 1000 点`）和重置时间，并显示套餐名（如 KIRO PRO）；支持个人社交登录与企业 IAM Identity Center 账号，登录过期时提示在 Kiro 中重新登录。图标使用 Kiro 官方紫色幽灵标识。
+- 常驻栏里的 Kiro 像 WorkBuddy 一样把剩余点数显示在图标右侧（如 `904`），不再只靠圆环粗细判断剩余量。
+
 ## v0.6.63
 
 **邮箱整理更方便**
