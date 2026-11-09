@@ -124,18 +124,7 @@ impl Env {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Messenger { Wechat, Qq }
-impl Messenger {
-    pub fn name(self)->&'static str {match self {Self::Wechat=>"微信",Self::Qq=>"QQ"}}
-}
-
-/// 一条未读：来源、账号所在进程（无法确认时为 0）和关联窗口（没有时为 0）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Unread { pub source: Messenger, pub pid: u32, pub window: isize }
-impl Unread {
-    pub fn of(source: Messenger) -> Self { Self { source, pid: 0, window: 0 } }
-}
+pub use crate::messenger::{Messenger,Unread};
 
 /// 展开后未读胶囊的宽度、离面板的间距和每个图标占的高度。
 pub(crate) const UNREAD_W: f32 = 40.0;
@@ -678,7 +667,7 @@ pub struct App {
     pub(crate) settings_focus_requested:bool,
     pub(crate) settings_tab:usize,
     pub(crate) settings_category:usize,
-    pub wechat_status:String,
+    pub messenger_statuses:std::collections::HashMap<Messenger,String>,
     pub(crate) notification_apps:model::NotificationApps,
     pub(crate) subpage:Option<usize>,
     pub(crate) task_dialog:Option<crate::extras::TaskDraft>,
@@ -808,7 +797,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, wechat_status:String::new(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -1941,8 +1930,8 @@ impl App {
     /// 同一来源有多个账号时给图标编号（1、2…）；只有一个账号不编号。
     pub(crate) fn unread_tag(&self,i:usize)->Option<usize>{
         let unread=self.pending_messengers.get(i)?;let source=unread.source;
-        if source==Messenger::Qq && unread.pid==0{return None;}
-        let known=|u:&&Unread|u.source==source && (source!=Messenger::Qq || u.pid!=0);
+        if unread.unidentified(){return None;}
+        let known=|u:&&Unread|u.source==source && (!source.adapter().keep_unidentified || u.pid!=0);
         let same=self.pending_messengers.iter().filter(known).count();
         (same>1).then(||self.pending_messengers[..=i].iter().filter(known).count())
     }
@@ -2026,15 +2015,15 @@ impl App {
             let u=self.pending_messengers[i];
             let cy=2.0+slot*(i as f32+0.5)-self.messenger_scroll;
             if cy< -slot || cy>height+slot {continue;}
-            let scale=if u.source==Messenger::Wechat {1.0}else{1.12};
+            let scale=u.source.adapter().icon_scale;
             crate::extras::messenger_icon(&inner.scaled(x,cy,scale),x,cy,u.source);
             inner.circle(x+10.0,cy-9.0,2.6,Color32::from_rgb(255,72,72));
-            let tag=self.unread_tag(i).map(|tag|tag.to_string()).or_else(||(u.source==Messenger::Qq && u.pid==0).then(||"?".to_string()));
+            let tag=self.unread_tag(i).map(|tag|tag.to_string()).or_else(||(u.unidentified()).then(||"?".to_string()));
             if let Some(tag)=tag{
                 inner.circle(x+10.0,cy+8.5,6.0,Color32::from_gray(238));
                 inner.centered_text(x+10.0,cy+8.5,&tag,8.5,W::Bold,Color32::from_gray(28),H::Center);
             }
-            let name=if u.source==Messenger::Qq && u.pid==0{"QQ · 账号未确认".to_string()}
+            let name=if u.unidentified(){format!("{} · 账号未确认",u.source.name())}
                 else{match self.unread_tag(i){Some(n)=>format!("{} · 账号 {n}",u.source.name()),None=>u.source.name().to_string()}};
             let button=inner.hit(0.0,cy-slot/2.0,UNREAD_W,slot,self.unread_id(i)).on_hover_text(format!("查看{name}"));
             if button.clicked(){cmds.push(Cmd::ViewMessenger(u));}
@@ -2056,7 +2045,7 @@ impl App {
         let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
         for k in 0..icons {
             let (x,y)=at(k);
-            let scale=if sources[k]==Messenger::Wechat {0.85}else{0.92};
+            let scale=sources[k].adapter().collapsed_icon_scale;
             crate::extras::messenger_icon(&c.scaled(x,y,scale),x,y,sources[k]);
         }
         // 每个来源图标右上角一个小红点，不显示数字。

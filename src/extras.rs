@@ -6,7 +6,7 @@ use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AlertSource { Internal, Wechat, External(String) }
+pub(crate) enum AlertSource { Internal, Messenger(crate::app::Messenger), External(String) }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Alert {
@@ -23,8 +23,8 @@ pub(crate) struct Alert {
 impl Alert {
     pub(crate) fn messenger(&self)->Option<crate::app::Messenger>{
         match &self.source {
-            AlertSource::Wechat=>Some(crate::app::Messenger::Wechat),
-            AlertSource::External(id) if id=="QQ"=>Some(crate::app::Messenger::Qq),
+            AlertSource::Messenger(client)=>Some(*client),
+            AlertSource::External(id)=>crate::app::Messenger::from_notification_id(id).filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast),
             _=>None,
         }
     }
@@ -68,26 +68,7 @@ pub(crate) fn notice_badge(c:&Card,x:f32,y:f32,a:&Alert){
         device_icon(c,a.bluetooth.map_or(crate::bt::DeviceKind::Other,|v|v.0),x-7.5,y-7.5,15.0);
     }else{notice_icon(&c.scaled(x,y,0.85),x,y,a);}
 }
-pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
-
-    let ink=Color32::from_gray(24);
-    if source==crate::app::Messenger::Wechat {
-        let back=Color32::from_rgb(70,203,123);
-        let front=Color32::from_rgb(145,235,165);
-        c.fill(x-10.,y-7.,14.,11.,5.5,back);
-        c.poly(&[(x-8.,y+1.),(x-8.,y+6.),(x-3.,y+2.)],back);
-        for dx in [-6.,-1.]{c.circle(x+dx,y-3.,0.9,ink);}
-        c.fill(x-2.,y-2.,13.,10.,5.,front);
-        c.poly(&[(x+5.,y+6.),(x+9.,y+10.),(x+8.,y+5.)],front);
-        for dx in [2.,7.]{c.circle(x+dx,y+1.,0.8,ink);}
-    }else{
-        let rect=c.rect(x-9.5,y-9.5,19.0,19.0);
-        let icon=egui::Image::new(egui::include_image!("../assets/qq-client.png"));
-        if let Ok(egui::load::TexturePoll::Ready{texture})=icon.load_for_size(c.ui.ctx(),rect.size()){
-            c.painter.image(texture.id,rect,egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
-        }
-    }
-}
+pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){(source.adapter().paint_icon)(c,x,y);}
 fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
     if a.source!=AlertSource::Internal{crate::paint::bell(c,x,y,theme::WHITE,0.0);return;}
     match a.title.as_str() {
@@ -269,9 +250,9 @@ impl App {
     }
     /// 只清已查看的账号；无法确认账号的 QQ 提醒由用户明确关闭。
     pub fn viewed_client(&mut self,source:crate::app::Messenger,pid:u32){
-        self.pending_messengers.retain(|u|u.source!=source || if source==crate::app::Messenger::Qq{pid==0 || u.pid!=pid}else{pid!=0 && u.pid!=0 && u.pid!=pid});
+        self.pending_messengers.retain(|u|!u.viewed_by(source,pid));
         if pid!=0{self.clear_account_notices(source,pid);}
-        if source==crate::app::Messenger::Wechat{self.clear_account_notices(source,0);}
+        if !source.adapter().keep_unidentified{self.clear_account_notices(source,0);}
         if !self.pending_messengers.iter().any(|u|u.source==source){self.clear_messenger_notices(source);}
     }
     pub fn discard_unread(&mut self,unread:crate::app::Unread){
@@ -290,8 +271,11 @@ impl App {
         if self.notice.as_ref().is_some_and(|a|a.messenger()==Some(source)){self.notice=None;self.notification_bell_until=0.0;}
     }
     fn mark_messenger(&mut self,source:crate::app::Messenger,pid:u32,window:isize){
-        if let Some(u)=self.pending_messengers.iter_mut().find(|u|u.source==source && u.pid==pid){
-            if window!=0 {u.window=window;}
+        if let Some(index)=self.pending_messengers.iter().position(|u|u.source==source && u.pid==pid){
+            if window!=0 && self.pending_messengers[index].window!=window {
+                self.pending_messengers[index].window=window;
+                self.clear_account_notices(source,pid);
+            }
             return;
         }
         self.pending_messengers.push(crate::app::Unread{source,pid,window});
@@ -303,21 +287,28 @@ impl App {
     pub fn receive_wechat_reminder(&mut self){self.receive_wechat_reminder_from(0,0);}
     /// 微信窗口闪动：`pid` 是该账号的进程，`window` 是闪动的窗口。
     pub fn receive_wechat_reminder_from(&mut self,pid:u32,window:isize){
-        if !self.settings.wechat_notifications || !self.settings.notifications{return;}
-        self.mark_messenger(crate::app::Messenger::Wechat,pid,window);
-        self.notification_bell_at=self.t;
-        self.notification_bell_until=self.t+4.5;
-        self.enqueue_alert(Alert{source:AlertSource::Wechat,title:"微信".into(),body:"有新消息 · 请到微信查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:Some(crate::app::Unread{source:crate::app::Messenger::Wechat,pid,window})},false);
+        self.receive_messenger_reminder(crate::app::Unread{source:crate::app::Messenger::Wechat,pid,window});
     }
+    pub fn receive_messenger_reminder(&mut self,unread:crate::app::Unread){
+        let client=unread.source;
+        if client.adapter().capture!=crate::messenger::Capture::Taskbar || !client.enabled(&self.settings){return;}
+        self.mark_messenger(client,unread.pid,unread.window);
+        self.notification_bell_at=self.t;self.notification_bell_until=self.t+4.5;
+        self.enqueue_alert(Alert{source:AlertSource::Messenger(client),title:client.name().into(),body:format!("有新消息 · 请到{}查看",client.name()),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:Some(unread)},false);
+    }
+    pub fn set_messenger_status(&mut self,client:crate::app::Messenger,status:String){self.messenger_statuses.insert(client,status);}
+    pub fn messenger_status(&self,client:crate::app::Messenger)->&str{self.messenger_statuses.get(&client).map(String::as_str).unwrap_or("")}
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
         self.receive_notification_from(app,id,body,None);
     }
     pub fn receive_notification_from(&mut self,app:String,id:String,body:String,unread:Option<crate::app::Unread>){
-        if !self.settings.read_notifications || id.is_empty() || (self.settings.qq_only && id!="QQ"){return;}
+        if !self.settings.read_notifications || id.is_empty() || !crate::messenger::NotificationFilter::for_settings(&self.settings).allows(&id){return;}
+        let client=crate::app::Messenger::from_notification_id(&id).filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast);
+        let id=client.map(|client|client.adapter().notification_id.to_string()).unwrap_or(id);
         // 岛仔自己发出的系统提醒会被通知中心回传；已在历史里的同一内容不再入队，避免重复显示。
         if self.history.iter().any(|a|format!("{} · {}",a.title,a.body)==body){return;}
         if !self.notification_apps.observe(&id,&app) || !self.settings.notifications{return;}
-        let unread=(id=="QQ").then(||unread.filter(|u|u.source==crate::app::Messenger::Qq && u.pid!=0).unwrap_or(crate::app::Unread::of(crate::app::Messenger::Qq)));
+        let unread=client.map(|client|unread.filter(|u|u.source==client && u.pid!=0).unwrap_or(crate::app::Unread::of(client)));
         if let Some(unread)=unread{self.mark_messenger(unread.source,unread.pid,unread.window);}
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
@@ -329,21 +320,20 @@ impl App {
         }else{"收到新通知 · 内容已隐藏".into()};
         self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread},false);
     }
-    pub fn reveal_qq_notice(&mut self,unread:crate::app::Unread){
-        if unread.source!=crate::app::Messenger::Qq || !self.pending_messengers.contains(&unread){return;}
+    pub fn reveal_messenger_notice(&mut self,unread:crate::app::Unread){
+        if !unread.source.adapter().dismiss_unread || !self.pending_messengers.contains(&unread){return;}
         let body=if unread.pid==0{"消息账号暂无法确认"}else{"暂时无法打开对应窗口"};
-        self.notice=Some(Alert{source:AlertSource::External("QQ".into()),title:"QQ".into(),body:body.into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:Some(unread)});
+        let source=if unread.source.adapter().capture==crate::messenger::Capture::Taskbar{AlertSource::Messenger(unread.source)}else{AlertSource::External(unread.source.adapter().notification_id.into())};
+        self.notice=Some(Alert{source,title:unread.source.name().into(),body:body.into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,unread:Some(unread)});
         self.notification_bell_at=self.t;self.notification_bell_until=self.t+4.5;
     }
     pub(crate) fn tick_alerts(&mut self) {
-        self.pending_messengers.retain(|u|self.settings.notifications && match u.source {
-            crate::app::Messenger::Wechat=>self.settings.wechat_notifications,
-            crate::app::Messenger::Qq=>self.settings.read_notifications && self.notification_apps.items.iter().any(|(key,_,on)|key=="QQ" && *on),
-        });
+        self.pending_messengers.retain(|u|u.source.enabled(&self.settings) && (u.source.adapter().capture!=crate::messenger::Capture::SystemToast
+            || self.notification_apps.items.iter().any(|(key,_,on)|key==u.source.adapter().notification_id && *on)));
         let allowed=|a:&Alert|match &a.source {
             AlertSource::Internal=>true,
-            AlertSource::Wechat=>self.settings.wechat_notifications && self.settings.notifications,
-            AlertSource::External(id)=>self.settings.read_notifications && (!self.settings.qq_only || id=="QQ") && self.settings.notifications && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
+            AlertSource::Messenger(client)=>client.enabled(&self.settings),
+            AlertSource::External(id)=>self.settings.read_notifications && crate::messenger::NotificationFilter::for_settings(&self.settings).allows(id) && self.settings.notifications && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
         };
         self.alerts.retain(&allowed);
         if self.notice.as_ref().is_some_and(|a|!allowed(a)){self.notice=None;}
@@ -376,7 +366,7 @@ impl App {
             nc.centered_text(44.0,30.0,&nc.fit(&a.body,10.5,W::Regular,154.0),10.5,W::Regular,theme::GRAY,H::Left);
             if notice_button(&nc,206.0,12.0,52.0,"查看","messenger-view"){_cmds.push(Cmd::ViewMessenger(a.unread.unwrap_or_else(||self.latest_unread(source))));}
             if notice_button(&nc,265.0,12.0,52.0,"关闭","messenger-dismiss"){
-                if source==crate::app::Messenger::Qq{if let Some(unread)=a.unread{self.discard_unread(unread);}}
+                if source.adapter().dismiss_unread{if let Some(unread)=a.unread{self.discard_unread(unread);}}
                 self.notice=None;self.notification_bell_until=0.0;
             }
             return;
@@ -1432,7 +1422,7 @@ impl App {
                                 ui.separator();
                                 setting_row(ui,"托盘一键唤起微信","微信缩在托盘时，点提醒由系统按下微信托盘图标；图标收在折叠区时托盘菜单会短暂弹出",&mut self.settings.wechat_tray_open);
                             }
-                            if master && !self.wechat_status.is_empty(){ui.label(egui::RichText::new(&self.wechat_status).size(12.0));}
+                            if master && !self.messenger_status(crate::app::Messenger::Wechat).is_empty(){ui.label(egui::RichText::new(self.messenger_status(crate::app::Messenger::Wechat)).size(12.0));}
                             });
                         });
                         settings_label(ui,"QQ 与 Windows 通知");

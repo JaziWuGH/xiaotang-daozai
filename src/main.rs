@@ -4,6 +4,8 @@
 use eframe::egui::{self, Color32, Pos2};
 use daozai::app::{self, App, Cmd, Env, Options};
 use daozai::smtc;
+#[cfg(windows)]
+use daozai::messenger::{self,NotificationFilter,OpenError,TaskbarEvent};
 use daozai::poll_clock::PollClock;
 use std::time::{Duration, Instant};
 
@@ -42,18 +44,14 @@ struct Shell {
     #[cfg(windows)]
     incoming: Option<daozai::system::Notifications>,
     #[cfg(windows)]
-    wechat: Option<daozai::wechat::Listener>,
-    #[cfg(windows)]
-    wechat_retry: Option<Instant>,
-    #[cfg(windows)]
-    unread_monitor:daozai::wechat::UnreadMonitor,
+    messengers:messenger::Runtime,
     #[cfg(windows)]
     unread_at:PollClock,
     #[cfg(windows)]
     opening_messenger:Option<(app::Unread,Instant)>,
     /// 后台线程正在唤起消息客户端。
     #[cfg(windows)]
-    tray_opening:Option<(app::Unread,std::sync::mpsc::Receiver<Result<(),String>>)>,
+    tray_opening:Option<(app::Unread,std::sync::mpsc::Receiver<Result<(),OpenError>>)>,
     #[cfg(windows)]
     hidden: bool,
     /// 毛玻璃皮肤的背景亮度采样（仅毛玻璃皮肤运行）。
@@ -85,15 +83,12 @@ struct Shell {
 impl Shell {
     #[cfg(windows)]
     fn clear_exited_messengers(&mut self,ctx:&egui::Context){
-        for unread in self.unread_monitor.exited(&self.app.pending_messengers){
-            daozai::wechat::trace(format!("清除已退出的{}提醒 账号 {}",unread.source.name(),unread.pid));
+        for unread in self.messengers.exited(&self.app.pending_messengers){
+            messenger::windows::trace(format!("清除已退出的{}提醒 账号 {}",unread.source.name(),unread.pid));
             if self.tray_opening.as_ref().is_some_and(|(target,_)|*target==unread) || self.opening_messenger.is_some_and(|(target,_)|target==unread){
                 self.app.messenger_unavailable(format!("{} 账号已退出",unread.source.name()));
             }
             self.app.discard_unread(unread);
-            if unread.source==app::Messenger::Wechat{
-                if let Some(listener)=&self.wechat{listener.forget(unread.pid);}
-            }
             ctx.request_repaint();
         }
         self.unread_at=PollClock::now();
@@ -131,7 +126,7 @@ impl Shell {
         });
         diagnostics::startup("初始化通知监听");
         #[cfg(windows)]
-        let incoming=if app.settings.read_notifications {match daozai::system::connect(cc.egui_ctx.clone(),app.settings.qq_only){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
+        let incoming=if app.settings.read_notifications {match daozai::system::connect(cc.egui_ctx.clone(),NotificationFilter::for_settings(&app.settings)){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
         // 音频、网络与输入法查询由后台完成，避免首帧等待系统服务。
         diagnostics::startup("创建后台采样与窗口");
         let initial_input=None;
@@ -165,9 +160,7 @@ impl Shell {
             input_state:daozai::input::Monitor::new(initial_input),
             #[cfg(windows)] input_keys:daozai::input::Shortcuts::start(),
             #[cfg(windows)] incoming,
-            #[cfg(windows)] wechat:None,
-            #[cfg(windows)] wechat_retry:None,
-            #[cfg(windows)] unread_monitor:Default::default(),
+            #[cfg(windows)] messengers:Default::default(),
             #[cfg(windows)] unread_at:PollClock::default(),
             #[cfg(windows)] opening_messenger:None,
             #[cfg(windows)] tray_opening:None,
@@ -397,36 +390,20 @@ impl eframe::App for Shell {
             if let Some(service)=&self.bt_rx {
                 while let Ok(found)=service.rx.try_recv(){ self.bt=found; self.bt_ready=true; }
             }
-            let wechat_enabled=self.app.settings.wechat_notifications && self.app.settings.notifications;
-            if self.wechat.as_ref().is_some_and(|listener|!listener.registered()){self.wechat=None;}
-            if !wechat_enabled {
-                self.wechat=None;
-                self.wechat_retry=None;
-                // 微信开关开着却被总开关挡住时说清原因，否则用户只会看到「开了也不提醒」。
-                if self.app.settings.wechat_notifications {
-                    self.app.wechat_status="未在监听 · 提醒总开关已关闭".into();
-                }else{self.app.wechat_status.clear();}
-            }else if self.wechat.is_none() && self.wechat_retry.is_none_or(|at|at.elapsed()>=Duration::from_secs(10)){
-                match daozai::wechat::Listener::new(ctx.clone()){
-                    Ok(listener)=>{
-                        self.wechat=Some(listener);
-                        self.wechat_retry=None;
-                        self.app.wechat_status="正在监听 · 微信任务栏闪动时提醒".into();
-                    }
-                    Err(error)=>{
-                        self.wechat_retry=Some(Instant::now());
-                        self.app.wechat_status=format!("{error} · 10 秒后重试");
-                    }
-                }
-            }
             let previous_pending=self.app.pending_messengers.clone();
-            for (pid,window) in self.wechat.as_ref().map(|listener|listener.take()).unwrap_or_default(){daozai::wechat::trace(format!("岛上显示微信未读 账号 {pid}"));self.app.receive_wechat_reminder_from(pid,window);}
+            for event in self.messengers.poll_taskbar(ctx,&self.app.settings){match event{
+                TaskbarEvent::Status(client,status)=>self.app.set_messenger_status(client,status),
+                TaskbarEvent::Message(unread)=>{
+                    if self.messengers.track_unread(unread)==Err(OpenError::Exited){continue;}
+                    self.app.receive_messenger_reminder(unread);
+                }
+            }}
             if let Some(rx)=&self.incoming {
                 while let Ok(event)=rx.try_recv(){match event {
                     daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},
                     daozai::system::Incoming::Status(s)=>self.app.listener_status=s,
                     daozai::system::Incoming::Message(a,id,b,target)=>{
-                        if target.is_some_and(|target|!self.unread_monitor.track_qq(target)){continue;}
+                        if target.is_some_and(|target|self.messengers.track(target)==Err(OpenError::Exited)){continue;}
                         self.app.receive_notification_from(a,id,b,target.map(|target|target.unread));
                     }
                 }}
@@ -438,12 +415,12 @@ impl eframe::App for Shell {
             if foreground_changed || self.app.pending_messengers!=previous_pending {
                 // 在微信 / QQ 里打开了某个账号的窗口：清掉这个账号的未读。
                 let mut sources:Vec<app::Messenger>=self.app.pending_messengers.iter().map(|u|u.source).collect();sources.dedup();
-                match daozai::wechat::foreground_client(&sources){
+                match self.messengers.foreground(&sources){
                     Some((source,pid))=>{
-                        if self.app.pending_messengers.iter().any(|u|u.source==source){daozai::wechat::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));}
+                        if self.app.pending_messengers.iter().any(|u|u.source==source){messenger::windows::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));}
                         self.app.viewed_client(source,pid);
                     }
-                    None=>if foreground_changed && !sources.is_empty(){daozai::wechat::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",daozai::wechat::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
+                    None=>if foreground_changed && !sources.is_empty(){messenger::windows::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",messenger::windows::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
                 }
             }
             if self.tray_opening.as_ref().is_some_and(|(unread,_)|!self.app.pending_messengers.contains(unread)){
@@ -455,9 +432,9 @@ impl eframe::App for Shell {
                     Ok(Ok(()))=>{self.tray_opening=None;self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
                     Ok(Err(error))=>{
                         self.tray_opening=None;
-                        if error.ends_with("账号已退出"){self.app.discard_unread(unread);}
-                        else if unread.source==app::Messenger::Qq{self.app.reveal_qq_notice(unread);}
-                        self.app.messenger_unavailable(error);
+                        if error==OpenError::Exited{self.app.discard_unread(unread);}
+                        else if unread.source.adapter().dismiss_unread{self.app.reveal_messenger_notice(unread);}
+                        self.app.messenger_unavailable(error.message(unread.source));
                     }
                     Err(std::sync::mpsc::TryRecvError::Disconnected)=>{
                         self.tray_opening=None;self.app.messenger_unavailable(format!("{} 暂时无法响应，请重试",unread.source.name()));
@@ -469,7 +446,7 @@ impl eframe::App for Shell {
                 if !self.app.pending_messengers.contains(&unread){self.opening_messenger=None;}
                 else if started.elapsed()>=Duration::from_secs(4){
                     self.opening_messenger=None;
-                    match daozai::wechat::foreground_client(&[unread.source]){
+                    match self.messengers.foreground(&[unread.source]){
                         Some((source,pid)) if unread.pid==0||unread.pid==pid=>self.app.viewed_client(source,pid),
                         _=>self.app.messenger_unavailable(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
                     }
@@ -547,51 +524,14 @@ impl eframe::App for Shell {
                         let was_pending=self.app.pending_messengers.contains(&unread);
                         self.clear_exited_messengers(ctx);
                         if !self.app.pending_messengers.contains(&unread){
-                            if was_pending{self.app.messenger_unavailable(format!("{} 账号已退出",unread.source.name()));}
+                            if was_pending{self.app.messenger_unavailable(OpenError::Exited.message(unread.source));}
                             continue;
                         }
-                        if unread.source==app::Messenger::Qq{
-                            if self.tray_opening.is_some(){self.app.messenger_unavailable("正在打开消息客户端，请稍后");ctx.request_repaint();continue;}
-                            static QQ_OPEN:daozai::resources::Lane=daozai::resources::Lane::new("daozai-qq-open",1);
-                            let Some(lease)=QQ_OPEN.acquire()else{self.app.messenger_unavailable("QQ 正在响应，请稍后再试");ctx.request_repaint();continue;};
-                            let target=self.unread_monitor.qq_target(unread);
-                            let (tx,rx)=std::sync::mpsc::channel();let repaint=ctx.clone();
-                            if lease.spawn(move||{
-                                let result=match target{
-                                    Some(target)=>daozai::wechat::open_qq_target(target),
-                                    None if unread.pid==0=>daozai::wechat::open_unread(unread),
-                                    None=>Err("QQ 窗口暂时无法打开".into()),
-                                };
-                                let _=tx.send(result);repaint.request_repaint();
-                            }).is_none(){self.app.messenger_unavailable("QQ 窗口暂时无法打开");ctx.request_repaint();continue;}
-                            self.tray_opening=Some((unread,rx));continue;
+                        if self.tray_opening.is_some(){self.app.messenger_unavailable(OpenError::Busy.message(unread.source));ctx.request_repaint();continue;}
+                        match self.messengers.request(unread,&self.app.settings).start(ctx.clone()){
+                            Ok(rx)=>self.tray_opening=Some((unread,rx)),
+                            Err(error)=>{self.app.messenger_unavailable(error.message(unread.source));ctx.request_repaint();}
                         }
-                    }
-                    #[cfg(windows)] match daozai::wechat::open_unread(unread){
-                        Ok(())=>{
-                            match daozai::wechat::foreground_client(&[unread.source]){
-                                Some((source,pid)) if unread.pid==0||unread.pid==pid=>self.app.viewed_client(source,pid),
-                                _=>{self.opening_messenger=Some((unread,Instant::now()));ctx.request_repaint_after(Duration::from_secs(4));}
-                            }
-                        },
-                        Err(error) if error.ends_with("账号已退出")=>{
-                            self.app.discard_unread(unread);self.app.messenger_unavailable(error);ctx.request_repaint();
-                        }
-                        Err(_) if self.app.settings.wechat_tray_open && unread.source==app::Messenger::Wechat && self.tray_opening.is_none()=>{
-                            match daozai::wechat::wechat_in_tray(unread){
-                                Ok(())=>{
-                                    // 缩在托盘：后台线程按下该账号的托盘按钮，不阻塞界面。
-                                    let (tx,rx)=std::sync::mpsc::channel();let repaint=ctx.clone();
-                                    std::thread::spawn(move||{let _=tx.send(daozai::wechat::open_wechat_from_tray(unread));repaint.request_repaint();});
-                                    self.tray_opening=Some((unread,rx));
-                                }
-                                Err(error)=>self.app.say(error),
-                            }
-                        }
-                        Err(error)=>{
-                            if unread.source==app::Messenger::Qq{self.app.reveal_qq_notice(unread);}
-                            self.app.messenger_unavailable(error);ctx.request_repaint();
-                        },
                     }
                 }
                 Cmd::Open(p) => {if let Err(e)=open_path(&p){self.app.say(e);}},
@@ -648,7 +588,7 @@ impl eframe::App for Shell {
                     #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body,self.app.settings.sound);}
                 },
                 cmd @ (Cmd::RequestNotifications|Cmd::RequestQqNotifications)=>{
-                    #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(ctx.clone(),self.app.settings.qq_only){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
+                    #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(ctx.clone(),NotificationFilter::for_settings(&self.app.settings)){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
                 },
                 Cmd::MailSync=>{
                     let enabled=self.app.settings.mail_enabled;
