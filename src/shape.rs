@@ -365,11 +365,14 @@ fn densify(rows: Vec<(f32, f32, f32)>) -> Vec<(f32, f32, f32)> {
     out
 }
 
+/// `close_top`：悬浮胶囊（Pill）为真，顶边水平段也要补一圈羽化。
+/// 贴着屏幕边的刘海/侧边/底部轮廓为假，贴边那一行保持硬边，避免漏出桌面。
 pub(crate) fn shade_mesh(
     rect: Rect,
     rows: Vec<(f32,f32,f32)>,
     feather: f32,
     shade: &dyn Fn(f32, f32) -> Color32,
+    close_top: bool,
 ) -> egui::Mesh {
     let rows = densify(rows);
     let cols = ((rect.width() / COL_STEP).ceil() as usize).clamp(COLS_MIN, COLS_MAX);
@@ -396,19 +399,33 @@ pub(crate) fn shade_mesh(
             mesh.add_triangle(id, id + 2, id + 3);
         }
     }
-    // 2) 外轮廓羽化带（不含顶边）：外沿保持同色但完全透明
+    // 2) 外轮廓羽化带：外沿保持同色但完全透明。
+    //    悬浮胶囊四角都离开屏幕边缘，顶边水平段同样要羽化；否则只有两端圆角
+    //    有抗锯齿、中间是一整条 1px 硬跳变，在浅色壁纸上会看成一条白色像素条，
+    //    把胶囊顶边「切」开。贴边的轮廓仍保持「贴边那一行不羽化」。
     let pts: Vec<Pos2> = rows
         .iter()
         .map(|&(y, _, r)| Pos2::new(r, y))
         .chain(rows.iter().rev().map(|&(y, l, _)| Pos2::new(l, y)))
         .collect();
-    let n = pts.len();
-    for i in 0..n - 1 {
-        let (a, b) = (pts[i], pts[i + 1]);
+    let mut segments: Vec<(Pos2, Pos2)> = pts.windows(2).map(|w| (w[0], w[1])).collect();
+    if close_top {
+        // 左上端点 → 右上端点：补上原本没画的顶边，法线统一朝上。
+        let (a, b) = (*pts.last().unwrap(), pts[0]);
         if a.y <= rect.top() + 0.01 && b.y <= rect.top() + 0.01 {
+            segments.push((a, b));
+        }
+    }
+    for (i, &(a, b)) in segments.iter().enumerate() {
+        let on_top = a.y <= rect.top() + 0.01 && b.y <= rect.top() + 0.01;
+        if on_top && !close_top {
             continue;
         }
-        let (na, nb) = (edge_normal(&pts, i), edge_normal(&pts, i + 1));
+        let (na, nb) = if on_top {
+            (Vec2::new(0.0, -1.0), Vec2::new(0.0, -1.0))
+        } else {
+            (edge_normal(&pts, i), edge_normal(&pts, i + 1))
+        };
         let clear = |p: Pos2| {
             let c = shade(p.x, p.y);
             Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 0)
@@ -422,5 +439,48 @@ pub(crate) fn shade_mesh(
         mesh.add_triangle(base, base + 2, base + 3);
     }
     mesh
+}
+
+#[cfg(test)]
+mod pill_top_tests {
+    use super::*;
+
+    /// 复刻 `app::paint_body` 里胶囊的行表：底部圆角镜像出上半圆角。
+    fn pill_rows(rect: Rect, radius: f32) -> Vec<(f32, f32, f32)> {
+        let mut rows = sections(rect, 0.0, 8.0, radius);
+        let mid = rect.center().y;
+        rows.retain(|row| row.0 > mid && row.0 >= rect.bottom() - radius);
+        let top = rows.iter().rev().map(|&(y, l, r)| (2.0 * mid - y, l, r)).collect::<Vec<_>>();
+        rows.splice(0..0, top);
+        rows
+    }
+
+    fn mesh(close_top: bool) -> egui::Mesh {
+        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 30.0));
+        shade_mesh(rect, pill_rows(rect, 15.0), 1.0, &|_, _| Color32::from_rgb(80, 80, 80), close_top)
+    }
+
+    #[test]
+    fn floating_pill_feathers_the_top_edge_instead_of_a_hard_white_line() {
+        let docked = mesh(false);
+        let floating = mesh(true);
+        // 顶边段两端 = (15, 0) 与 (285, 0)，羽化外沿应严格在 y = -feather 处、完全透明。
+        let outer = |m: &egui::Mesh, x: f32| {
+            m.vertices.iter().any(|v| {
+                (v.pos.x - x).abs() < 0.01 && (v.pos.y + 1.0).abs() < 0.01 && v.color.a() == 0
+            })
+        };
+        assert!(!outer(&docked, 15.0) && !outer(&docked, 285.0), "贴边轮廓的顶边不能羽化");
+        assert!(outer(&floating, 15.0) && outer(&floating, 285.0), "悬浮胶囊整条顶边都要羽化");
+        // 只多补这一段：4 个顶点、2 个三角形，其余轮廓的羽化完全不变。
+        assert_eq!(floating.vertices.len(), docked.vertices.len() + 4);
+        assert_eq!(floating.indices.len(), docked.indices.len() + 6);
+        assert_eq!(&floating.vertices[..docked.vertices.len()], &docked.vertices[..]);
+        // 内沿保持实心，外沿才是透明的：边缘是渐变，不是一条白色硬边。
+        let inner = floating.vertices.iter().any(|v| {
+            (v.pos.x - 15.0).abs() < 0.01 && v.pos.y.abs() < 0.01 && v.color.a() == 255
+        });
+        assert!(inner, "顶边内沿仍是实心胶囊底色");
+    }
 }
 

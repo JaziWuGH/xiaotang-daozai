@@ -2212,7 +2212,7 @@ impl App {
             let mut mesh=shape::shade_mesh(frame,rows,feather,&|x,y|{
                 let p=map.apply(Pos2::new(x,y))-rect.min;
                 self.fluid.compose(p.x,p.y,rect.width(),rect.height(),expand)
-            });
+            },pill);
             if self.dock()!=model::Dock::Top && !pill {
                 for vertex in &mut mesh.vertices {vertex.pos=map.apply(vertex.pos);}
             }
