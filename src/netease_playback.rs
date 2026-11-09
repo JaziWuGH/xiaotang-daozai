@@ -117,15 +117,47 @@ impl Playback {
         // 只解析播放事件；音频签名链接、Cookie 等其他日志内容不会进入状态或缓存。
         let Some((_,body))=body.split_once("【playing】,")else{return;};
         let Some((event,args))=body.trim().strip_prefix('"').and_then(|s|s.split_once("\","))else{return;};
-        if matches!(event,"playOneTrackInPlayingList"|"checkPlayPrivilege"){
+        if event=="playOneTrackInPlayingList"{
+            // 这是客户端唯一权威的「切歌」信号，但字段有两种形态：
+            // 带完整 track 的嵌套结构，以及只有 `{"id":"..."}` 的扁平结构（真实日志里很常见）。
+            // 旧逻辑直接丢给 track()，扁平那种因为缺 name 被整行丢掉，切歌就此失联；
+            // 紧接着 checkPlayPrivilege 又因「已有上一首 ID」被跳过，load完成 只能把状态清成空壳
+            // （标题空 → kind() 判成 Unknown → snapshot 丢弃），表现就是「客户端手动切歌后岛仔没时长、歌词不滚」。
+            let Some(value)=serde_json::from_str::<serde_json::Value>(args).ok() else{return;};
+            let raw_id=value.get("track").and_then(|t|t.get("id")).or_else(||value.get("id"));
+            let Some(id)=raw_id.and_then(song_id) else{return;};
+            if self.media.song_id!=Some(id){
+                if let Some(metadata)=track(&value){
+                    *self=Self{media:metadata.0,artwork_url:metadata.1,at,observed_at:now,ready:false};
+                }else{
+                    // 只有 ID：先记住它并清掉上一首残留，元数据等 checkPlayPrivilege 补全。
+                    *self=Self::default();
+                    self.media.source="cloudmusic.exe".into();
+                    self.media.playback_type=MediaKind::Music;
+                    self.media.song_id=Some(id);
+                    self.at=at;self.observed_at=now;
+                }
+            }else if let Some(metadata)=track(&value){
+                self.metadata(metadata);
+            }
+        }else if event=="checkPlayPrivilege"{
             let Some(metadata)=serde_json::from_str(args).ok().as_ref().and_then(track)else{return;};
-            if self.media.song_id!=metadata.0.song_id {
-                if event=="checkPlayPrivilege" && self.media.song_id.is_some(){return;}
+            if self.media.song_id==metadata.0.song_id {
+                self.metadata(metadata);
+            }else{
+                // ID 不同就是切歌：这条事件紧跟 playOneTrack 之后、load完成 之前，
+                // 是那时唯一带歌名和时长的事件，必须接受（旧逻辑在这里 return，新歌就永远是空壳）。
                 *self=Self{media:metadata.0,artwork_url:metadata.1,at,observed_at:now,ready:false};
-            }else{self.metadata(metadata);}
+            }
         }else if event.starts_with("native") && event.contains("load完成"){
             let Some(id)=serde_json::from_str::<serde_json::Value>(args).ok().and_then(|v|song_id(v.get("songId")?))else{return;};
-            if self.media.song_id!=Some(id){*self=Self::default();self.media.song_id=Some(id);}
+            if self.media.song_id!=Some(id){
+                // 换歌但还没拿到元数据：保留 ID 并标成音乐，否则空标题会被判定为「不是音乐」。
+                *self=Self::default();
+                self.media.source="cloudmusic.exe".into();
+                self.media.playback_type=MediaKind::Music;
+                self.media.song_id=Some(id);
+            }
             self.media.position=0.0;self.media.playing=true;self.at=at;self.observed_at=now;self.ready=true;
         }else if event=="setPlayingPosition" && self.media.song_id.is_some(){
             let Some(position)=args.split(',').next().and_then(|s|s.trim().parse::<f64>().ok()).filter(|p|p.is_finite() && (0.0..86400.0).contains(p))else{return;};
@@ -346,14 +378,33 @@ impl Reader {
         // 除了「完全读不到歌」，也要覆盖「读到了但缺元数据」（没有时长/没有 song_id）：
         // 长时间增量读取时，队列补齐一旦被去抖跳过就再也补不回来，表现就是时长 0、进度不动。
         let stale=media.as_ref().is_none_or(|m|m.duration<=0.0 || m.song_id.is_none());
+        let mut recovered=false;
         if stale && self.recover(now){
+            recovered=true;
             media=self.read(&path,process_id(),now);
         }
         // 只有恢复到完整可用的状态才清零退避，否则会退化成每 3 秒解码一次 4MB。
         if media.as_ref().is_some_and(|m|m.duration>0.0 && m.song_id.is_some()){self.recover_fail=0;}
+        self.diagnose(media.as_ref(),stale,recovered);
         let Some(mut media)=media else{return None;};
         if self.cover.url==self.playback.artwork_url{media.artwork=self.cover.image.clone();}
         media.sampled_at=Some(sampled);Some(media)
+    }
+    /// 诊断：把增量读取器的内部状态抄到 `diagnostics/netease.log`（约 2 秒一条）。
+    /// 生产里看不到 Reader 内部，出问题时只能靠这几个字段区分
+    /// 「事件根本没读到」「读到了但 ready 没置上」「读到了但是别的歌」。
+    fn diagnose(&self,media:Option<&NowPlaying>,stale:bool,recovered:bool){
+        use std::sync::atomic::{AtomicU64,Ordering};
+        static LAST:AtomicU64=AtomicU64::new(0);
+        let now=monotonic_millis();
+        if now.saturating_sub(LAST.load(Ordering::Relaxed))<2000 {return;}
+        LAST.store(now,Ordering::Relaxed);
+        let duration=self.playback.media.duration;
+        crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"netease.log",
+            &format!("pid={} offset={} ready={} sid={:?} at={} pos={:.2} dur={:.2} title={:?} stale={} recovered={} fails={} snap={}",
+                self.pid,self.offset,self.playback.ready,self.playback.media.song_id,self.playback.at,
+                self.playback.media.position,duration,self.playback.media.title,
+                stale,recovered,self.recover_fail,media.is_some()));
     }
     pub(super) fn fill_artwork(&mut self,media:&mut NowPlaying){
         if media.source.eq_ignore_ascii_case("cloudmusic.exe") && media.song_id==self.playback.media.song_id && media.artwork.is_none(){
@@ -881,6 +932,23 @@ mod tests{
         panic!("客户端切换模式后岛上没有同步");
     }
 
+    /// 只读诊断：模拟生产里的「长跑增量读取」，连续轮询并打印读取器内部状态。
+    /// 生产环境看不到这些字段，用户手动操作网易云后一旦退化，只能靠它判断断在哪一步。
+    #[cfg(windows)]
+    #[test]
+    #[ignore="只读诊断：长时间增量读取时读取器内部是否退化"]
+    fn live_incremental_reader_state(){
+        let mut reader=Reader::default();
+        for round in 0..40 {
+            let sample=reader.poll();
+            println!("round {round:02}: ready={} sid={:?} at={} pos={:.2} dur={:.2} title={:?} offset={} fails={} snap={}",
+                reader.playback.ready,reader.playback.media.song_id,reader.playback.at,
+                reader.playback.media.position,reader.playback.media.duration,
+                reader.playback.media.title,reader.offset,reader.recover_fail,sample.is_some());
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     #[ignore="只读诊断：网易云模式的日志 / UIA / 渲染窗口通道"]
@@ -1012,6 +1080,52 @@ mod tests{
         let media=state.snapshot(7000).unwrap();assert!(media.playing);assert_eq!(media.position,31.5);assert_eq!(media.song_id,Some(123));
         state.line(&event(7,8000,"\"setPlayingPosition\",NaN"),7,8000);assert_eq!(state.snapshot(8000).unwrap().position,32.5);
         state.line(&event(7,9000,"\"exitApp\""),7,9000);assert!(state.snapshot(10000).is_none());
+    }
+    /// 真实日志里切歌事件是扁平的、且**只有 id 没有歌名**（`{"id":"...","displayOrder":..}`）。
+    fn flat_cut(at:u64,id:u64)->String{
+        format!("[{0}:1:1109/121047:{1}:INFO:app.cpp(1)] 【playing】,\"playOneTrackInPlayingList\",{{\"id\":\"{2}\",\"displayOrder\":22,\"scene\":\"playlist\",\"isPlayedOnce\":false}}\n",7,at,id)
+    }
+    fn privilege(id:u64,name:&str,duration_ms:u64)->String{
+        format!("\"checkPlayPrivilege\",{{\"id\":\"{id}\",\"duration\":{duration_ms},\"name\":\"{name}\",\"status\":0,\"commentThreadId\":\"R_SO_4_{id}\"}}")
+    }
+    #[test]
+    fn manual_track_change_in_client_keeps_title_and_duration(){
+        let mut state=Playback::default();
+        // 先正常放第一首
+        state.line(&flat_cut(1000,111),7,1000);
+        state.line(&event(7,1100,&privilege(111,"第一首",200000)),7,1100);
+        state.line(&event(7,1200,"\"native播放资源load完成，开始播放\",{\"songId\":\"111\"}"),7,1200);
+        state.line(&event(7,1300,"\"native播放state\",1"),7,1300);
+        let first=state.snapshot(2000).unwrap();
+        assert_eq!(first.title,"第一首");
+        assert_eq!(first.song_id,Some(111));
+        assert!((first.duration-200.0).abs()<0.01);
+
+        // 用户在客户端手动切歌：切歌事件只有 id，必须靠它识别「换歌了」
+        state.line(&flat_cut(5000,222),7,5000);
+        assert_eq!(state.media.song_id,Some(222),"切歌事件没有歌名，但绝不能整行丢掉");
+        // 紧接着的 checkPlayPrivilege 带歌名和时长：上一首的 ID 不能让这条被跳过
+        state.line(&event(7,5100,&privilege(222,"第二首",300000)),7,5100);
+        assert_eq!(state.media.title,"第二首","新歌的元数据必须补进来");
+        // load完成 不能再把已经补好的元数据清空
+        state.line(&event(7,5200,"\"native播放资源load完成，开始播放\",{\"songId\":\"222\"}"),7,5200);
+        state.line(&event(7,5300,"\"native播放state\",1"),7,5300);
+        let second=state.snapshot(6000).expect("切歌后必须能拿到完整状态，否则界面上没有时长、歌词不滚");
+        assert_eq!(second.title,"第二首");
+        assert_eq!(second.song_id,Some(222));
+        assert!((second.duration-300.0).abs()<0.01,"时长要跟着新歌走，实际 {}",second.duration);
+        assert!(second.is_music(),"标题完整的网易云歌曲必须判定为音乐");
+    }
+    #[test]
+    fn load_finished_without_metadata_still_counts_as_music(){
+        // 极端情况：只拿到 load完成 的 songId，没有 checkPlayPrivilege。
+        // 这时标题是空的，但类型必须仍是音乐，否则整首歌会被 kind() 判成 Unknown 而丢弃。
+        let mut state=Playback::default();
+        state.line(&flat_cut(1000,333),7,1000);
+        state.line(&event(7,1100,"\"native播放资源load完成，开始播放\",{\"songId\":\"333\"}"),7,1100);
+        state.line(&event(7,1200,"\"native播放state\",1"),7,1200);
+        assert_eq!(state.media.playback_type,MediaKind::Music);
+        assert_eq!(state.media.song_id,Some(333));
     }
     #[test]
     fn reader_recovers_after_incremental_state_is_lost(){
