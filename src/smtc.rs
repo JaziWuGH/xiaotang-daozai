@@ -1847,6 +1847,42 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    #[ignore="只读诊断：复刻生产轮询链路，检查外推进度是否冻结"]
+    fn live_production_timeline_keeps_moving(){
+        let _apartment=init_winrt();
+        let mut artwork=ArtworkCache::default();
+        let mut playback_clock=PlaybackClock::default();
+        let mut memory=MediaMemory::default();
+        let mut selected=String::new();
+        let mut netease=netease_playback::Reader::default();
+        let mut first=None;
+        let mut last=None;
+        for round in 0..40 {
+            let system=query(&mut artwork);
+            let native=netease.poll();
+            let pending=netease.pending();
+            let mut np=choose_media_for_source(system,native,&selected,pending).unwrap_or_default();
+            memory.update(&mut np,std::time::Instant::now());
+            if !np.source.is_empty(){selected=np.source.clone();}
+            playback_clock.update(&mut np);
+            // 复刻 app::update_media 的外推：poller 采样位置 + 该采样至今经过的时间。
+            let elapsed=np.sampled_at.map(|s|s.elapsed().as_secs_f64()).unwrap_or(0.0);
+            let outer=np.position+elapsed;
+            println!("round {round}: {} {} pos={:.2} playing={} sampled={} elapsed={:.3} outer={:.2} dur={:.2}",
+                np.source,np.title,np.position,np.playing,np.sampled_at.is_some(),elapsed,outer,np.duration);
+            if first.is_none(){first=Some(outer);}
+            last=Some((np.position,outer,np.playing,np.duration));
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let first_outer=first.unwrap();
+        let (_,outer,playing,duration)=last.unwrap();
+        assert!(playing,"实机验收要求正在播放");
+        assert!(duration>0.0,"网易云的时长必须读得到，不能是 0（0 会让歌词按歌名错配版本）");
+        assert!(outer>first_outer+2.0,"约 10 秒内进度必须推进，不能冻结在 {first_outer:.2} 秒（现在 {outer:.2}）");
+    }
+
+    #[cfg(windows)]
+    #[test]
     #[ignore="需要读取当前系统媒体会话"]
     fn live_sessions_metadata(){
         let _apartment=init_winrt();

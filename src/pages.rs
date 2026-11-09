@@ -379,6 +379,23 @@ impl App {
         let col=c.clipped(243.0,28.0,136.0,74.0);
         c.seg((233.0,32.0),(233.0,98.0),1.0,Color32::from_gray(35));
         if let Some(lyrics)=&self.ly.lyrics {
+            // 诊断：每 2 秒记一行推进状态，排查「歌词不滚」时直接看数值，不用猜。
+            if !cfg!(test) {
+                static LAST:std::sync::Mutex<Option<std::time::Instant>>=std::sync::Mutex::new(None);
+                let now=std::time::Instant::now();
+                let due=LAST.lock().map(|mut slot|{
+                    let due=slot.is_none_or(|at|now.duration_since(at)>=std::time::Duration::from_secs(2));
+                    if due{*slot=Some(now);}
+                    due
+                }).unwrap_or(false);
+                if due {
+                    let index=lyrics.index_at(self.lyric_position());
+                    crate::resources::append_log(&crate::model::config_dir().join("diagnostics"),"media.log",
+                        &format!("{} pos={:.2} dur={:.2} lyr={:.2} playing={} synced={} lines={} index={:?}",
+                            self.media.title,self.media.position,self.media.duration,self.lyric_position(),self.media.playing,
+                            lyrics.synced,lyrics.lines.len(),index));
+                }
+            }
             let current=if lyrics.synced {lyrics.index_at(self.lyric_position())}else{Some(0)};
             let target=current.unwrap_or(0);
             let id=egui::Id::new("music-lyrics-scroll");

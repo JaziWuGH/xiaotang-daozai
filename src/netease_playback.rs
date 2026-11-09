@@ -93,11 +93,17 @@ struct Playback {media:NowPlaying,artwork_url:String,at:u64,observed_at:u64,read
 impl Playback {
     fn position(&self,now:u64)->f64{
         let position=self.media.position+if self.media.playing {now.saturating_sub(self.observed_at)as f64/1000.0}else{0.0};
-        if self.media.duration>0.0{position.min(self.media.duration)}else{position}
+        // 时长明显短于实际进度时说明这条时长是错的（客户端补写的 0、上一首残留等）。
+        // 用它钳制会把进度永久钉死，歌词就再也不滚动，所以只在时长还算合理时才截断。
+        if self.media.duration>0.0 && position<=self.media.duration+1.0 {position.min(self.media.duration)}else{position}
     }
     fn metadata(&mut self,(metadata,cover):(NowPlaying,String)){
         self.media.title=metadata.title;self.media.artist=metadata.artist;
-        self.media.album=metadata.album;self.media.duration=metadata.duration;
+        self.media.album=metadata.album;
+        // 网易云播放中会补写 checkPlayPrivilege 等事件，它们的 duration 字段缺失（读成 0）。
+        // 用 0 覆盖已知时长，歌词就只能按歌名匹配、容易选中别的版本，进度还会被错误时长钳死，
+        // 表现就是「歌词不滚」。0 一律视为未知，不覆盖。
+        if metadata.duration>0.0{self.media.duration=metadata.duration;}
         self.media.source=metadata.source;self.media.playback_type=metadata.playback_type;
         if !cover.is_empty(){self.artwork_url=cover;}
     }
@@ -292,7 +298,7 @@ impl Reader {
         }
         // 启动时续播可能只写歌曲 ID，按该 ID 补充本地队列里的元数据。
         let id=self.playback.media.song_id;
-        if id.is_some() && (!self.playback.media.is_music() || self.playback.artwork_url.is_empty()) && (self.lookup.0!=id || now.saturating_sub(self.lookup.1)>=5000){
+        if id.is_some() && (!self.playback.media.is_music() || self.playback.artwork_url.is_empty() || self.playback.media.duration<=0.0) && (self.lookup.0!=id || now.saturating_sub(self.lookup.1)>=5000){
             let root=path.parent()?;
             // 队列文件可达 8MB：同一首歌且文件没有变化时不重复解析（这首歌本来就没有封面时会一直满足上面的条件）。
             let print=queue_fingerprint(root);
@@ -874,6 +880,33 @@ mod tests{
             assert!(real.is_some(),"step {step}: 客户端没写下模式切换日志");
             assert_eq!(island_after,real.unwrap(),"step {step}: 岛上没跟上客户端");
         }
+    }
+
+    #[test]
+    fn a_metadata_event_without_duration_cannot_erase_the_known_length(){
+        let mut state=Playback::default();
+        state.media.song_id=Some(7);
+        state.media.title="歌".into();
+        state.media.duration=229.5;
+        state.ready=true;
+        // checkPlayPrivilege 这类事件只带歌曲 ID，duration 字段缺失会被读成 0。
+        state.metadata((NowPlaying{title:"歌".into(),artist:"手".into(),duration:0.0,..Default::default()},String::new()));
+        assert_eq!(state.media.duration,229.5,"0 是未知，不能覆盖已知时长");
+        state.metadata((NowPlaying{title:"歌".into(),artist:"手".into(),duration:231.2,..Default::default()},String::new()));
+        assert_eq!(state.media.duration,231.2,"真实时长仍然要更新");
+    }
+
+    #[test]
+    fn a_wrongly_short_duration_does_not_freeze_the_position(){
+        let mut state=Playback::default();
+        state.media.song_id=Some(7);
+        state.media.playing=true;
+        state.media.duration=12.0; // 错误时长：客户端补写的旧值
+        state.media.position=60.0;
+        state.observed_at=1_000_000;
+        state.ready=true;
+        let now=1_000_000+5_000;
+        assert!((state.position(now)-65.0).abs()<0.01,"进度必须继续推进，不能被错误时长钉在 12 秒");
     }
 
     #[test]

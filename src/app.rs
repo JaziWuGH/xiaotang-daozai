@@ -1958,7 +1958,10 @@ impl App {
             || !self.notice_width.settled(1.0);
         let pet_visible=self.pet_a>0.01 && !self.open && !minimal_pill;
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
-            || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
+            // 展开在音乐页时不再拿 playing 当门槛：客户端偶尔不更新播放状态，
+            // 用 playing 判断会让歌词掉到 1 帧/秒，看起来就是「完全不滚」。
+            || self.media.is_music() && !self.media.title.is_empty()
+                && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.playing)
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
         let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
@@ -2730,7 +2733,7 @@ impl App {
             let (_, pos, _, _) = &self.media_anchor;
             np.position = if let Some(sampled)=m.sampled_at {m.position+sampled.elapsed().as_secs_f64()}
                 else {*pos};
-            if m.duration>0.0 {np.position=np.position.min(m.duration);}
+            if m.duration>0.0 && m.position<=m.duration+1.0 {np.position=np.position.min(m.duration);}
         }
         // 网易云的 song_id 只来自本机日志，SMTC 那一路没有；None 与 Some 之间来回不是换歌，不能每次都清空歌词重查。
         let other_song=matches!((self.media.song_id,np.song_id),(Some(old),Some(new)) if old!=new);
