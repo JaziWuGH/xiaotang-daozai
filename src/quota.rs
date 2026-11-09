@@ -14,6 +14,12 @@ pub(crate) mod workbuddy;
 pub(crate) mod deepseek;
 #[path="zcode_quota.rs"]
 pub(crate) mod zcode;
+#[path="plan_quota.rs"]
+pub(crate) mod plans;
+#[path="relay_quota.rs"]
+pub(crate) mod relay;
+#[path="api_quota.rs"]
+pub(crate) mod api;
 #[path="native_auth.rs"]
 mod native_auth;
 
@@ -26,11 +32,13 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api }
 impl Provider {
-    pub const ALL: [Self; 8] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek"} }
-    pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)}
+    pub const ALL: [Self; 14] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API"} }
+    pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm|Self::NewApi|Self::OneApi|Self::Sub2Api)}
+    pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api)}
+    pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
     fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -60,11 +68,14 @@ impl Config {
         Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
     }
     fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
-    pub fn save(&self) {
-        let dir=crate::model::config_dir();let _=fs::create_dir_all(&dir);
-        if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
+    pub fn save(&self) {let _=self.save_checked();}
+    pub(crate) fn save_checked(&self)->Result<(),String>{
+        let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
+        let raw=serde_json::to_vec_pretty(&self.json()).map_err(|_|"无法生成额度配置")?;
+        crate::model::atomic_write(&dir.join("ai-quota.json"),&raw).map_err(|_|"无法保存额度配置，原账号未变更".into())
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
+        if provider.api_key(){return Err("请使用 API Key 连接，无需登录 JSON".into());}
         if provider==Provider::ZCode{return zcode::add(self,&source,&alias);}
         if provider==Provider::WorkBuddy{return Err("请使用浏览器连接 WorkBuddy".into());}
         if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
@@ -188,7 +199,7 @@ impl Config {
 pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>}
+pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)] pub relay:Option<relay::Quota>}
 impl Account {
     pub(crate) fn cache_identity_marker(&self)->Value {
         if claude::is_desktop(&self.source){json!(2)}else{json!(true)}
@@ -196,6 +207,7 @@ impl Account {
     pub(crate) fn cached_snapshot(&self,cache:&Value)->Option<Snapshot>{
         let entry=&cache[&self.id];
         if entry["provider"].as_str()!=Some(self.provider.name()) || entry["slot"].as_str()!=self.slot.as_deref(){return None;}
+        if self.provider.api_key() && entry["source"].as_str()!=self.source.to_str(){return None;}
         if self.provider==Provider::Claude && (entry["source"].as_str()!=self.source.to_str() || entry["local_identity_checked"]!=self.cache_identity_marker()){return None;}
         let snapshot:Snapshot=serde_json::from_value(entry["snapshot"].clone()).ok()?;
         (snapshot.at>0 && !snapshot.wallet.as_ref().is_some_and(|w|w.balances.is_empty())).then_some(snapshot)
@@ -212,6 +224,7 @@ fn codex_window(v:&Value)->Option<Window>{
     Some(Window{label:cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v["reset_at"])})
 }
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
+    if provider.api_key(){return Err("请使用对应服务的地区及协议解析额度".into());}
     if provider==Provider::WorkBuddy{return workbuddy::parse(v);}
     if provider==Provider::DeepSeek{return deepseek::parse(v);}
     if provider==Provider::GrokBot{return grok::parse(v);}
@@ -242,7 +255,7 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }
-        Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!(),
+        _=>unreachable!(),
     }
     if s.windows.is_empty(){return Err("服务未提供周期额度，暂不绘制进度".into());}
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
@@ -258,10 +271,11 @@ fn account_credentials(account:&Account)->Result<Credential,String>{
     credentials(account.provider,&account.source)
 }
 fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
+    if provider.api_key(){return Err("API Key 账号不读取登录文件".into());}
     if provider==Provider::Claude{return Err("Claude 仅使用本地用量记录，不读取登录令牌".into());}
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Kimi=>v.get("access_token"),Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Kimi=>v.get("access_token"),_=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
@@ -272,51 +286,51 @@ fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     Ok(Credential{token,account_id,identity,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
 }
 pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
+type PendingAccounts = std::sync::Arc<std::sync::Mutex<Option<Vec<Account>>>>;
+fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,_=>0}}
 pub struct Service {
-    tx:mpsc::SyncSender<Vec<Account>>,
+    workers:Vec<(PendingAccounts,mpsc::SyncSender<()>)>,
     rx:mpsc::Receiver<(Account,Result<Snapshot,String>)>,
 }
 impl Service {
     pub fn start()->Self{
-        let(tx,requests)=mpsc::sync_channel::<Vec<Account>>(1);
-        let(results,rx)=mpsc::channel();
-        std::thread::spawn(move||{
-            let mut cooldowns:HashMap<_,(Instant,String)>=HashMap::new();
-            while let Ok(accounts)=requests.recv(){
-                let agent=http_agent();
-                let mut groups=[Vec::new(),Vec::new(),Vec::new()];
-                for a in accounts.into_iter().filter(|a|a.enabled){
-                    let key=(a.id.clone(),a.slot.clone(),a.source.clone());
-                    if let Some((until,message))=cooldowns.get(&key){
-                        if *until>Instant::now(){let _=results.send((a,Err(message.clone())));continue;}
+        let(results,rx)=mpsc::channel();let mut workers=Vec::new();
+        // Each protocol owns a single worker and a coalesced latest request.
+        // No cross-provider join: a slow relay cannot delay the next Codex refresh.
+        for _ in 0..9 {
+            let pending:PendingAccounts=Default::default();let next=pending.clone();
+            let(tx,requests)=mpsc::sync_channel::<()>(1);let results=results.clone();
+            std::thread::spawn(move||{
+                let mut cooldowns:HashMap<_,(Instant,String)>=HashMap::new();
+                while requests.recv().is_ok(){
+                    let accounts=match next.lock(){Ok(mut p)=>p.take().unwrap_or_default(),Err(_)=>break};
+                    let agent=http_agent();cooldowns.retain(|_,(until,_)|*until>Instant::now());
+                    for a in accounts.into_iter().filter(|a|a.enabled){
+                        let key=(a.id.clone(),a.slot.clone(),a.source.clone());
+                        if let Some((until,message))=cooldowns.get(&key){
+                            if *until>Instant::now(){let _=results.send((a,Err(message.clone())));continue;}
+                        }
+                        let result=fetch(&agent,&a);
+                        if let Err((message,wait))=&result{
+                            if *wait>0{cooldowns.insert(key,(Instant::now()+Duration::from_secs((*wait).min(3600)),message.clone()));}
+                        }
+                        if results.send((a,result.map_err(|e|e.0))).is_err(){return;}
                     }
-                    let group=match a.provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,_=>0};
-                    groups[group].push((key,a));
                 }
-                cooldowns.retain(|_,(until,_)|*until>Instant::now());
-                // 同一浏览器会话内串行查询，两个余额服务各自独立完成。
-                std::thread::scope(|scope|{
-                    let mut workers=Vec::new();
-                    for group in groups.into_iter().filter(|g|!g.is_empty()){
-                        let agent=&agent;let results=&results;
-                        workers.push(scope.spawn(move||{
-                            let mut waits=Vec::new();
-                            for (key,a) in group{
-                                let result=fetch(agent,&a);
-                                if let Err((message,wait))=&result{
-                                    if *wait>0 {waits.push((key,(Instant::now()+Duration::from_secs(*wait),message.clone())));}
-                                }
-                                let _=results.send((a,result.map_err(|e|e.0)));
-                            }
-                            waits
-                        }));
-                    }
-                    for worker in workers{if let Ok(waits)=worker.join(){cooldowns.extend(waits);}}
-                });
-            }
-        });Self{tx,rx}
+            });workers.push((pending,tx));
+        }
+        Self{workers,rx}
     }
-    pub fn refresh(&self,accounts:Vec<Account>)->bool{self.tx.try_send(accounts).is_ok()}
+    pub fn refresh(&self,accounts:Vec<Account>)->bool{
+        let mut groups:Vec<Vec<Account>>=(0..9).map(|_|Vec::new()).collect();
+        for a in accounts{groups[service_group(a.provider)].push(a);}
+        for ((pending,tx),group) in self.workers.iter().zip(groups){
+            let Ok(mut next)=pending.lock()else{return false;};*next=Some(group);drop(next);
+            // Full means a wake is already pending; its worker will use newest data.
+            if matches!(tx.try_send(()),Err(mpsc::TrySendError::Disconnected(_))){return false;}
+        }
+        true
+    }
     pub fn try_recv(&self,config:&Config)->Option<Event>{
         while let Ok((source,result))=self.rx.try_recv(){
             if config.enabled && config.accounts.iter().any(|a|a.enabled&&a.id==source.id&&a.provider==source.provider&&a.source==source.source&&a.slot==source.slot){
@@ -344,6 +358,7 @@ fn http_agent()->ureq::Agent{
     if server.is_empty(){None}else if server.contains("://"){Some(server.into())}else{Some(format!("http://{server}"))}
 }
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
+    if account.provider.api_key(){return api::fetch(agent,account);}
     if account.provider==Provider::Claude{return claude::fetch(account).map_err(|e|(e,0));}
     if account.provider==Provider::ZCode{return zcode::fetch(agent,account).map_err(|e|(e,60));}
     if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}
@@ -351,7 +366,7 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",_=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
     let response=req.call().map_err(|e|match e{ureq::Error::Status(401|403,_)=>("登录已失效或权限不足，请在对应工具中重新登录".into(),0),ureq::Error::Status(429,r)=>("请求过于频繁，稍后自动重试".into(),r.header("Retry-After").and_then(|s|s.parse().ok()).unwrap_or(180).clamp(30,3600)),ureq::Error::Status(n,_)=>(format!("额度服务暂不可用（{n}）"),60),_=>("无法连接额度服务，请检查网络或代理".into(),30)})?;
@@ -363,6 +378,37 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn api_cache_is_bound_to_endpoint_region_and_credential(){
+        let mut account=Account{id:"api-fixture".into(),provider:Provider::MiniMax,alias:"fixture".into(),source:"cn".into(),slot:Some("opaque".into()),enabled:true,pinned:false};
+        let cache=json!({"api-fixture":{"provider":"MiniMax","source":"cn","slot":"opaque","snapshot":Snapshot{at:1900000000,..Default::default()}}});
+        assert!(account.cached_snapshot(&cache).is_some());
+        account.source="global".into();assert!(account.cached_snapshot(&cache).is_none());
+        account.source="cn".into();account.slot=Some("new-key".into());assert!(account.cached_snapshot(&cache).is_none());
+    }
+    #[test] fn old_snapshot_without_relay_field_still_deserializes(){
+        let old=json!({"plan":"pro","windows":[],"extra":[],"at":1900000000,"wallet":null,"credits":null});
+        assert!(serde_json::from_value::<Snapshot>(old).unwrap().relay.is_none());
+    }
+    #[test] fn provider_queues_coalesce_without_cross_provider_waits(){
+        let mut workers=Vec::new();let mut wakes=Vec::new();
+        for _ in 0..9{let(tx,rx)=mpsc::sync_channel(1);workers.push((PendingAccounts::default(),tx));wakes.push(rx);}
+        let(_results,rx)=mpsc::channel();let service=Service{workers,rx};
+        let a=Account{id:"old".into(),provider:Provider::NewApi,alias:String::new(),source:"https://relay.example".into(),slot:Some("fixture".into()),enabled:true,pinned:false};
+        assert!(service.refresh(vec![a.clone()]));let mut newer=a;newer.id="new".into();
+        // No worker consumes its full wake queue, but updating latest work never blocks.
+        assert!(service.refresh(vec![newer]));
+        assert_eq!(service.workers[service_group(Provider::NewApi)].0.lock().unwrap().as_ref().unwrap()[0].id,"new");
+        assert!(service.workers[service_group(Provider::Codex)].0.lock().unwrap().as_ref().unwrap().is_empty());
+        assert_ne!(service_group(Provider::NewApi),service_group(Provider::OpenCodeGo));
+    }
+    #[test] fn late_result_from_replaced_key_is_discarded(){
+        let mut c=Config::default();let a=Account{id:"same".into(),provider:Provider::Glm,alias:String::new(),source:"cn".into(),slot:Some("old".into()),enabled:true,pinned:false};
+        let mut current=a.clone();current.slot=Some("new".into());c.accounts.push(current.clone());
+        let(tx,rx)=mpsc::channel();let service=Service{workers:vec![],rx};
+        tx.send((a,Ok(Snapshot::default()))).unwrap();tx.send((current,Err("current response".into()))).unwrap();
+        let event=service.try_recv(&c).unwrap();assert_eq!(event.result.unwrap_err(),"current response");assert!(service.try_recv(&c).is_none());
+    }
+
     #[test]
     fn claude_local_config_ignores_retired_reset_fields(){
         let current=json!({"enabled":true,"compact":false,"selected":"desktop","colors":{"desktop":"blue"},"accounts":[{"id":"desktop","provider":"Claude","alias":"离线账号","source":"fixture/config.json","slot":"first","enabled":true,"pinned":true}]});
