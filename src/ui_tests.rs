@@ -6468,3 +6468,29 @@ fn claude_local_only_settings_show_notice_without_manual_reset_controls(){
         assert!(h.app.quota.gemini_connecting.is_none()&&h.app.quota.workbuddy_connecting.is_none()&&h.app.quota.login.is_none());
     }
 }
+
+#[test]
+#[cfg(windows)]
+fn settings_window_memory_restores_only_the_child_viewport_and_keeps_live_resizing(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.ctx.set_embed_viewports(false);h.app.open_settings();
+    let original=(h.app.settings.island_size,h.app.settings.dock,h.app.settings.display_id.clone());
+    let size=std::sync::Arc::new(std::sync::Mutex::new(egui::vec2(900.0,600.0)));
+    let resized=size.clone();
+    egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{
+        let id=viewport.ids.this;let size=*resized.lock().unwrap();
+        let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),
+            viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(1.0),
+                inner_rect:Some(Rect::from_min_size(egui::pos2(100.0,140.0),size)),
+                outer_rect:Some(Rect::from_min_size(egui::pos2(92.0,100.0),size+egui::vec2(16.0,48.0))),..Default::default()})).collect(),..Default::default()};
+        let _=ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx));
+    });
+    let frame=|h:&mut H|h.ctx.run(egui::RawInput{viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(1.75),..Default::default()})).collect(),..Default::default()},|ctx|h.app.settings_ui(ctx,false));
+    let _=frame(&mut h);h.app.settings_open=false;let _=frame(&mut h);
+    *size.lock().unwrap()=egui::vec2(690.0,560.0);h.app.open_settings();let root=frame(&mut h);
+    assert!(root.viewport_output.iter().filter(|(id,_)|**id!=egui::ViewportId::ROOT).flat_map(|(_,v)|&v.commands).any(|c|matches!(c,egui::ViewportCommand::OuterPosition(_))),"重开时应恢复子窗口");
+    assert!(!root.viewport_output.get(&egui::ViewportId::ROOT).unwrap().commands.iter().any(|c|matches!(c,egui::ViewportCommand::OuterPosition(_)|egui::ViewportCommand::InnerSize(_))));
+    *size.lock().unwrap()=egui::vec2(1100.0,700.0);let live=frame(&mut h);
+    assert!(!live.viewport_output.values().flat_map(|v|&v.commands).any(|c|matches!(c,egui::ViewportCommand::InnerSize(_))),"正常拖动不能每帧强制恢复旧尺寸");
+    assert_eq!((h.app.settings.island_size,h.app.settings.dock,h.app.settings.display_id.clone()),original);
+}
