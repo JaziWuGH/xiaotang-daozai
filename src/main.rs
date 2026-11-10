@@ -25,6 +25,8 @@ struct Shell {
     resource_at:PollClock,
     guard_notified:bool,
     media_enabled: smtc::Poller,
+    /// 刚点过播放控制或音量时，短时间内按最快频率采样，让按钮状态及时回显。
+    media_fast_until: Option<Instant>,
     placed: bool,
     placement_at: PollClock,
     placement_scale: f32,
@@ -148,6 +150,7 @@ impl Shell {
             resource_at:PollClock::default(),
             guard_notified:false,
             media_enabled,
+            media_fast_until: None,
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
@@ -310,6 +313,8 @@ impl eframe::App for Shell {
             self.app.alert("岛仔已暂停音乐功能","检测到资源占用异常，已暂停读取音乐信息和歌词。重启岛仔即可恢复；诊断记录在数据目录的 diagnostics 文件夹。",0,false);
         }
         self.media_enabled.store(self.app.settings.visible_pages[0] && !guarded,std::sync::atomic::Ordering::Relaxed);
+        if self.media_fast_until.is_some_and(|until|Instant::now()>=until){self.media_fast_until=None;}
+        self.media_enabled.set_interval(if self.media_fast_until.is_some(){smtc::POLL_FAST}else{self.app.media_poll_interval()});
         // 设置里改了岛体大小：下一帧起主窗口按新倍率栅格化，定位逻辑随像素比变化同步调整画布。
         #[cfg(windows)] eframe::set_root_viewport_scale(self.app.settings.island_scale());
         #[cfg(windows)]
@@ -524,6 +529,7 @@ impl eframe::App for Shell {
         for cmd in out.cmds {
             match cmd {
                 Cmd::Media(t) => {
+                    self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));self.media_enabled.set_interval(smtc::POLL_FAST);
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
                     let netease=source.eq_ignore_ascii_case("cloudmusic.exe");
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
@@ -532,6 +538,7 @@ impl eframe::App for Shell {
                     }
                 }
                 Cmd::MusicVolume(command,source)=>{
+                    self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));self.media_enabled.set_interval(smtc::POLL_FAST);
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
                     match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(command,source.clone())){
                         Ok(Some(rx))=>self.music_volume_rx=Some((source,rx)),

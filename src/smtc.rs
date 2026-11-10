@@ -661,9 +661,24 @@ impl MediaMemory {
 
 pub struct Poller {
     enabled:Arc<std::sync::atomic::AtomicBool>,stop:Arc<std::sync::atomic::AtomicBool>,worker:Option<std::thread::JoinHandle<()>>,
+    interval_ms:Arc<std::sync::atomic::AtomicU32>,
 }
+/// 看着音乐页或刚点过播放控制时的采样间隔，与改版前一致。
+pub const POLL_FAST:Duration=Duration::from_millis(250);
+/// 岛上收起显示歌词时：换歌、暂停最多晚半秒，歌词进度由本地时钟推算，不受影响。
+pub const POLL_LYRICS:Duration=Duration::from_millis(500);
+/// 其他时候只需跟上歌名和播放状态。
+pub const POLL_BACKGROUND:Duration=Duration::from_millis(1000);
+/// 没有任何播放器在放时，按请求间隔的 4 倍再放慢，限制在 1～2 秒。
+fn idle_interval(requested:u32)->u32{requested.saturating_mul(4).clamp(1000,2000)}
 impl Poller {
     pub fn store(&self,enabled:bool,order:std::sync::atomic::Ordering){self.enabled.store(enabled,order);}
+    /// 调整采样间隔；变快时立即唤醒采样线程补查一次，展开音乐页或点控制按钮后马上看到最新状态。
+    pub fn set_interval(&self,interval:Duration){
+        let ms=interval.as_millis().clamp(50,10_000) as u32;
+        let previous=self.interval_ms.swap(ms,std::sync::atomic::Ordering::Relaxed);
+        if ms<previous {if let Some(worker)=&self.worker{worker.thread().unpark();}}
+    }
 }
 impl Drop for Poller {
     fn drop(&mut self){
@@ -677,6 +692,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
     let enabled=Arc::new(std::sync::atomic::AtomicBool::new(true));
     let active=enabled.clone();
     let stop=Arc::new(std::sync::atomic::AtomicBool::new(false));let stopped=stop.clone();
+    let interval_ms=Arc::new(std::sync::atomic::AtomicU32::new(POLL_FAST.as_millis() as u32));let requested=interval_ms.clone();
     let worker=crate::resources::POLLER.spawn(move || {
         let _apartment=init_winrt();
         let mut artwork=ArtworkCache::default();
@@ -710,7 +726,8 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             #[cfg(windows)]
             netease.fill_artwork(&mut np);
             playback_clock.update(&mut np);
-            if np.title.is_empty() {
+            let idle=np.title.is_empty();
+            if idle {
                 artwork.clear(true);
             }
             if let Ok(mut cur) = state.lock() {
@@ -720,10 +737,11 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
                 *cur = np;
                 if changed{ctx.request_repaint();}
             }
-            std::thread::park_timeout(Duration::from_millis(250));
+            let wait=requested.load(std::sync::atomic::Ordering::Relaxed);
+            std::thread::park_timeout(Duration::from_millis(if idle{idle_interval(wait)}else{wait}.into()));
         }
     });
-    Poller{enabled,stop,worker}
+    Poller{enabled,stop,worker,interval_ms}
 }
 
 #[cfg(test)]
@@ -902,6 +920,14 @@ mod tests {
             }
         }
         assert_eq!(threads.len(),1,"连续切歌应复用同一个读取线程");
+    }
+
+    #[test]
+    fn idle_sampling_slows_down_but_stays_within_two_seconds(){
+        assert_eq!(idle_interval(POLL_FAST.as_millis() as u32),1000);
+        assert_eq!(idle_interval(POLL_LYRICS.as_millis() as u32),2000);
+        assert_eq!(idle_interval(POLL_BACKGROUND.as_millis() as u32),2000);
+        assert_eq!(idle_interval(u32::MAX),2000);
     }
 
     #[test]

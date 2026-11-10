@@ -1391,6 +1391,13 @@ impl App {
         self.todo_ime_frame=false;
     }
 
+    /// 外壳据此调整音乐采样频率：看着音乐页时最快，收起显示歌词次之，其余只需跟上歌名和播放状态。
+    pub fn media_poll_interval(&self)->std::time::Duration {
+        if self.open && self.page==0 {crate::smtc::POLL_FAST}
+        else if self.island_lyrics_active() && !self.open {crate::smtc::POLL_LYRICS}
+        else {crate::smtc::POLL_BACKGROUND}
+    }
+
     fn island_lyrics_active(&self)->bool {
         if self.side() {return false;}
         self.settings.island_lyrics && self.settings.visible_pages[0] && self.media.is_music()
