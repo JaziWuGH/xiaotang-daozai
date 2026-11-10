@@ -892,7 +892,8 @@ impl App {
             let value=item.code.as_deref().unwrap_or("••••••");
             c.text(46.0,51.0,"验证码",10.5,W::Regular,theme::GRAY,H::Left);
             c.text(166.0,51.0,&c.fit(&item.from,10.5,W::Semibold,78.0),10.5,W::Semibold,theme::WHITE,H::Right);
-            c.text(46.0,75.0,value,23.0,W::Bold,theme::GREEN,H::Left);
+            let code_size=23.0*(120.0/c.text_w(value,23.0,W::Bold)).min(1.0);
+            c.text(46.0,75.0,value,code_size,W::Bold,theme::GREEN,H::Left);
             c.text(46.0,91.0,&c.fit(&item.subject,10.5,W::Regular,120.0),10.5,W::Regular,Color32::from_gray(190),H::Left);
             c.text(46.0,108.0,if hidden{"已隐藏 · 点击查看"}else{"点击复制"},10.5,W::Regular,theme::DIM,H::Left);
             c.text(166.0,108.0,item.time.rsplit(' ').next().unwrap_or(&item.time),10.0,W::Regular,theme::GRAY,H::Right);
