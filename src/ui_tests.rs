@@ -5866,6 +5866,26 @@ fn qq_unknown_reminders_survive_viewing_other_accounts(){
 }
 
 #[test]
+fn messenger_window_replacement_removes_stale_banner_targets_without_clearing_other_accounts(){
+    use crate::app::{Cmd,Messenger,Unread};
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for source in Messenger::ALL{
+        let mut h=H::new();h.app.settings.read_notifications=true;h.app.settings.wechat_notifications=true;
+        let old=Unread{source,pid:100,window:11};let other=Unread{source,pid:200,window:22};let current=Unread{window:33,..old};
+        let receive=|app:&mut App,unread:Unread|match source{
+            Messenger::Wechat=>app.receive_messenger_reminder(unread),
+            Messenger::Qq=>app.receive_notification_from("QQ".into(),"QQ".into(),"有新消息".into(),Some(unread)),
+        };
+        receive(&mut h.app,old);h.frame(vec![]);receive(&mut h.app,other);receive(&mut h.app,current);
+        assert_eq!(h.app.pending_messengers,[current,other]);
+        assert!(h.app.alerts.iter().chain(h.app.notice.iter()).all(|alert|alert.unread!=Some(old)),"窗口被新消息替换后，横幅不能继续引用已经失效的目标");
+        assert!(h.app.alerts.iter().chain(h.app.notice.iter()).any(|alert|alert.unread==Some(other)),"其他账号的横幅必须保留");
+        h.app.discard_unread(other);for _ in 0..45{h.frame(vec![]);}
+        h.click_text("查看");assert!(h.cmds.contains(&Cmd::ViewMessenger(current)));
+    }
+}
+
+#[test]
 fn qq_bound_notices_open_their_original_account_and_clear_independently(){
     use crate::app::{Cmd,Messenger,Unread};
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
@@ -5903,7 +5923,7 @@ fn qq_expired_unidentified_notice_can_be_reopened_and_explicitly_cleared(){
     let unread=Unread::of(Messenger::Qq);
     h.app.receive_notification("QQ".into(),"QQ".into(),"测试消息".into());
     for _ in 0..360{h.frame(vec![]);}assert!(h.app.notice.is_none());
-    h.app.reveal_qq_notice(unread);for _ in 0..45{h.frame(vec![]);}
+    h.app.reveal_messenger_notice(unread);for _ in 0..45{h.frame(vec![]);}
     h.click_text("关闭");h.frame(vec![]);assert!(h.app.pending_messengers.is_empty());
 }
 

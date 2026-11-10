@@ -270,18 +270,18 @@ pub fn browser_at_top(island:HWND,settings:&crate::model::Settings)->Option<bool
 pub enum Incoming {
     Revoked,
     Status(String),
-    Message(String, String, String, Option<crate::wechat::QqTarget>),
+    Message(String, String, String, Option<crate::messenger::Target>),
 }
-#[path="qq_toast_source.rs"]
-mod qq_toast_source;
+#[path="toast_source.rs"]
+mod toast_source;
 
-fn notification_identity(n:&UserNotification, number:u32, created:i64, known_qq:bool)->(String,String){
-    if known_qq{return ("QQ".into(),"QQ".into());}
+fn notification_identity(n:&UserNotification,number:u32,created:i64,known:Option<crate::messenger::Messenger>)->(String,String){
+    use crate::messenger::Messenger;
     let info=n.AppInfo().ok();
     let id=info.as_ref().and_then(|app|app.AppUserModelId().ok()).map(|id|id.to_string()).unwrap_or_default();
-    if id.eq_ignore_ascii_case("QQ") || (id.is_empty() && qq_toast_source::matches(number,created)){
-        return ("QQ".into(),"QQ".into());
-    }
+    let client=if !id.is_empty(){Messenger::from_notification_id(&id)}
+        else{known.or_else(||toast_source::sender(number,created).and_then(|id|Messenger::from_notification_id(&id)))};
+    if let Some(client)=client{return (client.name().into(),client.adapter().notification_id.into());}
     let name=info.and_then(|app|app.DisplayInfo().ok()).and_then(|display|display.DisplayName().ok())
         .map(|name|name.to_string()).filter(|name|!name.trim().is_empty()).unwrap_or_else(||"Windows 通知".into());
     let id=if id.is_empty(){name.clone()}else{id};
@@ -299,10 +299,6 @@ fn notification_body(n: &UserNotification) -> Result<String> {
     }
     Ok(parts.join(" · "))
 }
-fn is_wechat_toast(app:&str,id:&str)->bool{
-    ["微信","WeChat","Weixin"].iter().any(|name|app.trim().eq_ignore_ascii_case(name))
-        || ["WeChat","Weixin","Tencent.WeChat","Tencent.Weixin"].iter().any(|name|id.eq_ignore_ascii_case(name))
-}
 /// 停止信号独立于消息队列，断开后结束等待，不再读取通知。
 pub struct Notifications {
     incoming: Receiver<Incoming>,
@@ -314,36 +310,37 @@ impl Notifications {
 impl Drop for Notifications {fn drop(&mut self){let _=self.stop.send(());}}
 
 #[derive(Clone,Copy,PartialEq,Eq)]
-struct ToastVersion { created:i64, qq_body:Option<u64> }
+struct ToastVersion { created:i64, client:Option<crate::messenger::Messenger>, body:Option<u64> }
 impl ToastVersion {
-    fn new(created:i64,qq_body:Option<&str>)->Self{
-        Self{created,qq_body:qq_body.map(|body|{let mut hash=std::collections::hash_map::DefaultHasher::new();body.hash(&mut hash);hash.finish()})}
+    fn new(created:i64,client:Option<crate::messenger::Messenger>,body:Option<&str>)->Self{
+        Self{created,client,body:body.map(|body|{let mut hash=std::collections::hash_map::DefaultHasher::new();body.hash(&mut hash);hash.finish()})}
     }
 }
 #[derive(Default)]
 struct NotificationBaseline { previous: Option<HashMap<u32,ToastVersion>> }
 impl NotificationBaseline {
     fn unchanged_other(&self,id:u32,created:i64)->Option<ToastVersion>{
-        self.previous.as_ref()?.get(&id).copied().filter(|old|old.created==created && old.qq_body.is_none())
+        self.previous.as_ref()?.get(&id).copied().filter(|old|old.created==created && old.body.is_none())
     }
     fn changed(&self,id:u32,version:ToastVersion)->bool{
         self.previous.as_ref().is_some_and(|old|old.get(&id)!=Some(&version))
     }
 }
 
-fn qq_channel_status()->String{
+fn channel_status(client:crate::messenger::Messenger)->String{
     use windows::UI::Notifications::{NotificationSetting,ToastNotificationManager};
-    match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from("QQ")).and_then(|notifier|notifier.Setting()){
-        Ok(NotificationSetting::Enabled)=>"QQ 系统通知通道可用".into(),
-        Ok(NotificationSetting::DisabledForApplication)=>"QQ 系统通知已关闭，请在 Windows 通知设置中开启后重新连接".into(),
+    let name=client.name();
+    match ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(client.adapter().notification_id)).and_then(|notifier|notifier.Setting()){
+        Ok(NotificationSetting::Enabled)=>format!("{name} 系统通知通道可用"),
+        Ok(NotificationSetting::DisabledForApplication)=>format!("{name} 系统通知已关闭，请在 Windows 通知设置中开启后重新连接"),
         Ok(NotificationSetting::DisabledForUser)=>"Windows 系统通知已关闭，请开启后重新连接".into(),
         Ok(NotificationSetting::DisabledByGroupPolicy)=>"系统策略禁止通知".into(),
-        _=>"QQ 系统通知通道未就绪，请检查 QQ 安装和通知设置后重新连接".into(),
+        _=>format!("{name} 系统通知通道未就绪，请检查安装和通知设置后重新连接"),
     }
 }
 
 /// 必须由窗口线程发起权限请求，后台仅读取新增或更新的通知。
-pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> {
+pub fn connect(ctx:eframe::egui::Context,filter:crate::messenger::NotificationFilter) -> Result<Notifications> {
     let listener = UserNotificationListener::Current()?;
     let request = listener.RequestAccessAsync()?;
     let (tx, rx) = mpsc::sync_channel(32);
@@ -365,9 +362,10 @@ pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> 
                 return Ok(());
             }
             let listener = UserNotificationListener::Current()?;
-            let qq_status=qq_channel_status();
+            let channels=crate::messenger::Messenger::ALL.into_iter().filter(|client|client.adapter().capture==crate::messenger::Capture::SystemToast)
+                .filter(|client|filter.allows(client.adapter().notification_id)).map(channel_status).collect::<Vec<_>>().join("\n");
             let mut baseline=NotificationBaseline::default();
-            let mut qq_accounts=crate::wechat::QqAccounts::default();qq_accounts.sample();
+            let mut accounts=crate::messenger::ToastAccounts::default();accounts.sample();
             let mut last_status=String::new();
             loop {
                 if stopped.try_recv()!=Err(mpsc::TryRecvError::Empty){return Ok(());}
@@ -377,7 +375,7 @@ pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> 
                     return Ok(());
                 }
                 let items=listener.GetNotificationsAsync(NotificationKinds::Toast)?.get()?;
-                qq_accounts.sample();
+                accounts.sample();
                 let mut current=HashMap::new();
                 let mut messages=Vec::new();
                 for i in 0..items.Size()? {
@@ -385,28 +383,29 @@ pub fn connect(ctx:eframe::egui::Context,qq_only:bool) -> Result<Notifications> 
                     let (Ok(number),Ok(created))=(n.Id(),n.CreationTime()) else{continue};
                     let created=created.UniversalTime;
                     if let Some(old)=baseline.unchanged_other(number,created){current.insert(number,old);continue;}
-                    let known_qq=baseline.previous.as_ref().and_then(|old|old.get(&number)).is_some_and(|old|old.created==created && old.qq_body.is_some());
-                    let (app,id)=notification_identity(&n,number,created,known_qq);
+                    let known=baseline.previous.as_ref().and_then(|old|old.get(&number)).filter(|old|old.created==created).and_then(|old|old.client);
+                    let (app,id)=notification_identity(&n,number,created,known);
                     // 微信只走任务栏事件，即使客户端同时发送系统通知也不读取其正文。
-                    if (qq_only && id!="QQ") || is_wechat_toast(&app,&id){current.insert(number,ToastVersion::new(created,None));continue;}
-                    let qq=id=="QQ";
-                    // QQ 可能原地更新同一条通知；其他应用的启动历史不需要读取正文。
-                    let body=if qq || baseline.previous.is_some(){notification_body(&n).unwrap_or_default()}else{String::new()};
-                    let version=ToastVersion::new(created,qq.then_some(body.as_str()));
+                    let client=crate::messenger::Messenger::from_notification_id(&id);
+                    if !filter.allows(&id) || crate::messenger::ignores_system_toast(&app,&id){current.insert(number,ToastVersion::new(created,client,None));continue;}
+                    let tracked=client.is_some_and(|client|client.adapter().capture==crate::messenger::Capture::SystemToast);
+                    // 已适配客户端同时检查正文变化；其他应用的启动历史不需要读取正文。
+                    let body=if tracked || baseline.previous.is_some(){notification_body(&n).unwrap_or_default()}else{String::new()};
+                    let version=ToastVersion::new(created,client,tracked.then_some(body.as_str()));
                     current.insert(number,version);
                     if baseline.changed(number,version){
-                        let body=if qq && body.trim().is_empty(){"有新消息".into()}else{body};
-                        let target=if qq{qq_accounts.target(number,created)}else{None};
+                        let body=if tracked && body.trim().is_empty(){"有新消息".into()}else{body};
+                        let target=client.filter(|_|tracked).and_then(|client|accounts.target(client,number,created));
                         if !body.trim().is_empty(){messages.push((created,app,id,body,target));}
                     }
                 }
-                qq_accounts.retain(|id,created|current.get(&id).is_some_and(|item|item.created==created));
+                accounts.retain(|client,id,created|current.get(&id).is_some_and(|item|item.created==created && item.client==Some(client)));
                 baseline.previous=Some(current);
                 messages.sort_by_key(|item|item.0);
                 for (_,app,id,body,target) in messages {
                     if !send(Incoming::Message(app,id,body,target)){return Ok(());}
                 }
-                let status=if qq_only{format!("仅监听 QQ · {qq_status}")}else{format!("正在监听 Windows 通知 · 当前可见 {} 条\n{qq_status}",items.Size()?)};
+                let status=match filter{crate::messenger::NotificationFilter::Only(client)=>format!("仅监听 {} · {channels}",client.name()),crate::messenger::NotificationFilter::All=>format!("正在监听 Windows 通知 · 当前可见 {} 条\n{channels}",items.Size()?)};
                 if status!=last_status {
                     if !send(Incoming::Status(status.clone())){return Ok(());}
                     last_status=status;
@@ -493,12 +492,12 @@ mod tests {
     #[test]
     fn notifications_skip_history_but_detect_reused_ids_and_updated_content(){
         let mut baseline=NotificationBaseline::default();
-        let first=ToastVersion::new(10,Some("第一条"));
+        let first=ToastVersion::new(10,Some(crate::messenger::Messenger::Qq),Some("第一条"));
         assert!(!baseline.changed(1,first));
-        baseline.previous=Some(HashMap::from([(1,first),(2,ToastVersion::new(10,None))]));
+        baseline.previous=Some(HashMap::from([(1,first),(2,ToastVersion::new(10,None,None))]));
         assert!(!baseline.changed(1,first));
-        assert!(baseline.changed(1,ToastVersion::new(10,Some("第二条"))));
-        assert!(baseline.changed(1,ToastVersion::new(11,Some("第一条"))));
+        assert!(baseline.changed(1,ToastVersion::new(10,Some(crate::messenger::Messenger::Qq),Some("第二条"))));
+        assert!(baseline.changed(1,ToastVersion::new(11,Some(crate::messenger::Messenger::Qq),Some("第一条"))));
         assert!(baseline.unchanged_other(2,10).is_some());
         assert!(baseline.unchanged_other(1,10).is_none());
         assert!(baseline.unchanged_other(2,11).is_none());

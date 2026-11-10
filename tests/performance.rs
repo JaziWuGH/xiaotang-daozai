@@ -35,7 +35,7 @@ fn background_service_sample(){
         "media"=>{daozai::smtc::spawn_poller(media.clone(),context);},
         "bluetooth"=>bluetooth=Some(daozai::bt::spawn()),
         "system"=>system=Some(daozai::system::observe(context,Default::default(),None)),
-        "notifications"=>notifications=Some(daozai::system::connect(context,false).expect("已有通知权限")),
+        "notifications"=>notifications=Some(daozai::system::connect(context,daozai::messenger::NotificationFilter::All).expect("已有通知权限")),
         "mail"=>{
             let accounts=daozai::mail::load_accounts().into_iter().filter(|a|a.enabled).take(1).collect::<Vec<_>>();
             assert_eq!(accounts.len(),1,"需要一个已配置邮箱");

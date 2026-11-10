@@ -11,6 +11,7 @@ pub mod poll_clock;
 pub mod resources;
 pub mod anim;
 pub mod app;
+pub mod messenger;
 pub mod child_process;
 mod settings_window;
 pub mod bt;
