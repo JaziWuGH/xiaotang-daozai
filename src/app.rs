@@ -22,7 +22,14 @@ use std::path::PathBuf;
 // ---------- 几何（逻辑点；原版 125% 截图 ÷ 1.25） ----------
 pub const PW: f32 = 419.0; // 展开面板宽
 pub const PH: f32 = 140.0; // 展开面板高
-pub(crate) const CALENDAR_PAGE: usize = 7;
+pub const MUSIC_PAGE: usize = 0;
+pub const FOCUS_PAGE: usize = 1;
+pub const WATER_PAGE: usize = 2;
+pub const SHELF_PAGE: usize = 3;
+pub const TODO_PAGE: usize = 4;
+pub const MAIL_PAGE: usize = 5;
+pub const QUOTA_PAGE: usize = 6;
+pub const CALENDAR_PAGE: usize = 7;
 pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
@@ -871,7 +878,7 @@ impl App {
 
     /// 收信服务推来的事件；历史邮件静默，新邮件进入通知队列。
     pub fn mail_event(&mut self, ev: mail::Event) {
-        let watching=|email:&str|self.settings.mail_enabled && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
+        let watching=|email:&str|self.mail_active() && self.mail.accounts.iter().any(|a|a.enabled && a.email.eq_ignore_ascii_case(email));
         match ev {
             mail::Event::Managed(done)=>self.mail_managed(done),
             mail::Event::Status { account, status } => {
@@ -898,7 +905,7 @@ impl App {
                 self.mail.recent.truncate(60);
                 if new{self.mail.manage.next_refresh=0.0;}
                 self.mail.privacy.retain(self.mail.recent.iter().chain(&self.mail.manage.trash).chain(&self.mail.reading));
-                if new && self.settings.mail_enabled {
+                if new && self.mail_active() {
                     let item=&self.mail.recent[0];
                     let body=format!("{} · {}",item.from,item.subject);
                     let body=item.code.as_ref().map(|code|crate::mail_privacy::mask(&body,code)).unwrap_or(body);
@@ -1022,6 +1029,12 @@ impl App {
     pub fn calendar_configs(&self) -> Vec<calendar::Config> {
         if self.calendar.feeds.is_empty() {self.calendar.config.clone().into_iter().collect()}
         else {self.calendar.feeds.iter().map(|feed|feed.config.clone()).collect()}
+    }
+
+    /// 等价于 `calendar_configs()==known`，外壳每帧调用，不复制配置。
+    pub fn calendar_configs_match(&self, known: &[calendar::Config]) -> bool {
+        if self.calendar.feeds.is_empty() {known==self.calendar.config.as_slice()}
+        else {known.len()==self.calendar.feeds.len() && known.iter().zip(&self.calendar.feeds).all(|(known,feed)|*known==feed.config)}
     }
 
     pub(crate) fn refresh_calendar_month_status(&mut self) {
@@ -1306,10 +1319,23 @@ impl App {
         self.page
     }
 
+    // ---------- 功能模块：页面开关即模块开关，关闭后页面隐藏、后台同步和提醒一并停止 ----------
+
+    /// 模块是否开启（与「页面管理」里的页面开关一致）。
+    pub fn module_on(&self,page:usize)->bool {self.settings.visible_pages.get(page).copied().unwrap_or(false)}
+    /// 收信线程是否应运行：邮箱模块开启且打开了「新邮件提醒」。
+    pub fn mail_active(&self)->bool {self.module_on(MAIL_PAGE) && self.settings.mail_enabled}
+    /// 剪贴板监听是否应运行：置物架模块开启且打开了「记录剪贴板」。
+    pub fn clipboard_active(&self)->bool {self.module_on(SHELF_PAGE) && self.settings.clipboard_history}
+    /// 额度查询是否应运行：AI 额度模块开启且打开了「开启 AI 额度」。
+    pub fn quota_active(&self)->bool {self.module_on(QUOTA_PAGE) && self.quota.config.enabled}
+
     pub(crate) fn set_page_visible(&mut self,page:usize,visible:bool) {
         if !visible && self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1
             && self.settings.visible_pages[page] { return; }
         self.settings.visible_pages[page]=visible;
+        // 关掉专注模块时一并停止正在进行的计时，避免页面不可见却到点弹提醒。
+        if !visible && page==FOCUS_PAGE {self.pomo.running=false;}
         if !self.settings.visible_pages[self.page] {
             if let Some(first)=self.settings.page_order.iter().copied().find(|page|self.settings.visible_pages[*page]) { self.go(first,1.0); }
         }
@@ -1393,7 +1419,7 @@ impl App {
 
     /// 外壳据此调整音乐采样频率：看着音乐页时最快，收起显示歌词次之，其余只需跟上歌名和播放状态。
     pub fn media_poll_interval(&self)->std::time::Duration {
-        if self.open && self.page==0 {crate::smtc::POLL_FAST}
+        if self.open && self.page==MUSIC_PAGE {crate::smtc::POLL_FAST}
         else if self.island_lyrics_active() && !self.open {crate::smtc::POLL_LYRICS}
         else {crate::smtc::POLL_BACKGROUND}
     }
@@ -2578,6 +2604,7 @@ impl App {
             self.water_ml = self.water.drunk_ml as f32;
             self.water_ring.snap(self.water.percent() / 100.0);
         }
+        if self.pomo.running && !self.module_on(FOCUS_PAGE) {self.pomo.running=false;}
         if self.pomo.running {
             self.pomo.remaining -= elapsed;
             if self.pomo.remaining <= 0.0 {
@@ -2599,12 +2626,13 @@ impl App {
         self.reset_spin.step(dt);
         self.todo_pop.step(dt);
 
-        if self.water.remind && self.water.percent() < 100.0 && self.water_hours(env.hour() as u32) && self.t - self.last_reminder >= self.settings.water_minutes as f64 * 60.0 {
+        if self.module_on(WATER_PAGE) && self.water.remind && self.water.percent() < 100.0 && self.water_hours(env.hour() as u32) && self.t - self.last_reminder >= self.settings.water_minutes as f64 * 60.0 {
             self.last_reminder = self.t;
             self.alert("喝水时间到了", format!("休息一下，喝 {} ml 水吧", self.settings.serving_ml), 2, true);
         }
         let now = format!("{} {}", env.today, env.clock.get(..5).unwrap_or("00:00"));
-        let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| item.reminder_due(&now)).map(|(i,item)| (i,item.text.clone())).collect();
+        let todo_on=self.module_on(TODO_PAGE);
+        let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| todo_on && item.reminder_due(&now)).map(|(i,item)| (i,item.text.clone())).collect();
         for (i,text) in due { self.todos.items[i].mark_reminded(&now); self.todos.save(); self.alert("待办到时间了", text, 4, true); }
         // v0.5.5 会议提醒：.ics 里的开始时间，默认提前 15 分钟（可设 5/15/30）。
         // v0.5.6 起日历（CalDAV）事件走同一套：同一场会（UID + DTSTART）只提醒一次，
@@ -2613,7 +2641,9 @@ impl App {
         let now_ts = chrono::Local::now().timestamp();
         let mut picks = Vec::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for entry in &self.calendar.local {
+        // 会议提醒点开后进入日程页；日程模块关闭时不再提醒（含邮件邀请）。
+        let calendar_on=self.module_on(CALENDAR_PAGE);
+        for entry in self.calendar.local.iter().filter(|_|calendar_on) {
             let Some(at)=entry.reminder_at() else{continue;};
             let key=calendar::dedupe_key(&entry.event);
             let cutoff=if entry.event.all_day{at+60}else{entry.event.start+60};
@@ -2621,7 +2651,7 @@ impl App {
                 picks.push((key,entry.event.clone(),"本机日程".into(),CALENDAR_PAGE));
             }
         }
-        for (m,provider) in self.calendar_work_events(None) {
+        for (m,provider) in self.calendar_work_events(None).into_iter().filter(|_|calendar_on) {
             let left = m.start - now_ts;
             let key = calendar::dedupe_key(m);
             if !m.all_day && left <= lead && left > -60 && !self.mail.fired.contains(&key) && seen.insert(key.clone()) {
@@ -2629,7 +2659,7 @@ impl App {
                 picks.push((key, m.clone(), source.to_string(), CALENDAR_PAGE));
             }
         }
-        if self.settings.mail_enabled {
+        if calendar_on && self.mail_active() {
             for m in self.mail.recent.iter().filter_map(|m| m.meeting.as_ref()).filter(|m|!self.mail_event_ignored(m)) {
                 let left = m.start - now_ts;
                 let key = calendar::dedupe_key(m);
@@ -2650,8 +2680,8 @@ impl App {
         self.remind_t.target = if self.water.remind { 1.0 } else { 0.0 };
         self.remind_t.step(dt);
         // 剪贴板记录开关：关闭时同时清掉未固定的记录。
-        if self.clipboard.is_enabled() != self.settings.clipboard_history {
-            self.clipboard.set_enabled(self.settings.clipboard_history);
+        if self.clipboard.is_enabled() != self.clipboard_active() {
+            self.clipboard.set_enabled(self.clipboard_active());
         }
         self.shelf_scroll.target = self.shelf_first as f32;
         self.shelf_scroll.step(dt);

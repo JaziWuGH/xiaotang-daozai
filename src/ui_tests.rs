@@ -6787,3 +6787,59 @@ fn media_sampling_is_fast_only_while_the_music_page_is_watched(){
     h.app.page=1;
     assert_eq!(h.app.media_poll_interval(),crate::smtc::POLL_BACKGROUND,"展开其他页面时不必按最快频率采样");
 }
+
+#[test]
+fn calendar_signature_matches_without_copying(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let h=H::new();
+    let known=h.app.calendar_configs();
+    assert!(h.app.calendar_configs_match(&known));
+    assert_eq!(h.app.calendar_configs_match(&[]),known.is_empty());
+}
+
+fn raised(h:&H,title:&str)->bool{
+    h.app.alerts.iter().chain(h.app.notice.as_ref()).any(|alert|alert.title==title)
+}
+
+#[test]
+fn closed_modules_stop_their_reminders_and_timers(){
+    use crate::app::{FOCUS_PAGE,TODO_PAGE,WATER_PAGE};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for open in [true,false] {
+        let mut h=H::new();h.frame(vec![]);
+        h.app.pomo.running=true;h.app.pomo.remaining=0.5;
+        for page in [FOCUS_PAGE,TODO_PAGE,WATER_PAGE] {h.app.set_page_visible(page,open);}
+        h.app.water.remind=true;h.app.water.drunk_ml=0;h.app.last_reminder=h.t-1e6;
+        h.app.todos.items.push(crate::model::TodoItem{text:"交周报".into(),due:Some("2026-10-28 09:40".into()),..Default::default()});
+        if !open {assert!(!h.app.pomo.running,"关闭专注模块时立即停止计时");h.app.pomo.running=true;}
+        for _ in 0..60 {h.frame(vec![]);}
+        assert_eq!(raised(&h,"喝水时间到了"),open,"饮水模块开启={open}");
+        assert_eq!(raised(&h,"待办到时间了"),open,"待办模块开启={open}");
+        assert_eq!(raised(&h,"专注计时"),open,"专注模块开启={open}");
+        if !open {assert!(!h.app.pomo.running && h.app.todos.items[0].due.is_some() && !h.app.todos.items[0].reminded,"关闭期间不消耗提醒，重新开启后仍会提醒");}
+    }
+}
+
+#[test]
+fn background_services_follow_the_module_switch(){
+    use crate::app::{MAIL_PAGE,QUOTA_PAGE,SHELF_PAGE};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.mail_enabled=true;h.app.settings.clipboard_history=true;h.app.quota.config.enabled=true;
+    assert!(h.app.mail_active() && h.app.clipboard_active() && h.app.quota_active());
+    for page in [MAIL_PAGE,QUOTA_PAGE,SHELF_PAGE] {h.app.set_page_visible(page,false);}
+    assert!(!h.app.mail_active() && !h.app.clipboard_active() && !h.app.quota_active(),"页面开关就是模块总开关");
+    h.frame(vec![]);
+    assert!(!h.app.clipboard.is_enabled(),"置物架关闭后不再记录剪贴板");
+    for page in [MAIL_PAGE,QUOTA_PAGE,SHELF_PAGE] {h.app.set_page_visible(page,true);}
+    h.app.settings.mail_enabled=false;h.app.settings.clipboard_history=false;h.app.quota.config.enabled=false;
+    assert!(!h.app.mail_active() && !h.app.clipboard_active() && !h.app.quota_active(),"模块内的开关仍然有效");
+}
+
+#[test]
+fn every_module_settings_tab_maps_to_its_page(){
+    let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
+    let mut pages:Vec<_>=(0..titles.len()).filter_map(crate::extras::settings_tab_module).collect();
+    for tab in 0..titles.len() {
+        if let Some(page)=crate::extras::settings_tab_module(tab) {assert!(crate::app::PAGE_NAMES[page].chars().next()==titles[tab].chars().next(),"{} ↔ {}",titles[tab],crate::app::PAGE_NAMES[page]);}
+    }
+    pages.sort();assert_eq!(pages,(0..8).collect::<Vec<_>>(),"八个功能页面各有一个设置分页");
+}
