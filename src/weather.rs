@@ -81,6 +81,11 @@ pub struct Snapshot {
     pub day: bool,
     pub high: Option<f32>,
     pub low: Option<f32>,
+    /// 今日日出与日落（当地时间 HH:MM）；旧缓存或接口缺失时为空。
+    #[serde(default)]
+    pub sunrise: Option<String>,
+    #[serde(default)]
+    pub sunset: Option<String>,
     pub days: Vec<Day>,
     /// 取得这份数据的 Unix 时间（秒）。
     pub at: i64,
@@ -135,7 +140,7 @@ pub fn fetch(agent: &ureq::Agent, city: &str) -> Result<Snapshot, String> {
         query.append_pair("latitude", &format!("{:.4}", position.lat));
         query.append_pair("longitude", &format!("{:.4}", position.lon));
         query.append_pair("current", "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m");
-        query.append_pair("daily", "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max");
+        query.append_pair("daily", "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset");
         query.append_pair("timezone", "auto");
         query.append_pair("forecast_days", "4");
     }
@@ -175,6 +180,9 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
         });
     }
     if days.is_empty() { return Err("天气数据不完整".into()); }
+    // timezone=auto 时 daily.sunrise/sunset 就是当地时间，直接截 HH:MM。
+    let hhmm = |list: Option<&Vec<Value>>| list.and_then(|items| items.get(0)).and_then(Value::as_str)
+        .and_then(|s| s.get(11..16)).map(str::to_string);
     Ok(Snapshot {
         place: place.to_string(),
         temp,
@@ -185,6 +193,8 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
         day: current["is_day"].as_u64().unwrap_or(1) != 0,
         high: days.first().map(|d| d.high),
         low: days.first().map(|d| d.low),
+        sunrise: hhmm(daily["sunrise"].as_array()),
+        sunset: hhmm(daily["sunset"].as_array()),
         days,
         at: chrono::Utc::now().timestamp(),
     })
@@ -284,7 +294,9 @@ mod tests {
                 "weather_code": [51, 2, 2, 61],
                 "temperature_2m_max": [15.2, 14.5, 17.4, 19.2],
                 "temperature_2m_min": [6.8, 4.7, 5.0, 8.2],
-                "precipitation_probability_max": [60, 0, 0, 25]
+                "precipitation_probability_max": [60, 0, 0, 25],
+                "sunrise": ["2026-11-09T06:52", "2026-11-10T06:53", "2026-11-11T06:54", "2026-11-12T06:55"],
+                "sunset": ["2026-11-09T17:21", "2026-11-10T17:20", "2026-11-11T17:19", "2026-11-12T17:18"]
             }
         })
     }
@@ -305,6 +317,15 @@ mod tests {
         assert_eq!(s.days[1].label, "明天");
         assert_eq!(s.days[2].label, "周三");
         assert_eq!(s.days[3].rain, 25);
+        assert_eq!(s.sunrise.as_deref(), Some("06:52"), "应截取日出时间的 HH:MM");
+        assert_eq!(s.sunset.as_deref(), Some("17:21"));
+    }
+
+    #[test]
+    fn tolerates_payload_without_sunrise() {
+        let s = parse("杭州", &json!({"current": {"temperature_2m": 3.0}, "daily": {"time": ["2026-11-09"]}})).unwrap();
+        assert_eq!(s.sunrise, None);
+        assert_eq!(s.sunset, None, "旧缓存与新接口都应容忍缺日出日落");
     }
 
     #[test]
@@ -350,7 +371,7 @@ mod tests {
     fn weather_local_probe(){
         let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
         let auto = fetch(&agent, "").expect("自动定位失败");
-        println!("auto_place={} temp={:.1} code={} days={:?}", auto.place, auto.temp, auto.code,
+        eprintln!("auto_place={} temp={:.1} code={} sunrise={:?} sunset={:?} days={:?}", auto.place, auto.temp, auto.code, auto.sunrise, auto.sunset,
             auto.days.iter().map(|d| (&d.label, d.high, d.low, d.rain)).collect::<Vec<_>>());
         let named = fetch(&agent, "杭州").expect("按城市查询失败");
         println!("named_place={} temp={:.1}", named.place, named.temp);
