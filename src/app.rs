@@ -588,6 +588,7 @@ pub struct App {
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
+    position_drag: Option<(Vec2,i32)>,
 
     // 切页
     pub(crate) page: usize,
@@ -752,6 +753,7 @@ impl App {
             leave_since: None,
             hover_lock: false,
             reveal: 0.0,
+            position_drag: None,
             page: initial_page,
             page_from: initial_page,
             page_dir: 1.0,
@@ -1647,7 +1649,7 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let want = self.position_drag.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
@@ -1860,7 +1862,21 @@ impl App {
             shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
             shapes
         });
-        let transitioning = !self.w.settled(PW)
+        if let Some((start,offset))=self.position_drag {
+            if let (Some(cursor),Some(screen))=(env.cursor,env.screen) {
+                // 用屏幕内坐标计算总位移，避免窗口跟随移动后反过来改变拖动距离。
+                let delta=cursor-screen.min-start;
+                let (distance,travel)=if side {(delta.y,screen.height()/2.0-crate::side_dock::SIDE_HALF_EXTENT)}
+                    else {(delta.x,screen.width()/2.0-crate::display_layout::ISLAND_HALF_EXTENT)};
+                let limit=model::ISLAND_OFFSET_MAX;
+                if travel>0.0 {self.settings.island_offset=(offset as f32+distance/travel*limit as f32).round().clamp(-limit as f32,limit as f32) as i32;}
+            }
+            if !ctx.input(|i|i.pointer.primary_down()) || !self.open {
+                self.position_drag=None;
+                if self.settings.island_offset!=offset {self.settings.save();}
+            }else{ctx.set_cursor_icon(egui::CursorIcon::Grabbing);}
+        }
+        let transitioning = self.position_drag.is_some() || !self.w.settled(PW)
             || !self.h.settled(self.expanded_height())
             || self.page_e() < 0.7
             || self.dots.iter().any(|d| !d.settled(16.0))
@@ -2321,6 +2337,18 @@ impl App {
         // 日期随内容淡入，从药丸方向轻轻滑出
         if reveal > 0.0 {
             base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
+        }
+        if self.open && reveal>0.95 && p>0.98 && !self.is_editing() && !self.drag_hot {
+            if let Some(screen)=env.screen {
+                // 中间的日期时间区不占用两侧的新增、刷新和设置按钮。
+                let left=hd.max(150.0);let right=(hc+clock_w).min(303.0);
+                if right>left {
+                    let response=base.hit_drag(left,4.0,right-left,26.0,"island-position").on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("按住拖动位置");
+                    if response.drag_started_by(egui::PointerButton::Primary) {
+                        if let Some(start)=base.ui.input(|i|i.pointer.press_origin()) {self.position_drag=Some((start-screen.min,self.settings.island_offset));}
+                    }
+                }
+            }
         }
         if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
             paint::playback_bars(base,lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m),lerp(15.0,18.0,m),self.t,self.media.playing,theme::WHITE);

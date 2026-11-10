@@ -680,6 +680,112 @@ impl H {
 fn rand_id() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64
 }
+
+fn island_drag_frame(h:&mut H,bounds:crate::display_layout::Bounds,ppp:f32,pointer:Option<Pos2>,pressed:Option<bool>)->Rect {
+    use crate::{display_layout,side_dock};
+    let dock=h.app.settings.dock;
+    let (width,height)=if dock.is_side(){(side_dock::SIDE_W,side_dock::SIDE_H)}else{(WIN_W,WIN_H)};
+    let offset=h.app.settings.island_offset_ratio();
+    let (x,y)=if dock.is_side(){display_layout::side_origin(bounds,dock,(width,height),side_dock::SIDE_HALF_EXTENT,ppp,offset)}
+        else{display_layout::island_origin_offset(bounds,width,ppp,offset)}.unwrap();
+    let screen=Rect::from_min_max(Pos2::new((bounds.left-x) as f32/ppp,(bounds.top-y) as f32/ppp),Pos2::new((bounds.right-x) as f32/ppp,(bounds.bottom-y) as f32/ppp));
+    let cursor=pointer.map(|p|p+screen.min.to_vec2());
+    let mut events=cursor.map(|p|vec![egui::Event::PointerMoved(p)]).unwrap_or_default();
+    if let (Some(pos),Some(pressed))=(cursor,pressed){events.push(egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()});}
+    h.t+=1.0/60.0;
+    let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),cursor,screen:Some(screen),bt_ready:true,..Default::default()};
+    let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W.max(width),height))),time:Some(h.t),events,focused:true,
+        viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
+    let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
+        let out=h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(width,height)),&env);h.cmds.extend(out.cmds);
+    });});
+    h.shapes=output.shapes;
+    screen
+}
+
+fn island_drag_header(h:&mut H,bounds:crate::display_layout::Bounds,ppp:f32)->Pos2 {
+    h.app.show_page(1);
+    let mut screen=Rect::NOTHING;
+    for _ in 0..90{screen=island_drag_frame(h,bounds,ppp,None,None);}
+    h.shapes.iter().find_map(|shape|match &shape.shape{
+        egui::Shape::Text(text) if text.galley.text()=="10月28日 周三"=>Some(text.visual_bounding_rect().center()-screen.min.to_vec2()),_=>None,
+    }).expect("展开后的日期应可见")
+}
+
+#[test]
+fn island_position_drag_tracks_screen_coordinates_and_saves_on_release(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let bounds=crate::display_layout::Bounds{left:-2560,top:-400,right:0,bottom:1040};
+    for dock in crate::model::Dock::ALL {for ppp in [1.0,1.5] {
+        let mut h=H::new();h.app.settings.dock=dock;h.app.settings.island_offset=-25;h.app.settings.save();
+        let start=island_drag_header(&mut h,bounds,ppp);
+        let before=island_drag_frame(&mut h,bounds,ppp,Some(start),Some(true));
+        let delta=if dock.is_side(){Vec2::new(0.0,90.0)}else{Vec2::new(90.0,0.0)};
+        let end=start+delta;
+        island_drag_frame(&mut h,bounds,ppp,Some(end),None);
+        assert!(h.app.settings.island_offset>-25,"{dock:?} / {ppp}：拖动应同步现有位置参数");
+        assert_eq!(crate::model::Settings::load().island_offset,-25,"拖动途中不能反复写配置");
+        let offset=h.app.settings.island_offset;
+        for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,Some(end),None);}
+        let after=island_drag_frame(&mut h,bounds,ppp,Some(end),None);
+        let movement=before.min-after.min;
+        assert!(((if dock.is_side(){movement.y}else{movement.x})-90.0).abs()<6.0,"{dock:?} / {ppp}：窗口应跟随实际鼠标位移，允许整数位置刻度带来的取整误差");
+        assert_eq!(if dock.is_side(){movement.x}else{movement.y},0.0,"拖动不能脱离停靠边缘");
+        assert_eq!(h.app.settings.island_offset,offset,"窗口跟随鼠标移动后，原地持有不能发生累积漂移");
+        island_drag_frame(&mut h,bounds,ppp,Some(end),Some(false));
+        assert_eq!(crate::model::Settings::load().island_offset,offset,"松手后应保存位置");
+        assert_eq!((h.app.settings.dock,h.app.settings.display_id.as_str()),(dock,""));
+    }}
+}
+
+#[test]
+fn island_position_drag_clamps_to_existing_limits_and_keeps_open_outside(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
+    for dock in crate::model::Dock::ALL {for shape in crate::model::IslandShape::ALL {
+        let mut h=H::new();h.app.settings.dock=dock;h.app.settings.island_shape=shape;
+        let start=island_drag_header(&mut h,bounds,1.0);
+        island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
+        let delta=if dock.is_side(){Vec2::new(3000.0,3000.0)}else{Vec2::new(3000.0,1000.0)};
+        for _ in 0..240{island_drag_frame(&mut h,bounds,1.0,Some(start+delta),None);}
+        assert!(h.app.open,"{dock:?} 拖到窗口外也应保持展开");
+        assert_eq!(h.app.settings.island_offset,crate::model::ISLAND_OFFSET_MAX);
+        island_drag_frame(&mut h,bounds,1.0,Some(start-delta),None);
+        assert_eq!(h.app.settings.island_offset,-crate::model::ISLAND_OFFSET_MAX);
+        island_drag_frame(&mut h,bounds,1.0,Some(start-delta),Some(false));
+        let offset=h.app.settings.island_offset;
+        for _ in 0..40{island_drag_frame(&mut h,bounds,1.0,Some(start),None);}
+        assert_eq!(h.app.settings.island_offset,offset,"松手后不能继续跟着鼠标移动");
+    }}
+}
+
+#[test]
+fn island_position_drag_ignores_jitter_and_preserves_header_buttons(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
+    let mut h=H::new();let start=island_drag_header(&mut h,bounds,1.0);
+    island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
+    island_drag_frame(&mut h,bounds,1.0,Some(start+Vec2::splat(1.0)),None);
+    island_drag_frame(&mut h,bounds,1.0,Some(start+Vec2::splat(1.0)),Some(false));
+    assert_eq!(h.app.settings.island_offset,0,"轻微手抖不能改变位置");
+    let screen=island_drag_frame(&mut h,bounds,1.0,Some(start),None);
+    let gear=H::local(394.0,18.0)-screen.min.to_vec2();
+    island_drag_frame(&mut h,bounds,1.0,Some(gear),Some(true));
+    island_drag_frame(&mut h,bounds,1.0,Some(gear),Some(false));
+    assert!(h.app.settings_open,"时间区域拖动不能拦截设置按钮");
+    assert_eq!(h.app.settings.island_offset,0);
+    h.app.settings_open=false;
+    for (page,x,expected) in [(3,330.0,crate::app::Cmd::AddFiles),(6,319.0,crate::app::Cmd::QuotaRefresh)] {
+        h.app.show_page(page);
+        for _ in 0..60{island_drag_frame(&mut h,bounds,1.0,Some(start),None);}
+        let screen=island_drag_frame(&mut h,bounds,1.0,Some(start),None);
+        let point=H::local(x,18.0)-screen.min.to_vec2();
+        island_drag_frame(&mut h,bounds,1.0,Some(point),Some(true));
+        island_drag_frame(&mut h,bounds,1.0,Some(point),Some(false));
+        assert!(h.cmds.contains(&expected),"顶部操作按钮应正常响应");
+        assert_eq!(h.app.settings.island_offset,0);
+    }
+}
 #[test]
 fn shelf_drop_zone_leaves_normal_hover_and_text_selection_unchanged(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
