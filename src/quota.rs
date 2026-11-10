@@ -286,48 +286,67 @@ fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     Ok(Credential{token,account_id,identity,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
 }
 pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
-type PendingAccounts = std::sync::Arc<std::sync::Mutex<Option<Vec<Account>>>>;
+#[derive(Default)]
+struct Pending {accounts:Option<Vec<Account>>,running:bool,cooldowns:HashMap<(String,Option<String>,PathBuf),(Instant,String)>}
+type PendingAccounts = std::sync::Arc<std::sync::Mutex<Pending>>;
 fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,_=>0}}
+struct Worker {pending:PendingAccounts,wake:mpsc::SyncSender<()>}
 pub struct Service {
-    workers:Vec<(PendingAccounts,mpsc::SyncSender<()>)>,
+    workers:HashMap<usize,Worker>,
+    results:mpsc::Sender<(Account,Result<Snapshot,String>)>,
     rx:mpsc::Receiver<(Account,Result<Snapshot,String>)>,
 }
 impl Service {
-    pub fn start()->Self{
-        let(results,rx)=mpsc::channel();let mut workers=Vec::new();
-        // Each protocol owns a single worker and a coalesced latest request.
-        // No cross-provider join: a slow relay cannot delay the next Codex refresh.
-        for _ in 0..9 {
-            let pending:PendingAccounts=Default::default();let next=pending.clone();
-            let(tx,requests)=mpsc::sync_channel::<()>(1);let results=results.clone();
-            std::thread::spawn(move||{
-                let mut cooldowns:HashMap<_,(Instant,String)>=HashMap::new();
+    pub fn start()->Self{let(results,rx)=mpsc::channel();Self{workers:HashMap::new(),results,rx}}
+    pub fn refresh(&mut self,accounts:Vec<Account>)->bool{self.refresh_with(accounts,fetch)}
+    fn refresh_with(&mut self,accounts:Vec<Account>,run:impl Fn(&ureq::Agent,&Account)->Result<Snapshot,(String,u64)>+Clone+Send+'static)->bool{
+        let mut groups:Vec<Vec<Account>>=(0..9).map(|_|Vec::new()).collect();
+        for account in accounts.into_iter().filter(|account|account.enabled){groups[service_group(account.provider)].push(account);}
+        for (group,accounts) in groups.into_iter().enumerate(){
+            if let Some(worker)=self.workers.get(&group){
+                let Ok(mut pending)=worker.pending.lock()else{return false;};
+                if pending.running {
+                    pending.accounts=Some(accounts);
+                    if matches!(worker.wake.try_send(()),Err(mpsc::TrySendError::Disconnected(_))){return false;}
+                    continue;
+                }
+            }
+            if accounts.is_empty(){continue;}
+            // 停用后保留退避记录，重新启用时仍尊重服务器的限流时间。
+            let pending=self.workers.get(&group).map(|worker|worker.pending.clone()).unwrap_or_default();
+            {let Ok(mut next)=pending.lock()else{return false;};next.accounts=Some(accounts);next.running=true;}
+            let next=pending.clone();let results=self.results.clone();let run=run.clone();
+            let(wake,requests)=mpsc::sync_channel::<()>(1);
+            let spawned=std::thread::Builder::new().name("daozai-quota".into()).spawn(move||{
                 while requests.recv().is_ok(){
-                    let accounts=match next.lock(){Ok(mut p)=>p.take().unwrap_or_default(),Err(_)=>break};
-                    let agent=http_agent();cooldowns.retain(|_,(until,_)|*until>Instant::now());
-                    for a in accounts.into_iter().filter(|a|a.enabled){
-                        let key=(a.id.clone(),a.slot.clone(),a.source.clone());
-                        if let Some((until,message))=cooldowns.get(&key){
-                            if *until>Instant::now(){let _=results.send((a,Err(message.clone())));continue;}
-                        }
-                        let result=fetch(&agent,&a);
-                        if let Err((message,wait))=&result{
-                            if *wait>0{cooldowns.insert(key,(Instant::now()+Duration::from_secs((*wait).min(3600)),message.clone()));}
-                        }
-                        if results.send((a,result.map_err(|e|e.0))).is_err(){return;}
+                    let accounts={
+                        let Ok(mut state)=next.lock()else{break;};
+                        let Some(accounts)=state.accounts.take()else{continue;};
+                        if accounts.is_empty(){state.running=false;return;}
+                        state.cooldowns.retain(|_,(until,_)|*until>Instant::now());accounts
+                    };
+                    let agent=http_agent();
+                    for account in accounts {
+                        let key=(account.id.clone(),account.slot.clone(),account.source.clone());
+                        let cooldown={
+                            let Ok(state)=next.lock()else{break;};
+                            if state.accounts.as_ref().is_some_and(Vec::is_empty){break;}
+                            state.cooldowns.get(&key).filter(|(until,_)|*until>Instant::now()).map(|(_,message)|message.clone())
+                        };
+                        if let Some(message)=cooldown{if results.send((account,Err(message))).is_err(){return;}continue;}
+                        let result=run(&agent,&account);
+                        if let Err((message,wait))=&result{if *wait>0{
+                            if let Ok(mut state)=next.lock(){state.cooldowns.insert(key,(Instant::now()+Duration::from_secs((*wait).min(3600)),message.clone()));}
+                        }}
+                        if results.send((account,result.map_err(|e|e.0))).is_err(){return;}
                     }
                 }
-            });workers.push((pending,tx));
-        }
-        Self{workers,rx}
-    }
-    pub fn refresh(&self,accounts:Vec<Account>)->bool{
-        let mut groups:Vec<Vec<Account>>=(0..9).map(|_|Vec::new()).collect();
-        for a in accounts{groups[service_group(a.provider)].push(a);}
-        for ((pending,tx),group) in self.workers.iter().zip(groups){
-            let Ok(mut next)=pending.lock()else{return false;};*next=Some(group);drop(next);
-            // Full means a wake is already pending; its worker will use newest data.
-            if matches!(tx.try_send(()),Err(mpsc::TrySendError::Disconnected(_))){return false;}
+                if let Ok(mut state)=next.lock(){state.running=false;}
+            });
+            if spawned.is_err(){if let Ok(mut state)=pending.lock(){state.running=false;}return false;}
+            self.workers.insert(group,Worker{pending,wake});
+            // 信号与最新请求合并；关闭时只等在途请求，不积累新的线程。
+            let _=self.workers[&group].wake.try_send(());
         }
         true
     }
@@ -378,6 +397,10 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test] fn lightweight_quota_startup_has_no_unused_workers(){
+        let mut service=Service::start();assert!(service.workers.is_empty(),"未启用额度来源时不应创建后台线程");
+        assert!(service.refresh(vec![]));assert!(service.workers.is_empty());
+    }
     #[test] fn api_cache_is_bound_to_endpoint_region_and_credential(){
         let mut account=Account{id:"api-fixture".into(),provider:Provider::MiniMax,alias:"fixture".into(),source:"cn".into(),slot:Some("opaque".into()),enabled:true,pinned:false};
         let cache=json!({"api-fixture":{"provider":"MiniMax","source":"cn","slot":"opaque","snapshot":Snapshot{at:1900000000,..Default::default()}}});
@@ -390,21 +413,49 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
         assert!(serde_json::from_value::<Snapshot>(old).unwrap().relay.is_none());
     }
     #[test] fn provider_queues_coalesce_without_cross_provider_waits(){
-        let mut workers=Vec::new();let mut wakes=Vec::new();
-        for _ in 0..9{let(tx,rx)=mpsc::sync_channel(1);workers.push((PendingAccounts::default(),tx));wakes.push(rx);}
-        let(_results,rx)=mpsc::channel();let service=Service{workers,rx};
+        let(tx,wake)=mpsc::sync_channel(1);let pending=PendingAccounts::default();
+        pending.lock().unwrap().running=true;
+        let(results,rx)=mpsc::channel();let group=service_group(Provider::NewApi);
+        let mut service=Service{workers:HashMap::from([(group,Worker{pending:pending.clone(),wake:tx})]),results,rx};
         let a=Account{id:"old".into(),provider:Provider::NewApi,alias:String::new(),source:"https://relay.example".into(),slot:Some("fixture".into()),enabled:true,pinned:false};
         assert!(service.refresh(vec![a.clone()]));let mut newer=a;newer.id="new".into();
-        // No worker consumes its full wake queue, but updating latest work never blocks.
         assert!(service.refresh(vec![newer]));
-        assert_eq!(service.workers[service_group(Provider::NewApi)].0.lock().unwrap().as_ref().unwrap()[0].id,"new");
-        assert!(service.workers[service_group(Provider::Codex)].0.lock().unwrap().as_ref().unwrap().is_empty());
-        assert_ne!(service_group(Provider::NewApi),service_group(Provider::OpenCodeGo));
+        assert_eq!(pending.lock().unwrap().accounts.as_ref().unwrap()[0].id,"new");
+        assert_eq!(service.workers.len(),1);assert!(wake.try_recv().is_ok());assert!(wake.try_recv().is_err());
+    }
+    #[test] fn enabled_quota_groups_run_independently_and_reuse_inflight_workers(){
+        use std::sync::{Arc,Mutex};
+        let account=|id:&str,provider,enabled|Account{id:id.into(),provider,alias:String::new(),source:PathBuf::new(),slot:None,enabled,pinned:false};
+        let(started,events)=mpsc::channel();let(release,blocked)=mpsc::channel();let blocked=Arc::new(Mutex::new(blocked));
+        let run=move|_:&ureq::Agent,a:&Account|{started.send(a.id.clone()).unwrap();if a.id=="slow"{blocked.lock().unwrap().recv_timeout(Duration::from_secs(3)).unwrap();}Ok(Snapshot::default())};
+        let slow=account("slow",Provider::NewApi,true);let fast=account("fast",Provider::OpenCodeGo,true);
+        let mut service=Service::start();assert!(service.refresh_with(vec![slow.clone(),fast,account("disabled",Provider::Glm,false)],run.clone()));
+        let mut first=[events.recv_timeout(Duration::from_secs(2)).unwrap(),events.recv_timeout(Duration::from_secs(2)).unwrap()];first.sort();assert_eq!(first,["fast","slow"]);
+        let group=service_group(Provider::NewApi);let original=service.workers[&group].pending.clone();assert_eq!(service.workers.len(),2);
+        let mut outdated=slow.clone();outdated.id="outdated".into();assert!(service.refresh_with(vec![outdated],run.clone()));
+        assert!(service.refresh_with(vec![],run.clone()));
+        let mut resumed=slow;resumed.id="resumed".into();assert!(service.refresh_with(vec![resumed],run.clone()));
+        assert!(Arc::ptr_eq(&original,&service.workers[&group].pending),"在途线程应直接复用，不能随开关切换叠加");
+        release.send(()).unwrap();assert_eq!(events.recv_timeout(Duration::from_secs(2)).unwrap(),"resumed");
+        assert!(service.refresh_with(vec![],run));
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while service.workers.values().any(|worker|worker.pending.lock().unwrap().running)&&Instant::now()<deadline{std::thread::sleep(Duration::from_millis(2));}
+        assert!(service.workers.values().all(|worker|!worker.pending.lock().unwrap().running));assert!(events.try_recv().is_err());
+    }
+    #[test] fn stopped_quota_workers_keep_server_backoff_when_reenabled(){
+        let mut service=Service::start();let group=service_group(Provider::NewApi);let pending=PendingAccounts::default();
+        let account=Account{id:"limited".into(),provider:Provider::NewApi,alias:String::new(),source:PathBuf::new(),slot:None,enabled:true,pinned:false};
+        pending.lock().unwrap().cooldowns.insert((account.id.clone(),None,PathBuf::new()),(Instant::now()+Duration::from_secs(60),"限流中".into()));
+        let(wake,_)=mpsc::sync_channel(1);service.workers.insert(group,Worker{pending:pending.clone(),wake});
+        assert!(service.refresh_with(vec![account.clone()],|_,_|panic!("退避期间不能重新发请求")));
+        let c=Config{accounts:vec![account],..Config::default()};let deadline=Instant::now()+Duration::from_secs(2);let mut received=None;
+        while Instant::now()<deadline{if let Some(event)=service.try_recv(&c){received=Some(event.result);break;}std::thread::sleep(Duration::from_millis(2));}
+        assert_eq!(received.unwrap().unwrap_err(),"限流中");assert!(std::sync::Arc::ptr_eq(&pending,&service.workers[&group].pending));
     }
     #[test] fn late_result_from_replaced_key_is_discarded(){
         let mut c=Config::default();let a=Account{id:"same".into(),provider:Provider::Glm,alias:String::new(),source:"cn".into(),slot:Some("old".into()),enabled:true,pinned:false};
         let mut current=a.clone();current.slot=Some("new".into());c.accounts.push(current.clone());
-        let(tx,rx)=mpsc::channel();let service=Service{workers:vec![],rx};
+        let(tx,rx)=mpsc::channel();let service=Service{workers:HashMap::new(),results:tx.clone(),rx};
         tx.send((a,Ok(Snapshot::default()))).unwrap();tx.send((current,Err("current response".into()))).unwrap();
         let event=service.try_recv(&c).unwrap();assert_eq!(event.result.unwrap_err(),"current response");assert!(service.try_recv(&c).is_none());
     }
