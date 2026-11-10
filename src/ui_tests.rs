@@ -1017,15 +1017,86 @@ fn kugou_position_advances_without_duration_and_respects_pause_and_seek(){
 }
 
 #[test]
-fn music_speaker_button_toggles_mute(){
+fn music_volume_popup_opens_and_mute_restores_the_selected_players_level(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
-    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),duration:120.0,..Default::default()};
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),duration:120.0,volume:Some((60,false)),..Default::default()};
     h.app.volume_ui=Some((45,false));
     h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.click(H::local(367.0,118.0));
-    assert!(h.cmds.contains(&crate::app::Cmd::ToggleMute));
-    assert_eq!(h.app.volume_ui,Some((45,true)));
+    assert!(h.app.music_volume_open);
+    assert!(h.cmds.is_empty(),"打开浮条不应改变音量或静音");
+    h.hover(H::local(367.0,92.0),0.2);h.click(H::local(367.0,92.0));
+    assert!(h.cmds.contains(&crate::app::Cmd::MusicVolume(crate::smtc::Transport::SetMute(true),"QQMusic.exe".into())));
+    assert!(!h.cmds.contains(&crate::app::Cmd::ToggleMute));
+    assert_eq!(h.app.music_volume_ui,Some((60,true)));
+    assert_eq!(h.app.volume_ui,Some((45,false)));
+    h.click(H::local(367.0,92.0));
+    assert_eq!(h.app.music_volume_ui,Some((60,false)),"恢复时沿用静音前的音量");
+    assert!(h.cmds.contains(&crate::app::Cmd::MusicVolume(crate::smtc::Transport::SetMute(false),"QQMusic.exe".into())));
+}
+
+#[test]
+fn music_volume_popup_slider_unmutes_and_scrolls_without_changing_pages(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),volume:Some((60,true)),..Default::default()};
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(367.0,118.0));h.hover(H::local(367.0,53.5),0.2);
+    h.click(H::local(367.0,53.5));
+    assert_eq!(h.app.music_volume_ui,Some((50,false)));
+    assert!(h.cmds.contains(&crate::app::Cmd::MusicVolume(crate::smtc::Transport::SetVolume(50),"QQMusic.exe".into())));
+    h.wheel(120.0);assert_eq!(h.app.music_volume_ui,Some((54,false)));assert_eq!(h.app.page,0);
+    h.click(H::local(367.0,32.0));assert_eq!(h.app.music_volume_ui,Some((100,false)));
+    h.click(H::local(367.0,75.0));assert_eq!(h.app.music_volume_ui,Some((0,false)));
+    h.click(H::local(387.0,68.0));assert_eq!(h.app.page,0,"浮条遮挡部分不能穿透触发翻页");
+    h.click(H::local(387.0,18.0));assert!(!h.app.settings_open,"浮条遮挡部分不能穿透打开设置");
+}
+
+#[test]
+fn music_volume_popup_closes_on_escape_outside_click_source_change_and_collapse(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),volume:Some((60,false)),..Default::default()};
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.click(H::local(367.0,118.0));
+    h.frame(vec![egui::Event::Key{key:egui::Key::Escape,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()}]);
+    assert!(!h.app.music_volume_open);assert!(h.app.open,"Esc 只关闭浮条，保留音乐面板");
+    h.click(H::local(367.0,118.0));h.click(H::local(180.0,45.0));assert!(!h.app.music_volume_open);
+    h.click(H::local(367.0,118.0));h.media.source="cloudmusic.exe".into();h.frame(vec![]);assert!(!h.app.music_volume_open);
+    h.click(H::local(367.0,118.0));h.app.show_page(1);assert!(!h.app.music_volume_open);
+    h.app.show_page(0);h.hover(H::local(180.0,45.0),1.0);h.click(H::local(367.0,118.0));
+    h.hover(Pos2::new(0.0,250.0),5.0);assert!(!h.app.music_volume_open);
+}
+
+#[test]
+#[ignore="按需导出音乐音量浮条实际画面：DAOZAI_MUSIC_VOLUME_PREVIEW=目录"]
+fn music_volume_popup_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_MUSIC_VOLUME_PREVIEW").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    for (name,muted,lyrics) in [("volume",false,false),("muted",true,false),("lyrics",false,true)] {
+        let mut h=H::new();h.ctx.set_pixels_per_point(2.0);h.app.settings.pet=false;h.app.show_lyrics=lyrics;
+        h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"晴天".into(),artist:"周杰伦".into(),position:92.0,duration:269.0,volume:Some((62,muted)),..Default::default()};
+        h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+        if lyrics{h.app.set_lyrics("晴天","周杰伦",269.0,crate::lyrics::parse_lrc("[00:00]午后的阳光落在窗边\n[01:30]风把回忆吹向远方\n[01:40]慢慢走过这段时光"));}
+        h.click(H::local(367.0,118.0));h.hover(H::local(330.0,112.0),0.25);
+        let ppp=h.ctx.pixels_per_point();let mut raster=crate::preview_raster::Raster::new((crate::app::CANVAS_W*ppp) as usize,(WIN_H*ppp) as usize);
+        raster.update_textures(&egui::TexturesDelta{set:vec![(egui::TextureId::default(),egui::epaint::ImageDelta::full(h.ctx.fonts(|f|f.image()),egui::TextureOptions::LINEAR))],..Default::default()});
+        raster.buf.fill([0.10,0.12,0.16,1.0]);raster.draw(&h.ctx.tessellate(h.shapes.clone(),ppp),ppp);
+        let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+        let image=image::RgbaImage::from_raw(raster.w as u32,raster.h as u32,rgba).unwrap();
+        image::imageops::crop_imm(&image,((WIN_W-crate::app::PW)/2.0*ppp-12.0) as u32,0,((crate::app::PW+12.0)*ppp+12.0) as u32,((crate::app::PH+12.0)*ppp) as u32).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+    }
+}
+
+#[test]
+fn music_volume_wheel_and_player_switch_keep_system_volume_untouched(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"QQMusic.exe".into(),title:"Track".into(),artist:"Artist".into(),volume:Some((60,true)),..Default::default()};
+    h.app.volume_ui=Some((45,false));h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.hover(H::local(367.0,118.0),0.2);h.wheel(120.0);
+    assert!(h.cmds.contains(&crate::app::Cmd::MusicVolume(crate::smtc::Transport::SetVolume(64),"QQMusic.exe".into())),"音量={:?} 命令={:?} 页={} 指针={:?}",h.app.music_volume_ui,h.cmds,h.app.page,h.cursor);
+    assert_eq!(h.app.music_volume_ui,Some((64,false)));
+    h.media.source="cloudmusic.exe".into();h.media.volume=Some((22,false));h.frame(vec![]);
+    assert_eq!(h.app.music_volume_ui,Some((22,false)),"换播放器立即更新独立音量");
+    assert_eq!(h.app.volume_ui,Some((45,false)));
+    h.media.volume=None;h.cmds.clear();h.click(H::local(367.0,118.0));h.wheel(120.0);
+    assert!(h.cmds.is_empty(),"没有应用会话时不可回退到系统音量");
 }
 
 #[test]
@@ -1637,6 +1708,42 @@ fn minimal_hover_does_not_catch_tabs_during_collapse() {
     assert!(!h.hit.contains(tab),"收起动画不得继续拦截标签栏");
     h.hover(tab,1.0);
     assert!(!h.app.open);
+}
+
+#[test]
+fn music_header_shortcut_returns_from_every_page_without_controlling_playback() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for playing in [true,false] {
+        let mut h=H::new();h.app.settings.page_order=[5,2,0,1,3,4,6,7];
+        h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"Track".into(),artist:"Artist".into(),playing,duration:120.0,..Default::default()};
+        for page in 1..8 {
+            h.app.show_page(page);h.hover(H::local(300.0,60.0),0.8);h.cmds.clear();
+            h.click(H::local(367.0,18.0));
+            assert_eq!(h.app.page,0,"播放状态 {playing} 时应从页面 {page} 直达音乐页");
+            assert!(h.app.open);assert!(!h.app.settings_open);assert_eq!(h.app.media.playing,playing);
+            assert!(h.cmds.iter().all(|cmd|!matches!(cmd,crate::app::Cmd::Media(_)|crate::app::Cmd::MusicVolume(..))),"返回音乐页不能改变播放或音量");
+        }
+    }
+}
+
+#[test]
+fn music_header_shortcut_keeps_hidden_music_page_disabled() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),playing:true,duration:120.0,..Default::default()};
+    h.app.set_page_visible(0,false);h.app.show_page(4);h.hover(H::local(300.0,60.0),0.8);
+    h.click(H::local(367.0,18.0));
+    assert_eq!(h.app.page,4);assert!(!h.app.settings.visible_pages[0]);
+    assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,1);
+}
+
+#[test]
+fn music_header_shortcut_is_absent_without_music_and_keeps_settings_clickable() {
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for media in [crate::smtc::NowPlaying::default(),crate::smtc::NowPlaying{title:"Video".into(),artist:"Channel".into(),playing:true,playback_type:crate::smtc::MediaKind::Video,..Default::default()}] {
+        let mut h=H::new();h.media=media;h.app.show_page(4);h.hover(H::local(300.0,60.0),0.8);
+        h.click(H::local(367.0,18.0));assert_eq!(h.app.page,4);assert!(!h.app.settings_open);
+        h.click(H::local(394.0,18.0));assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,4);
+    }
 }
 
 #[test]

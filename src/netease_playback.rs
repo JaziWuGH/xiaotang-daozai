@@ -304,7 +304,7 @@ fn process_id()->Option<u32>{
 
 fn control_hotkey(command:super::Transport)->Option<&'static str>{
     match command {super::Transport::Toggle=>Some("play_pause_local"),super::Transport::Next=>Some("next_local"),
-        super::Transport::Prev=>Some("prev_local"),super::Transport::Seek(_)=>None}
+        super::Transport::Prev=>Some("prev_local"),super::Transport::Seek(_)|super::Transport::SetVolume(_)|super::Transport::SetMute(_)=>None}
 }
 
 pub(super) fn control(command:super::Transport){

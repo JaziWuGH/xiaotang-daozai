@@ -12,6 +12,7 @@ use std::f32::consts::{FRAC_PI_2, TAU};
 
 /// 剪贴板分栏一屏显示的条数。
 pub(crate) const CLIP_ROWS: usize = 4;
+pub(crate) const MUSIC_VOLUME_RECT: Rect = Rect::from_min_max(Pos2::new(345.0,6.0),Pos2::new(389.0,104.0));
 
 fn mmss(secs: f64) -> String {
     let s = secs.max(0.0) as u64;
@@ -123,12 +124,18 @@ impl App {
         let (next,next_card)=btn(258.0,30.0,"m-next");
         paint::skip(&next_card,258.0,y,1.0,ic);
         let (volume_button,volume_card)=btn(367.0,26.0,"m-volume");
-        let (volume,muted)=self.volume_ui.unwrap_or((0,false));
-        paint::speaker(&volume_card,367.0,y,muted,ic);
-        if self.volume_ui.is_some() && volume_button.on_hover_text(if muted {"取消静音"}else{"静音"}).clicked() {
-            self.volume_ui=Some((volume,!muted));
-            self.volume_quiet_until=self.t+0.9;
-            cmds.push(Cmd::ToggleMute);
+        let (volume,muted)=self.music_volume_ui.unwrap_or((0,false));
+        paint::speaker(&volume_card,367.0,y,muted,if self.music_volume_ui.is_some(){ic}else{theme::GRAY});
+        let hint=if self.music_volume_ui.is_some(){format!("音乐应用音量 {volume}%{} · 点击展开 · 滚轮调节",if muted{"（已静音）"}else{""})}else{"暂无可调节的音乐音频会话".into()};
+        let volume_button=volume_button.on_hover_text(hint);
+        if c.live && has && self.music_volume_ui.is_some() {
+            if volume_button.clicked(){self.music_volume_open=!self.music_volume_open;}
+            if volume_button.hovered(){
+                    let delta=c.ui.ctx().input(|i|i.raw_scroll_delta.y);
+                    if delta.abs()>0.5 {
+                        self.change_music_volume(Transport::SetVolume((volume as f32+delta/120.0*4.0).round().clamp(0.0,100.0) as u32),cmds);
+                    }
+            }
         }
         if has {
             if previous.clicked() {cmds.push(Cmd::Media(Transport::Prev));}
@@ -152,6 +159,57 @@ impl App {
                 self.settings.save();
             }
         }
+    }
+
+    fn change_music_volume(&mut self,command:Transport,cmds:&mut Vec<Cmd>){
+        let Some((volume,_))=self.music_volume_ui else{return;};
+        let next=match command{Transport::SetVolume(v)=>(v,false),Transport::SetMute(muted)=>(volume,muted),_=>return};
+        if self.music_volume_ui==Some(next){return;}
+        self.music_volume_ui=Some(next);
+        self.music_volume_quiet_until=self.t+0.9;
+        cmds.push(Cmd::MusicVolume(command,self.media.source.clone()));
+    }
+
+    pub(crate) fn draw_music_volume(&mut self,c:&Card,cmds:&mut Vec<Cmd>){
+        let ctx=c.ui.ctx();
+        let bounds=MUSIC_VOLUME_RECT;
+        let panel=c.rect(bounds.min.x,bounds.min.y,bounds.width(),bounds.height());
+        let trigger=c.rect(354.0,106.0,26.0,24.0);
+        if self.music_volume_open && ctx.input(|i|i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p|!panel.contains(p) && !trigger.contains(p))){
+            self.music_volume_open=false;
+        }
+        let a=ctx.animate_bool_with_time(egui::Id::new("music-volume-open"),self.music_volume_open,0.12);
+        let Some((volume,muted))=self.music_volume_ui else{return;};
+        if a<0.01{return;}
+        let popup=c.faded(a);
+        let popup=if self.music_volume_open{popup}else{popup.ghost()};
+        // 浮条最后绘制并占据整块命中区域，防止点击穿到后面的翻页按钮。
+        popup.hit(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),"m-volume-surface");
+        popup.fill(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),12.0,Color32::from_gray(36));
+        popup.stroke(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),12.0,1.0,Color32::from_gray(60));
+        let track=popup.hit_drag(351.0,27.0,32.0,54.0,"m-volume-track");
+        let mut command=None;
+        if popup.live && (track.clicked() || track.dragged() || track.is_pointer_button_down_on()) {
+            if let Some(pointer)=track.interact_pointer_pos(){
+                command=Some(Transport::SetVolume(((75.0-popup.to_local(pointer).y)/43.0*100.0).round().clamp(0.0,100.0) as u32));
+            }
+        }else if popup.live && panel.contains(ctx.pointer_hover_pos().unwrap_or(Pos2::ZERO)) {
+            let delta=ctx.input(|i|i.raw_scroll_delta.y);
+            if delta.abs()>0.5{command=Some(Transport::SetVolume((volume as f32+delta/120.0*4.0).round().clamp(0.0,100.0) as u32));}
+        }
+        let mute=popup.hit(353.0,82.0,28.0,20.0,"m-volume-mute").on_hover_text(if muted{"恢复音乐音量"}else{"静音音乐，保留当前音量"});
+        let (hover,press)=popup.hover_t(&mute);
+        if popup.live && mute.clicked(){command=Some(Transport::SetMute(!muted));}
+        if let Some(command)=command {self.change_music_volume(command,cmds);}
+        let (volume,muted)=self.music_volume_ui.unwrap_or((volume,muted));
+        let ink=if muted{theme::GRAY}else{theme::WHITE};
+        popup.centered_text(367.0,20.0,&format!("{volume}%"),10.5,W::Semibold,ink,H::Center);
+        popup.fill(364.5,32.0,5.0,43.0,2.5,Color32::from_gray(68));
+        let head=75.0-43.0*volume as f32/100.0;
+        if volume>0 {popup.fill(364.5,head,5.0,(75.0-head).max(2.5),2.5,ink);}
+        popup.circle(367.0,head,if track.dragged(){5.5}else{4.5},ink);
+        popup.fill(353.0,82.0,28.0,20.0,6.0,paint::mix(theme::BTN,theme::BTN_HOVER,if muted{1.0}else{hover}));
+        popup.scaled(367.0,92.0,1.0-0.06*press).centered_text(367.0,92.0,if muted{"恢复"}else{"静音"},9.5,W::Semibold,theme::WHITE,H::Center);
     }
 
     fn draw_music_lyrics(&mut self,c:&Card) {
