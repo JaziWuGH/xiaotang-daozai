@@ -6312,7 +6312,7 @@ fn weather_page_shows_the_local_snapshot_and_forecast(){
         ],at:chrono::Utc::now().timestamp()});
     h.app.show_page(8);h.hover(H::local(300.0,60.0),1.0);
     assert_eq!(h.app.page,8,"天气应是第九个页面");
-    for phrase in ["9°","毛毛雨","杭州","今天","明天","周三","周四","60%","体感 6°","湿度 58%","日出 06:52 · 日落 17:21"]{
+    for phrase in ["9°","毛毛雨","杭州","今天","明天","周三","周四","60%","体感 6°","湿度 58%","日出 06:52","日落 17:21"]{
         assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"天气页缺少：{phrase}");
     }
     for s in &h.shapes{if let egui::Shape::Text(t)=&s.shape{assert!(s.clip_rect.contains_rect(t.visual_bounding_rect()),"天气页文字被裁切：{}",t.galley.text());}}

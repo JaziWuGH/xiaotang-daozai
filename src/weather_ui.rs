@@ -196,9 +196,10 @@ impl App {
         if !meta.is_empty() {
             c.text(20.0, 121.0, &c.fit(&meta.join(" · "), 9.5, W::Regular, 166.0), 9.5, W::Regular, theme::DIM, H::Left);
         }
-        // 日出日落（当地时间）；接口没给或旧缓存里没有就不占行。
+        // 日出日落竖排在温度右侧、分隔线前的留白里；接口没给或旧缓存里没有就不显示。
         if let (Some(sunrise), Some(sunset)) = (&snapshot.sunrise, &snapshot.sunset) {
-            c.text(20.0, 133.0, &format!("日出 {sunrise} · 日落 {sunset}"), 9.5, W::Regular, theme::DIM, H::Left);
+            c.text(190.0, 78.0, &format!("日出 {sunrise}"), 9.5, W::Regular, theme::DIM, H::Right);
+            c.text(190.0, 92.0, &format!("日落 {sunset}"), 9.5, W::Regular, theme::DIM, H::Right);
         }
         let age = chrono::Utc::now().timestamp() - snapshot.at;
         let offline = self.weather.error.is_some();
