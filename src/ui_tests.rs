@@ -2782,7 +2782,9 @@ fn mascot_atlas_respects_visibility_and_skin_switches(){
                 egui::Shape::Mesh(mesh) if mesh.texture_id==atlas=>Some(mesh),_=>None,
             }).expect("新表情应画在常驻岛上");
             assert!(h.region.contains_rect(drawn.calc_bounds()),"新表情不能撑出岛体");
-            assert!((drawn.vertices[0].uv.x-expression as usize as f32/12.0).abs()<0.001);
+            // 每个表情单独一张序列图：横向铺满整张，纹理只有一列大小。
+            assert!(drawn.vertices[0].uv.x.abs()<0.001);
+            assert_eq!(h.ctx.tex_manager().read().meta(atlas).unwrap().size,[144,1440],"只保留正在播放的表情");
         }
     }
     h.app.settings.pet=false;h.frame(vec![]);assert!(h.app.pet.expressions.current().is_none());
