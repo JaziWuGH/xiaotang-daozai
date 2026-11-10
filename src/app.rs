@@ -158,6 +158,8 @@ pub enum Cmd {
     SetVolume(u32),
     /// 切换系统静音。
     ToggleMute,
+    /// 音量命令携带点击时的播放器身份，避免切换歌曲来源后误调其他应用。
+    MusicVolume(Transport,String),
     /// v0.5.5：账号清单变了，让外壳重新同步收信线程。
     MailSync,
     /// 测试某个邮箱的连接（授权码只在内存里传给工作线程）。
@@ -709,6 +711,9 @@ pub struct App {
     pub(crate) volume_quiet_until: f64,
     /// 音量条填充的缓动量（0..1），让数值变化有「量感」。
     pub(crate) volume_a: f32,
+    pub(crate) music_volume_ui: Option<(u32,bool)>,
+    pub(crate) music_volume_quiet_until: f64,
+    pub(crate) music_volume_open: bool,
     /// 上一次看到的蓝牙设备，用来只在连接/断开时提示一次。
     pub(crate) bt_shown: Vec<crate::bt::Device>,
     bt_initialized: bool,
@@ -815,6 +820,9 @@ impl App {
             volume_ui: None,
             volume_quiet_until: 0.0,
             volume_a: 0.0,
+            music_volume_ui: None,
+            music_volume_quiet_until: 0.0,
+            music_volume_open: false,
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
@@ -1344,6 +1352,7 @@ impl App {
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
     pub(crate) fn go(&mut self, page: usize, dir: f32) {
         if page == self.page || !self.settings.visible_pages[page] { return; }
+        self.music_volume_open=false;
         self.subpage=None;
         // 连点：上一段过渡还没结束时，以当前页为起点重新开始，位移速度保留。
         self.page_from = self.page;
@@ -1596,6 +1605,9 @@ impl App {
             }
             self.last_cursor = env.cursor;
         }
+        if self.music_volume_open && ctx.input_mut(|i|i.consume_key(egui::Modifiers::NONE,egui::Key::Escape)) {
+            self.music_volume_open=false;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) && self.is_editing() {
             self.cancel_edit();
         }
@@ -1609,7 +1621,9 @@ impl App {
                 let cursor=env.cursor.unwrap()-self.content_origin(win).to_vec2();
                 let mail_reading=self.page==5 && self.mail.open_uid.is_some();
                 let mail_list=self.page==5 && !self.mail.accounts.is_empty() && self.mail.open_uid.is_none() && self.mail_list_bounds().contains(cursor);
-                if mail_reading || mail_list {self.wheel_delta=0.0;}
+                let music_volume=self.page==0 && (Rect::from_min_max(Pos2::new(354.0,106.0),Pos2::new(380.0,130.0)).contains(cursor)
+                    || self.music_volume_open && crate::pages::MUSIC_VOLUME_RECT.contains(cursor));
+                if mail_reading || mail_list || music_volume {self.wheel_delta=0.0;}
                 else {
                     // 累积高精度滚轮的小幅输入；停顿或反向时丢弃上一段余量。
                     if self.t-self.wheel_at>0.18 || self.wheel_delta*scroll<0.0 {self.wheel_delta=0.0;}
@@ -1647,7 +1661,8 @@ impl App {
                 }
             }
         } else {self.wheel_delta=0.0;}
-        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || (self.is_editing() && self.open);
+        let volume_dragging=self.music_volume_open && ctx.is_being_dragged(egui::Id::new(("card-drag",true,"m-volume-track")));
+        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
@@ -2206,6 +2221,7 @@ impl App {
                 let since = *self.leave_since.get_or_insert(t);
                 if t - since >= LEAVE_DELAY {
                     self.open = false;
+                    self.music_volume_open=false;
                     self.leave_since = None;
                     self.w.tune(CLOSE.0, CLOSE.1);
                     self.h.tune(CLOSE.0, CLOSE.1);
@@ -2323,7 +2339,12 @@ impl App {
             base.faded(reveal).text(hd + (1.0 - reveal) * 10.0, 22.5, &env.date, size::DATE, W::Regular, Color32::from_rgb(210, 210, 214), H::Left);
         }
         if has_music && (p>0.1 || layout.x[bar::MUSIC].is_some()) {
-            paint::playback_bars(base,lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m),lerp(15.0,18.0,m),self.t,self.media.playing,theme::WHITE);
+            let x=lerp(local_cx+layout.x[bar::MUSIC].unwrap_or(0.0),367.0,m);
+            let y=lerp(15.0,18.0,m);
+            paint::playback_bars(base,x,y,self.t,self.media.playing,theme::WHITE);
+            if self.open && reveal>0.6 && base.hit(x-13.0,y-14.0,26.0,28.0,"header-music")
+                .on_hover_text(if self.settings.visible_pages[0]{"返回音乐播放页"}else{"打开音乐设置"})
+                .on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){self.show_page(0);}
         }
         let compact_alpha=1.0-smoothstep(0.0,0.22,p);
         if self.t<self.notification_bell_until&&!self.compact_notices()&&p<0.1 {
@@ -2416,6 +2437,7 @@ impl App {
             self.render_page(self.page, c, env, cmds);
         }
         self.nav(c);
+        if self.page==0 && c.live {self.draw_music_volume(c,cmds);}
     }
 
     fn page_title(&self, page: usize, c: &Card) {
@@ -2609,6 +2631,9 @@ impl App {
     fn update_media(&mut self, env: &Env, ctx: &egui::Context) {
         let m = &env.media;
         if !m.is_music() {
+            self.music_volume_ui=None;
+            self.music_volume_quiet_until=0.0;
+            self.music_volume_open=false;
             self.media=NowPlaying::default();
             self.media_anchor=(String::new(),0.0,0.0,false);
             self.music_artwork=None;
@@ -2620,6 +2645,10 @@ impl App {
             self.media_anchor = (m.title.clone(), m.position, env.t, m.playing);
         }
         let mut np = m.clone();
+        if self.media.source!=m.source || m.volume.is_none(){self.music_volume_open=false;}
+        if self.media.source!=m.source || self.t>=self.music_volume_quiet_until || m.volume.is_none() {
+            self.music_volume_ui=m.volume;
+        }
         if m.playing {
             let (_, pos, _, _) = &self.media_anchor;
             np.position = if let Some(sampled)=m.sampled_at {m.position+sampled.elapsed().as_secs_f64()}

@@ -20,6 +20,7 @@ struct Shell {
     media: smtc::Shared,
     seek_rx: Option<std::sync::mpsc::Receiver<bool>>,
     media_control:Option<smtc::ControlWorker>,
+    music_volume_rx:Option<(String,std::sync::mpsc::Receiver<bool>)>,
     _resource_monitor:Option<daozai::resources::Monitor>,
     resource_at:PollClock,
     guard_notified:bool,
@@ -142,6 +143,7 @@ impl Shell {
             media,
             seek_rx: None,
             media_control:None,
+            music_volume_rx:None,
             _resource_monitor:daozai::resources::Monitor::start(daozai::model::config_dir().join("diagnostics")),
             resource_at:PollClock::default(),
             guard_notified:false,
@@ -219,6 +221,14 @@ impl Shell {
     }
 
     fn env(&mut self, ctx: &egui::Context) -> Env {
+        if let Some((source,rx))=&self.music_volume_rx {
+            if let Ok(success)=rx.try_recv() {
+                if !success && self.media.lock().is_ok_and(|media|media.source==*source) {
+                    self.app.say("音乐应用音量暂不可调，请稍后重试");
+                }
+                self.music_volume_rx=None;
+            }
+        }
         let (clock, today, date) = local_now();
         // 电量变化很慢，每 5 秒读一次就够
         if self.sys.2.ready(Duration::from_secs(5)) {
@@ -517,6 +527,13 @@ impl eframe::App for Shell {
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
                     match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(t,source)){
                         Ok(Some(rx))=>self.seek_rx=Some(rx),Ok(None)=>{},Err(())=>self.app.say("播放器正在响应，请稍后重试"),
+                    }
+                }
+                Cmd::MusicVolume(command,source)=>{
+                    if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
+                    match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(command,source.clone())){
+                        Ok(Some(rx))=>self.music_volume_rx=Some((source,rx)),
+                        _=>self.app.say("音乐应用音量暂不可调，请稍后重试"),
                     }
                 }
                 Cmd::ViewMessenger(unread)=>{

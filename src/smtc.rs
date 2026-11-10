@@ -16,6 +16,9 @@ mod kugou_control;
 #[cfg(windows)]
 #[path="player_seek.rs"]
 mod player_seek;
+#[cfg(windows)]
+#[path="player_process.rs"]
+pub(crate) mod player_process;
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,6 +47,8 @@ pub struct NowPlaying {
     pub duration: f64,
     pub artwork: Option<Arc<eframe::egui::ColorImage>>,
     pub playback_type: MediaKind,
+    /// 当前播放器在 Windows 音量混合器中的音量与静音状态。
+    pub volume: Option<(u32,bool)>,
 }
 
 impl NowPlaying {
@@ -372,7 +377,7 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
     let album=media_text(props.AlbumTitle())?;
     if !has_position{sampled_at=None;}
     let playback_type=match playback_type.map(|kind|kind.0){Some(1)=>MediaKind::Music,Some(2)=>MediaKind::Video,_=>MediaKind::Unknown};
-    Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type })
+    Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type, volume:None })
 }
 
 #[cfg(not(windows))]
@@ -387,13 +392,20 @@ pub enum Transport {
     Prev,
     /// 跳到第几秒。
     Seek(f64),
+    SetVolume(u32),
+    SetMute(bool),
 }
 
 type ControlRequest=(Transport,String,std::time::Instant,Option<std::sync::mpsc::SyncSender<bool>>);
 pub struct ControlWorker {requests:std::sync::mpsc::SyncSender<ControlRequest>}
 impl ControlWorker {
     pub fn start(ctx:eframe::egui::Context)->Option<Self>{
-        Self::start_with(ctx,|command,source|match command{Transport::Seek(seconds)=>seek(seconds,source),_=>{control(command,source);true}})
+        Self::start_with(ctx,|command,source|match command{
+            Transport::Seek(seconds)=>seek(seconds,source),
+            Transport::SetVolume(percent)=>crate::music_volume::set_volume(source,percent),
+            Transport::SetMute(muted)=>crate::music_volume::set_mute(source,muted),
+            _=>{control(command,source);true}
+        })
     }
     fn start_with(ctx:eframe::egui::Context,handle:impl Fn(Transport,&str)->bool+Send+'static)->Option<Self>{
         let (requests,rx)=std::sync::mpsc::sync_channel::<ControlRequest>(8);
@@ -405,7 +417,8 @@ impl ControlWorker {
                 while let Ok(next)=rx.try_recv(){batch.push(next);}
                 let mut batch=batch.into_iter().peekable();
                 while let Some((command,source,created,result))=batch.next(){
-                    let superseded=matches!(command,Transport::Seek(_)) && batch.peek().is_some_and(|next|matches!(next.0,Transport::Seek(_)) && next.1==source);
+                    let superseded=batch.peek().is_some_and(|next|next.1==source && matches!((command,next.0),
+                        (Transport::Seek(_),Transport::Seek(_)) | (Transport::SetVolume(_),Transport::SetVolume(_))));
                     let success=if superseded {false}
                         else if created.elapsed()>Duration::from_secs(5){crate::resources::CONTROL_DROPPED.fetch_add(1,std::sync::atomic::Ordering::Relaxed);false}
                         else{handle(command,&source)};
@@ -416,7 +429,7 @@ impl ControlWorker {
         Some(Self{requests})
     }
     pub fn submit(&self,command:Transport,source:String)->Result<Option<std::sync::mpsc::Receiver<bool>>,()>{
-        let (result,receiver)=if matches!(command,Transport::Seek(_)){let (tx,rx)=std::sync::mpsc::sync_channel(1);(Some(tx),Some(rx))}else{(None,None)};
+        let (result,receiver)=if matches!(command,Transport::Seek(_)|Transport::SetVolume(_)|Transport::SetMute(_)){let (tx,rx)=std::sync::mpsc::sync_channel(1);(Some(tx),Some(rx))}else{(None,None)};
         self.requests.try_send((command,source,std::time::Instant::now(),result)).map_err(|_|{crate::resources::CONTROL_DROPPED.fetch_add(1,std::sync::atomic::Ordering::Relaxed);})?;
         Ok(receiver)
     }
@@ -425,6 +438,8 @@ impl ControlWorker {
 /// 控制当前媒体会话（播放/暂停、上一首、下一首）。
 #[cfg(windows)]
 pub fn control(cmd: Transport,source:&str) {
+    if let Transport::SetVolume(percent)=cmd {crate::music_volume::set_volume(source,percent);return;}
+    if let Transport::SetMute(muted)=cmd {crate::music_volume::set_mute(source,muted);return;}
     if let Transport::Seek(seconds)=cmd {let _=seek(seconds,source);return;}
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
     let _apartment=init_winrt();
@@ -439,6 +454,7 @@ pub fn control(cmd: Transport,source:&str) {
         Transport::Next => session.TrySkipNextAsync(),
         Transport::Prev => session.TrySkipPreviousAsync(),
         Transport::Seek(secs) => session.TryChangePlaybackPositionAsync((secs.max(0.0) * 10_000_000.0) as i64),
+        Transport::SetVolume(_)|Transport::SetMute(_)=>unreachable!(),
     });
 }
 
@@ -667,6 +683,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
         let mut playback_clock=PlaybackClock::default();
         let mut memory=MediaMemory::default();
         let mut selected_source=String::new();
+        let mut volume=crate::music_volume::Reader::default();
         #[cfg(windows)]
         let mut netease=netease_playback::Reader::default();
         loop {
@@ -688,6 +705,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             let native_pending=false;
             let mut np=choose_media_for_source(system,native,&selected_source,native_pending).unwrap_or_default();
             memory.update(&mut np,std::time::Instant::now());
+            np.volume=volume.poll(&np.source);
             if !np.source.is_empty(){selected_source=np.source.clone();}
             #[cfg(windows)]
             netease.fill_artwork(&mut np);
@@ -697,7 +715,7 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             }
             if let Ok(mut cur) = state.lock() {
                 let changed=cur.title!=np.title || cur.artist!=np.artist || cur.playing!=np.playing
-                    || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration
+                    || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration || cur.volume!=np.volume
                     || cur.artwork.as_ref().zip(np.artwork.as_ref()).map_or(cur.artwork.is_some()!=np.artwork.is_some(),|(old,new)|!Arc::ptr_eq(old,new));
                 *cur = np;
                 if changed{ctx.request_repaint();}
@@ -750,6 +768,26 @@ mod tests {
         while handled.lock().unwrap().len()<4 && std::time::Instant::now()<until{std::thread::sleep(Duration::from_millis(5));}
         assert_eq!(*handled.lock().unwrap(),vec![(Transport::Toggle,"QQMusic.exe".into()),(Transport::Seek(30.0),"QQMusic.exe".into()),(Transport::Seek(40.0),"Spotify.exe".into()),(Transport::Next,"QQMusic.exe".into())]);
         drop(worker);
+    }
+
+    #[test]
+    fn music_volume_queue_coalesces_only_the_same_players_volume_changes(){
+        let _serial=CONTROL_TESTS.lock().unwrap_or_else(|e|e.into_inner());wait_lane_idle(&crate::resources::CONTROL);
+        let (entered,started)=std::sync::mpsc::channel();let (release,wait)=std::sync::mpsc::channel::<()>();
+        let handled=Arc::new(Mutex::new(Vec::new()));let log=handled.clone();
+        let worker=ControlWorker::start_with(eframe::egui::Context::default(),move|command,source|{
+            if command==Transport::Toggle{let _=entered.send(());let _=wait.recv();}
+            log.lock().unwrap().push((command,source.to_string()));true
+        }).unwrap();
+        worker.submit(Transport::Toggle,"QQMusic.exe".into()).unwrap();started.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut results=Vec::new();
+        for (command,source) in [(Transport::SetVolume(10),"QQMusic.exe"),(Transport::SetVolume(20),"QQMusic.exe"),(Transport::SetVolume(30),"cloudmusic.exe"),(Transport::SetMute(true),"QQMusic.exe")]{
+            results.push(worker.submit(command,source.into()).unwrap().unwrap());
+        }
+        drop(release);
+        let outcomes:Vec<_>=results.iter().map(|rx|rx.recv_timeout(Duration::from_secs(2)).unwrap()).collect();
+        assert_eq!(outcomes,[false,true,true,true]);
+        assert_eq!(*handled.lock().unwrap(),vec![(Transport::Toggle,"QQMusic.exe".into()),(Transport::SetVolume(20),"QQMusic.exe".into()),(Transport::SetVolume(30),"cloudmusic.exe".into()),(Transport::SetMute(true),"QQMusic.exe".into())]);
     }
 
     #[test]
