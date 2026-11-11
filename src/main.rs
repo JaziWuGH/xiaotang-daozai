@@ -117,8 +117,10 @@ impl Shell {
 
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         diagnostics::graphics(cc);
+        let running_compat=cc.wgpu_render_state.is_some();
         diagnostics::startup("加载本地配置");
         let mut app = App::new(&cc.egui_ctx, Options::default());
+        app.render_compat_running=running_compat;
         #[cfg(feature="record")] let quota_demo=std::env::var("DAOZAI_QUOTA_DEMO").is_ok();
         #[cfg(not(feature="record"))] let quota_demo=false;
         diagnostics::startup("初始化额度配置");
@@ -589,6 +591,13 @@ impl eframe::App for Shell {
                         }
                     }
                 }
+                Cmd::RestartApp=>{
+                    // 先拉起新进程（它会等本进程退出），再像托盘「退出」一样摘图标后结束。
+                    if diagnostics::spawn_replacement(){
+                        #[cfg(windows)] if let Some(tray)=&self.tray {tray.exit_process();}
+                        std::process::exit(0);
+                    }else{self.app.say("无法重新启动岛仔，请从托盘退出后手动打开");}
+                }
                 Cmd::Open(p) => {if let Err(e)=open_path(&p){self.app.say(e);}},
                 Cmd::OpenUrl(url)=>{
                     if let Some(url)=daozai::mail::web_url(&url) {
@@ -908,6 +917,8 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> eframe::Result<()> {
+    // 自动重启或「立即重启」拉起的新进程：先等旧进程退出，再做单实例检查。
+    diagnostics::wait_for_previous_instance();
     // 单实例（与原版同名互斥体）
     #[cfg(windows)]
     if !daozai::tray::single_instance() {

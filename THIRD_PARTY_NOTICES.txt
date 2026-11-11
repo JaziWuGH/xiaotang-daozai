@@ -62,6 +62,8 @@ SOFTWARE.
 LobeHub Icons
 https://github.com/lobehub/lobe-icons
 AI 服务标识用于识别相应服务。
+新增标识来源：packages/static-svg/icons/opencode.svg、minimax-color.svg、zhipu.svg。
+对应本项目 assets/ai-icons/opencode.svg、minimax.svg、glm.svg；沿用下列 MIT 许可，不授予商标权。
 
 MIT License
 
@@ -61603,3 +61605,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+
+Open-Meteo 天气数据
+https://open-meteo.com/
+天气与地理编码数据按 CC BY 4.0 授权，来源信息见 https://open-meteo.com/en/licence 。
+许可：https://creativecommons.org/licenses/by/4.0/
+界面会将温度取整显示，并将天气代码转换为中文描述与矢量图标。

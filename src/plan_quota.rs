@@ -169,30 +169,15 @@ fn parse_glm(v: &Value, s: &mut Snapshot) -> Result<(), String> {
     if !v["error"].is_null() || v["success"].as_bool() == Some(false) || (!v["code"].is_null() && number(&v["code"]) != Some(200.0) && number(&v["code"]) != Some(0.0)) {
         return Err(glm_error(v,None).0);
     }
-    s.plan = "Coding Plan".into();
     let data = if v["data"].is_object() { &v["data"] } else { v };
     let rows = data["limits"].as_array().ok_or("GLM 额度响应缺少限制列表")?;
     if rows.len()>16{return Err("GLM 返回过多额度窗口，请检查响应版本".into());}
-    for row in rows {
-        let kind = row["type"].as_str().unwrap_or_default();
-        if !matches!(kind, "TOKENS_LIMIT" | "CREDIT_LIMIT" | "TIME_LIMIT") { continue; }
-        // percentage is consumed percent, not a raw token count. Never infer
-        // a token balance or plan tier from it.
-        let Some(p) = percent(&row["percentage"]) else { continue; };
-        // The official plugin confirms percent semantics, but does not define
-        // numeric unit codes or nextResetTime units. Do not guess a cadence or
-        // timestamp from secondary implementations. Preserve distinct source types.
-        let label = match kind {
-            "TIME_LIMIT" => "工具额度",
-            "CREDIT_LIMIT" => "积分额度",
-            _ => "编程额度",
-        };
-        let w = window(label, None, 100.0 - p, None);
-        if kind == "TIME_LIMIT" { s.extra.push(w); } else { s.windows.push(w); }
+    if !rows.iter().any(|row|matches!(row["type"].as_str(),Some("TOKENS_LIMIT"|"CREDIT_LIMIT")) && percent(&row["percentage"]).is_some()){
+        return Err("GLM 未返回可识别的编程额度（工具额度不能代替编程额度）".into());
     }
-    // Existing widgets render main windows only. A tools-only response does not
-    // confirm a coding quota and must not yield a blank successful connection.
-    if s.windows.is_empty() { return Err("GLM 未返回可识别的编程额度（工具额度不能代替编程额度）".into()); }
+    // 复用原 ZCode 已支持的周期和重置时间解析，保留两种登录来源的相同口径。
+    *s=super::zcode::coding(&serde_json::json!({"data":data}))?;
+    if let Some(level)=data["level"].as_str().map(str::trim).filter(|v|!v.is_empty()&&v.len()<=64){s.plan=level.into();}
     Ok(())
 }
 
@@ -237,6 +222,15 @@ mod tests {
             assert!(!error.contains("synthetic-secret")&&!error.contains("synthetic-glm-key"));assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed),1);
         }
     }
+    #[test] fn glm_pr46_response_keeps_plan_periods_and_rejects_failed_payloads(){
+        let v=json!({"code":200,"success":true,"data":{"level":"lite","limits":[
+            {"type":"CREDIT_LIMIT","unit":3,"number":5,"percentage":46,"nextResetTime":1793892721234i64},
+            {"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":10,"nextResetTime":1794366124964i64}]}});
+        let s=parse(PlanProvider::GlmChina,&v).unwrap();assert_eq!(s.plan,"lite");assert_eq!(s.windows.len(),2);
+        assert_eq!(s.windows[0].remaining,54.0);assert_eq!(s.windows[0].reset,Some(1793892721));assert_eq!(s.windows[1].remaining,90.0);
+        let mut rejected=v.clone();rejected["success"]=json!(false);assert!(parse(PlanProvider::GlmChina,&rejected).is_err());
+        rejected=v;rejected["error"]=json!({"code":"1003","message":"synthetic-secret"});assert!(parse(PlanProvider::GlmChina,&rejected).is_err());
+    }
     #[test] fn opencode_percentage_and_iso_reset() {
         let s = parse(PlanProvider::OpenCodeGo, &json!({"usage":{"rolling":{"percent":25,"resetsAt":"2030-01-01T00:00:00Z"},"weekly":{"percent":100},"monthly":{"percent":0}}})).unwrap();
         assert_eq!(s.windows.len(),3); assert_eq!(s.windows[0].remaining,75.0); assert_eq!(s.windows[0].reset,Some(1893456000)); assert_eq!(s.windows[1].remaining,0.0);
@@ -262,7 +256,7 @@ mod tests {
     }
     #[test] fn glm_used_percentage_windows_and_tools_are_separate() {
         let s = parse(PlanProvider::GlmChina,&json!({"success":true,"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":20,"nextResetTime":1900000000000i64},{"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":75},{"type":"TIME_LIMIT","unit":5,"number":1,"percentage":50},{"type":"FUTURE_LIMIT","percentage":0}]}})).unwrap();
-        assert_eq!(s.windows.len(),2); assert_eq!(s.extra.len(),1); assert_eq!(s.windows[0].remaining,80.0); assert_eq!(s.windows[0].reset,None); assert_eq!(s.windows[0].seconds,None); assert_eq!(s.windows[1].remaining,25.0);
+        assert_eq!(s.windows.len(),2); assert_eq!(s.extra.len(),1); assert_eq!(s.windows[0].remaining,80.0); assert_eq!(s.windows[0].reset,Some(1900000000)); assert_eq!(s.windows[0].seconds,Some(18000)); assert_eq!(s.windows[1].remaining,25.0);
         assert!(parse(PlanProvider::GlmChina,&json!({"data":{"limits":[{"type":"TOKENS_LIMIT"}]}})).is_err());
     }
     #[test] fn opencode_unknown_rolling_cadence_preserves_primary_order() {

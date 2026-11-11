@@ -364,6 +364,13 @@ pub struct Tray {
 }
 
 impl Tray {
+    /// 与托盘菜单「退出」相同：先摘图标再结束进程（用于「立即重启」）。
+    pub fn exit_process(&self) -> ! {
+        unsafe { remove_icon(self.hwnd); ExitProcess(0); }
+    }
+}
+
+impl Tray {
     pub fn start(state: State) -> Option<Self> {
         let shared = Arc::new(Mutex::new(state));
         let (event_tx, event_rx) = channel();

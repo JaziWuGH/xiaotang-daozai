@@ -360,7 +360,10 @@ impl Service {
     }
 }
 fn http_agent()->ureq::Agent{
-    let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).redirects(0);
+    http_agent_with_connect_timeout(Duration::from_secs(30))
+}
+fn http_agent_with_connect_timeout(timeout:Duration)->ureq::Agent{
+    let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).timeout_connect(timeout).redirects(0);
     let proxy=["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter().find_map(|key|std::env::var(key).ok().filter(|s|!s.is_empty())).or_else(system_proxy);
     if let Some(proxy)=proxy.and_then(|s|ureq::Proxy::new(s).ok()){builder=builder.proxy(proxy);}
     builder.build()
