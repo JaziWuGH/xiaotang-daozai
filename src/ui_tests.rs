@@ -1029,6 +1029,30 @@ fn island_position_drag_clamps_to_existing_limits_and_stays_resident(){
 }
 
 #[test]
+fn island_position_drag_below_a_top_bar_switches_edges_like_the_bare_screen(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    use crate::model::{Dock,Settings};
+    let monitor=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
+    let display=crate::display_layout::Display{id:"d".into(),label:"d".into(),bounds:monitor,work_top:28,primary:true};
+    let bounds=crate::display_layout::placement_bounds(&display,true);
+    for to in [Dock::Left,Dock::Right] {
+        let mut h=H::new();h.app.settings.save();
+        let start=island_drag_header(&mut h,bounds,1.0);
+        island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
+        let size=Vec2::new(1920.0,1052.0);
+        let end=if to==Dock::Left{Pos2::new(0.0,size.y*0.6)}else{Pos2::new(size.x,size.y*0.6)};
+        for _ in 0..30{island_drag_frame(&mut h,bounds,1.0,Some(end),None);}
+        assert_eq!(h.app.settings.dock,to);
+        let back=Pos2::new(size.x*0.5,0.0);
+        for _ in 0..30{island_drag_frame(&mut h,bounds,1.0,Some(back),None);}
+        assert_eq!(h.app.settings.dock,Dock::Top,"拖回顶栏下沿应能回到顶部");
+        island_drag_frame(&mut h,bounds,1.0,Some(back),Some(false));
+        assert_eq!(Settings::load().dock,Dock::Top);
+        assert!(Settings::load().avoid_top_bar,"拖动不改变避开顶栏设置");
+    }
+}
+
+#[test]
 fn island_position_drag_switches_between_all_three_edges_and_saves_on_release(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     use crate::model::{Dock,IslandShape,Settings};
@@ -3645,8 +3669,8 @@ fn display_choice_saves_and_keeps_disconnected_selection(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.app.settings_open=true;h.ctx.set_embed_viewports(false);
     let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
     h.app.displays=vec![
-        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,primary:true},
-        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,primary:false},
+        crate::display_layout::Display{id:"internal".into(),label:"显示器 1 · 主屏".into(),bounds,work_top:0,primary:true},
+        crate::display_layout::Display{id:r"\\?\DISPLAY#external".into(),label:"显示器 2 · 外接屏".into(),bounds,work_top:0,primary:false},
     ];
     let mut raster=crate::preview_raster::Raster::new(690,560);
     fn frame(h:&mut H,raster:&mut crate::preview_raster::Raster,events:Vec<egui::Event>){

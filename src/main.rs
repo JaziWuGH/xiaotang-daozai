@@ -31,7 +31,7 @@ struct Shell {
     placement_at: PollClock,
     placement_scale: f32,
     /// 上次定位时的目标屏幕与水平位置；变化后立即重新定位，不等下一次轮询。
-    placement_key: (String, i32, daozai::model::Dock),
+    placement_key: (String, i32, daozai::model::Dock, bool),
     win_x: f32,
     sys: (Option<u8>, bool, PollClock),
     #[cfg(windows)]
@@ -173,7 +173,7 @@ impl Shell {
             placed: false,
             placement_at: PollClock::default(),
             placement_scale: 0.0,
-            placement_key: (String::new(), 0, daozai::model::Dock::Top),
+            placement_key: (String::new(), 0, daozai::model::Dock::Top, true),
             win_x: 0.0,
             sys: (None, false, PollClock::default()),
             #[cfg(windows)]
@@ -268,7 +268,8 @@ impl Shell {
         // 所在屏幕换算到窗口逻辑坐标，供通知详情等浮层避开屏幕边缘。
         #[cfg(windows)]
         let screen=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id).map(|d|{
-            let b=d.bounds;
+            // 与岛体摆放用同一范围：避开顶栏后，拖动换边和浮层都以顶栏下沿为顶边。
+            let b=daozai::display_layout::placement_bounds(d,self.app.settings.avoid_top_bar);
             egui::Rect::from_min_max(Pos2::new(b.left as f32/ppp-origin.x,b.top as f32/ppp-origin.y),Pos2::new(b.right as f32/ppp-origin.x,b.bottom as f32/ppp-origin.y))
         });
         #[cfg(not(windows))]
@@ -354,7 +355,7 @@ impl eframe::App for Shell {
             self.app.foreground_changed();
         }
         #[cfg(windows)]
-        let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock);
+        let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock,self.app.settings.avoid_top_bar);
         #[cfg(windows)]
         if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
             self.placement_at=PollClock::now();
@@ -363,7 +364,7 @@ impl eframe::App for Shell {
             self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
             let offset=self.app.settings.island_offset_ratio();
-            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,d.bounds,offset,self.app.settings.dock))) {
+            if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,daozai::display_layout::placement_bounds(d,self.app.settings.avoid_top_bar),offset,self.app.settings.dock))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
