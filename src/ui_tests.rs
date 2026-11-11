@@ -5,7 +5,7 @@ mod enterprise_messenger;
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
 fn weather_content_tap_switches_both_ways_with_a_short_transition(){

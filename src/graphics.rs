@@ -21,7 +21,12 @@ fn forced_compatible()->bool {
 }
 
 pub fn run(mut options:eframe::NativeOptions,mut launch:impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
-    if forced_compatible() {return launch(compatible(options));}
+    // 上次崩在显卡 OpenGL 驱动里时，崩溃处理留下的标记会在这里转成设置。
+    let _=daozai::renderer::apply_pending_fallback();
+    if forced_compatible() || daozai::renderer::compat_requested() {
+        daozai::renderer::set_compat_active(true);
+        return launch(compatible(options));
+    }
     options.renderer=eframe::Renderer::Glow;
     let fallback_options=compatible(options.clone());
     let error=match launch(options) {
@@ -29,6 +34,7 @@ pub fn run(mut options:eframe::NativeOptions,mut launch:impl FnMut(eframe::Nativ
         Err(error @ (eframe::Error::OpenGL(_)|eframe::Error::Glutin(_)|eframe::Error::NoGlutinConfigs(..)))=>error,
         Err(error)=>return Err(error),
     };
+    daozai::renderer::set_compat_active(true);
     launch(fallback_options).map_err(|fallback|eframe::Error::AppCreation(format!(
         "OpenGL 初始化失败：{error}\n兼容图形后端也无法启动：{fallback}\n请安装电脑厂商提供的显卡驱动后重试。"
     ).into()))

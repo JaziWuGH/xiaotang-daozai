@@ -184,6 +184,8 @@ pub enum Cmd {
     CalendarForget,
     /// 选择 .ics 文件导入本机日程。
     CalendarImport,
+    /// 重启岛仔（切换渲染方式后生效）。
+    RestartApp,
 }
 
 /// 毛玻璃皮肤下原生窗口区域的组成部分（相对 `win` 左上角，逻辑点）。
@@ -596,6 +598,8 @@ struct PositionDrag {
 pub struct App {
     pub opts: Options,
     pub settings: model::Settings,
+    /// 本次运行实际使用兼容渲染（Direct3D 12）；设置里的开关与它不同时提示重启。
+    pub render_compat_running: bool,
     pub(crate) todos: model::TodoList,
     pub(crate) water: model::Water,
     pub(crate) shelf: model::Shelf,
@@ -769,6 +773,7 @@ impl App {
         let weather=crate::weather::State::load(&settings.weather_city);
         Self {
             opts,
+            render_compat_running: settings.render_compat,
             settings,
             todos: model::TodoList::load(),
             water: model::Water::default(),

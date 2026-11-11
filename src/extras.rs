@@ -1272,6 +1272,20 @@ impl App {
                             setting_row(ui,"开机启动","登录 Windows 时自动打开岛仔",&mut a);
                             if a!=autostart{self.pending.push(Cmd::ToggleAutostart);}
                         });
+                        settings_label(ui,"图形渲染");
+                        settings_card(ui,|ui|{
+                            let before=self.settings.render_compat;
+                            setting_row(ui,"兼容渲染（Direct3D 12）","画面闪烁、错乱，或打开设置后崩溃退出时开启；切换后重启岛仔生效",&mut self.settings.render_compat);
+                            // 手动关闭后不再显示自动切换的原因；再次开启视为手动开启。
+                            if before!=self.settings.render_compat {self.settings.render_compat_reason.clear();}
+                            if !self.settings.render_compat_reason.is_empty() {settings_hint(ui,&self.settings.render_compat_reason);}
+                            if self.settings.render_compat!=self.render_compat_running {
+                                ui.horizontal(|ui|{
+                                    ui.label(egui::RichText::new("重启岛仔后生效").size(12.0).color(Color32::from_rgb(230,150,40)));
+                                    if ui.button("立即重启").clicked(){self.pending.push(Cmd::RestartApp);}
+                                });
+                            }
+                        });
                         settings_label(ui,"岛体外观");
                         settings_card(ui,|ui|{
                             use crate::model::{self as model,Skin};
