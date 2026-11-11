@@ -1791,9 +1791,33 @@ fn wheel_scrolls_lists_only_inside_content_and_respects_edges(){
         assert_eq!(h.app.page,page,"有更多内容时应先滚动列表");
         assert_eq!(if page==3 {h.app.shelf_first}else{h.app.todo_first},1);
         h.hover(H::local(300.0,60.0),0.25);h.wheel(-40.0);
-        assert_eq!(h.app.page,if page==3 {page+1}else{page},"待办溢出时滚到底也应留在本页");
+        assert_eq!(h.app.page,page,"内容溢出时滚到底也应留在本页");
         h.app.show_page(page);h.hover(H::local(210.0,18.0),0.3);h.wheel(-40.0);
         assert_eq!(h.app.page,page+1,"顶栏滚轮不应被内容列表拦截");
+    }
+}
+
+#[test]
+fn wheel_overflowing_shelf_stays_at_both_edges(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    for count in [6,9]{
+        h.app.shelf.items=(0..count).map(|i|std::path::PathBuf::from(format!("scroll-test-{i}.txt"))).collect();
+        h.app.shelf_first=0;h.app.show_page(3);
+        let last=count-5;
+        for (delta,first) in [(40.0_f32,0),(-40.0,1),(-400.0,last),(-40.0,last),(40.0,last-1),(400.0,0),(40.0,0)]{
+            h.hover(H::local(300.0,60.0),0.7);
+            for _ in 0..(delta.abs() as usize/40){h.wheel(delta.signum()*40.0);}
+            assert_eq!(h.app.page,3,"置物架溢出后连续滚动或停顿再滚都应留在本页，条数 {count}");
+            assert_eq!(h.app.shelf_first,first);
+        }
+        for (delta,page) in [(-40.0,4),(40.0,2)]{
+            h.hover(H::local(300.0,60.0),0.7);
+            h.click(H::local(if delta<0.0 {398.0}else{21.0},68.0));
+            assert_eq!(h.app.page,page,"置物架溢出后仍应允许箭头切页");
+            h.app.show_page(3);h.hover(H::local(210.0,18.0),0.3);h.wheel(delta);
+            assert_eq!(h.app.page,page,"置物架顶栏仍应允许滚轮翻页");
+            h.app.show_page(3);
+        }
     }
 }
 
@@ -6540,6 +6564,13 @@ fn calendar_add_button_does_not_overlap_the_battery_ring(){
 #[test]
 fn wheel_short_lists_turn_pages(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    for count in [0,1,5]{
+        h.app.shelf.items=(0..count).map(|i|std::path::PathBuf::from(format!("scroll-test-{i}.txt"))).collect();
+        for (delta,page) in [(-40.0,4),(40.0,2)]{
+            h.app.show_page(3);h.hover(H::local(300.0,60.0),0.5);h.wheel(delta);
+            assert_eq!(h.app.page,page,"置物架未溢出应翻页，条数 {count}");
+        }
+    }
     for count in [0,1,3]{
         h.app.todos.items=(0..count).map(|i|crate::model::TodoItem{text:format!("任务 {i}"),..Default::default()}).collect();
         for (delta,page) in [(-40.0,5),(40.0,3)]{
