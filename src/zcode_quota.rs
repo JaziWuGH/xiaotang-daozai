@@ -48,7 +48,7 @@ fn read(agent:&ureq::Agent,url:&str,auth:&str,device_mid:Option<&str>)->Result<V
     serde_json::from_reader(response.into_reader().take(1024*1024)).map_err(|_|"ZCode 用量响应无效".into())
 }
 fn success(v:&Value)->bool{ matches!(v["code"].as_i64(),Some(0|200)) || (v["code"].is_null()&&v["success"]==true) }
-fn coding(v:&Value)->Result<Snapshot,String>{
+pub(super) fn coding(v:&Value)->Result<Snapshot,String>{
     let mut snapshot=Snapshot{plan:"Coding Plan".into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     for row in v["data"]["limits"].as_array().into_iter().flatten(){
         let Some(used)=super::number(&row["percentage"]).filter(|v|(0.0..=100.0).contains(v)) else{continue;};

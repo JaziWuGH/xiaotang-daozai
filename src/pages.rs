@@ -245,7 +245,7 @@ impl App {
             col.painter.galley(col.pos(246.0,61.0-galley.size().y/(2.0*c.s)),galley,theme::GRAY);
             if self.ly.error.is_some() {
                 col.text(246.0,87.0,"点击重试",9.0,W::Regular,theme::GRAY,H::Left);
-                if c.hit(243.0,28.0,136.0,74.0,"lyrics-retry").on_hover_text("重新查询当前歌曲的歌词").clicked(){self.ly.key.clear();}
+                if c.hit(243.0,28.0,136.0,74.0,"lyrics-retry").on_hover_text("重新查询当前歌曲的歌词").clicked(){self.ly.key.clear();self.ly.manual_retry=true;}
             }
         }
     }

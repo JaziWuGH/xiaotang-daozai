@@ -62,6 +62,8 @@ SOFTWARE.
 LobeHub Icons
 https://github.com/lobehub/lobe-icons
 AI 服务标识用于识别相应服务。
+新增标识来源：packages/static-svg/icons/opencode.svg、minimax-color.svg、zhipu.svg。
+对应本项目 assets/ai-icons/opencode.svg、minimax.svg、glm.svg；沿用下列 MIT 许可，不授予商标权。
 
 MIT License
 

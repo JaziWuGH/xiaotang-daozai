@@ -100,23 +100,42 @@ impl Validated {
 static VALIDATING:std::sync::atomic::AtomicBool=std::sync::atomic::AtomicBool::new(false);
 struct ValidationSlot;
 impl Drop for ValidationSlot{fn drop(&mut self){VALIDATING.store(false,std::sync::atomic::Ordering::Release);}}
-pub struct Connect {rx:mpsc::Receiver<Result<Validated,String>>,cancel:std::sync::Arc<std::sync::atomic::AtomicBool>}
+pub struct Connect {rx:mpsc::Receiver<Result<Validated,String>>,cancel:std::sync::Arc<std::sync::atomic::AtomicBool>,deadline:Option<std::time::Instant>}
 impl Drop for Connect{fn drop(&mut self){self.cancel.store(true,std::sync::atomic::Ordering::Release);}}
 impl Connect {
+    #[cfg(test)]
+    pub(crate) fn pending_test()->(Self,std::sync::Arc<std::sync::atomic::AtomicBool>){
+        let (_tx,rx)=mpsc::channel();let cancel=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        (Self{rx,cancel:cancel.clone(),deadline:None},cancel)
+    }
     pub fn start(provider:Provider,source:String,alias:String,key:String)->Self{
+        Self::start_inner(provider,source,alias,key,false)
+    }
+    pub fn start_auto(source:String,alias:String,key:String)->Self{
+        Self::start_inner(Provider::NewApi,source,alias,key,true)
+    }
+    fn start_inner(provider:Provider,source:String,alias:String,key:String,automatic:bool)->Self{
         let(tx,rx)=mpsc::channel();let cancel=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));let worker_cancel=cancel.clone();
-        if VALIDATING.compare_exchange(false,true,std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire).is_err(){let _=tx.send(Err("上次验证仍在结束，请稍后重试".into()));return Self{rx,cancel};}
+        let deadline=automatic.then(||std::time::Instant::now()+relay::AUTO_TIMEOUT);
+        if VALIDATING.compare_exchange(false,true,std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire).is_err(){let _=tx.send(Err("上次验证仍在结束，请稍后重试".into()));return Self{rx,cancel,deadline};}
         std::thread::spawn(move||{let _slot=ValidationSlot;
             let result=(||{
                 let source=if provider.relay(){relay::normalize_base_url(&source)?}else{endpoint(provider,&source)?};
                 let key=key.trim();if key.is_empty()||key.len()>8192||key.chars().any(char::is_whitespace)||key.chars().any(char::is_control){return Err("请输入有效的 API Key".into());}
-                let snapshot=request(&super::http_agent(),provider,&source,key,Some(&worker_cancel)).map_err(|e|e.0)?;
-                let alias=if alias.trim().is_empty(){provider.name().into()}else{alias.trim().to_owned()};
+                let (provider,snapshot)=if automatic{
+                    let (kind,snapshot)=relay::detect_cancellable(super::http_agent_with_connect_timeout,&source,key,||worker_cancel.load(std::sync::atomic::Ordering::Acquire)).map_err(|e|e.0)?;
+                    (match kind{Kind::NewApi=>Provider::NewApi,Kind::OneApi=>Provider::OneApi,Kind::Sub2Api=>Provider::Sub2Api},snapshot)
+                }else{(provider,request(&super::http_agent(),provider,&source,key,Some(&worker_cancel)).map_err(|e|e.0)?)};
+                if worker_cancel.load(std::sync::atomic::Ordering::Acquire){return Err("已取消连接".into());}
+                let alias=if alias.trim().is_empty(){if automatic{url::Url::parse(&source).ok().and_then(|u|u.host_str().map(str::to_owned)).unwrap_or_else(||"中转站".into())}else{provider.name().into()}}else{alias.trim().to_owned()};
                 Ok(Validated{provider,source,alias,key:key.into(),snapshot})
             })();let _=tx.send(result);
-        });Self{rx,cancel}
+        });Self{rx,cancel,deadline}
     }
-    pub fn poll(&self)->Option<Result<Validated,String>>{self.rx.try_recv().ok()}
+    pub fn poll(&self)->Option<Result<Validated,String>>{
+        if self.deadline.is_some_and(|d|std::time::Instant::now()>=d){self.cancel.store(true,std::sync::atomic::Ordering::Release);return Some(Err("自动识别超时，请稍后重试或在高级设置中手动选择".into()));}
+        self.rx.try_recv().ok()
+    }
 }
 impl Config {
     pub fn connect_api(&mut self,connected:&Connected,target:Option<&str>)->Result<String,String>{
@@ -132,6 +151,23 @@ impl Config {
 }
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn expired_detection_discards_even_a_ready_success_and_cancels_the_worker(){
+        let (tx,rx)=mpsc::channel();let cancel=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tx.send(Ok(Validated{provider:Provider::Sub2Api,source:"https://relay.example/prefix".into(),alias:"中转".into(),key:"synthetic".into(),snapshot:Snapshot::default()})).ok().unwrap();
+        let connection=Connect{rx,cancel:cancel.clone(),deadline:Some(std::time::Instant::now())};
+        assert!(connection.poll().unwrap().err().unwrap().contains("超时"));assert!(cancel.load(std::sync::atomic::Ordering::Acquire));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn synthetic_key_roundtrips_without_accessing_saved_accounts(){
+        let slot=format!("acceptance-{}-{}",std::process::id(),chrono::Utc::now().timestamp_nanos_opt().unwrap());
+        struct Cleanup(String);impl Drop for Cleanup{fn drop(&mut self){let _=delete_slot(&self.0);}}
+        let _cleanup=Cleanup(slot.clone());
+        save(&slot,"synthetic-quota-acceptance-key").unwrap();
+        assert_eq!(load(&slot).unwrap(),"synthetic-quota-acceptance-key");
+        delete_slot(&slot).unwrap();assert!(load(&slot).is_err());
+    }
     #[test] fn malformed_or_unknown_config_never_proves_a_key_orphaned(){
         for value in [serde_json::json!({}),serde_json::json!({"accounts":[{"provider":"MiniMax"}]}),serde_json::json!({"accounts":[{"id":"a","provider":"FutureProvider","alias":"a","source":"","slot":"keep"}]})]{assert!(persisted_active_slots(&value).is_err());}
         let value=serde_json::json!({"accounts":[{"id":"a","provider":"MiniMax","alias":"a","source":"cn","slot":"keep"}]});assert_eq!(persisted_active_slots(&value).unwrap(),vec!["keep"]);

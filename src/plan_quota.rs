@@ -34,19 +34,52 @@ pub fn request(agent: &ureq::Agent, provider: PlanProvider, key: &str) -> Result
     if key.is_empty() || key.len() > 8192 || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(("请输入有效的套餐 API Key".into(), 0));
     }
+    let glm=matches!(provider,PlanProvider::GlmChina|PlanProvider::GlmGlobal);
     let response = agent.get(provider.endpoint())
         .set("Authorization", &provider.authorization(key)).set("Accept", "application/json")
-        .call().map_err(|e| match e {
-            ureq::Error::Status(s, _) => status_error(s),
-            _ => ("套餐额度网络请求失败，请稍后重试".into(), 30),
+        .call().or_else(|e| match e {
+            ureq::Error::Status(_,response) if glm=>Ok(response),
+            ureq::Error::Status(s, _) => Err(status_error(s)),
+            _ => Err((if glm{"GLM 额度查询网络失败，请检查网络、代理和所选地区后重试"}else{"套餐额度网络请求失败，请稍后重试"}.into(), 30)),
         })?;
-    if !(200..300).contains(&response.status()) { return Err(status_error(response.status())); }
+    let status=response.status();
+    if !(200..300).contains(&status)&&(!glm||(300..400).contains(&status)){return Err(status_error(status));}
     let mut body = Vec::new();
     response.into_reader().take(MAX_BODY + 1).read_to_end(&mut body)
         .map_err(|_| ("无法读取套餐额度响应".into(), 30))?;
     if body.len() as u64 > MAX_BODY { return Err(("套餐额度响应过大".into(), 30)); }
-    let value = serde_json::from_slice(&body).map_err(|_| ("套餐额度响应不是有效 JSON".into(), 30))?;
-    parse(provider, &value).map_err(|e| (e, 30))
+    let value = serde_json::from_slice(&body);
+    if glm&&!(200..300).contains(&status){return Err(glm_error(value.as_ref().unwrap_or(&Value::Null),Some(status)));}
+    let value=value.map_err(|_| ("套餐额度响应不是有效 JSON".into(), 30))?;
+    parse(provider, &value).map_err(|e| (e, if glm{glm_error(&value,None).1}else{30}))
+}
+fn glm_error(v:&Value,http:Option<u16>)->(String,u64){
+    let numeric=|v:&Value|v.as_u64().or_else(||v.as_str()?.parse::<u64>().ok());
+    let code=v.pointer("/error/code").and_then(numeric).or_else(||v.get("code").and_then(numeric));
+    let reason=v["msg"].as_str().or_else(||v["message"].as_str()).or_else(||v.pointer("/error/message").and_then(Value::as_str)).unwrap_or_default().to_ascii_lowercase();
+    // HTTP 429 也可能表示套餐到期，先按业务码区分；服务端原文不进入界面或缓存。
+    let (message,retry)=match code{
+        Some(1003)=>("GLM 密钥已过期，请在所选地区控制台重新获取套餐 Key",0),
+        Some(401|1000|1001)=>("GLM 密钥认证失败，请核对 Key、有效期及所选地区",0),
+        Some(1005)=>("GLM 账号需要二次认证，请在所选地区控制台完成验证后重试",60),
+        Some(403|1220)=>("GLM 额度查询无权限，请核对所选地区及 Coding Plan 套餐 Key",60),
+        Some(1309|1314)=>("GLM 套餐已到期或失效，请在所选地区控制台核对套餐状态",60),
+        Some(1315)=>("GLM 密钥类型不匹配，请使用当前地区 Coding Plan 的套餐 Key",60),
+        Some(1311)=>("GLM 套餐权限不足，请在所选地区控制台核对套餐权益",60),
+        Some(1113)=>("GLM 账号当前欠费，请在所选地区控制台核对账户状态",60),
+        Some(429|1302)=>("GLM 额度查询过于频繁，请稍后重试",180),
+        Some(1305)=>("GLM 服务当前繁忙，请稍后重试",180),
+        Some(1308|1310|1316..=1321)=>("GLM 当前套餐额度已用尽，请在控制台查看恢复时间",180),
+        _ if ["不存在coding plan","不存在 coding plan","no coding plan","coding plan not found","未开通coding plan","套餐不存在"].iter().any(|s|reason.contains(s))=>("GLM 未查询到有效的 Coding Plan，请确认套餐已开通并使用套餐 Key",60),
+        _ if reason.contains("token expired")||reason.contains("invalid api key")=>("GLM 密钥无效或已过期，请重新获取套餐 Key 并核对所选地区",0),
+        _=>return match http{
+            Some(401)=>("GLM 密钥认证失败，请核对 Key、有效期及所选地区".into(),0),
+            Some(403)=>("GLM 额度查询被拒绝（403），请检查账号权限、地区和网络访问情况".into(),60),
+            Some(429)=>("GLM 额度查询过于频繁，请稍后重试".into(),180),
+            Some(status)=>(format!("GLM 额度服务暂不可用（HTTP {status}），请稍后重试"),30),
+            None=>match code.filter(|c|*c<10000){Some(code)=>(format!("GLM 额度查询失败（业务码 {code}），请到所选地区控制台核对套餐状态"),30),None=>("GLM 额度查询失败，请到所选地区控制台核对套餐 Key 和套餐状态".into(),30)},
+        },
+    };(message.into(),retry)
 }
 fn status_error(status: u16) -> (String, u64) {
     match status {
@@ -133,33 +166,18 @@ fn parse_minimax(v: &Value, s: &mut Snapshot) -> Result<(), String> {
     Ok(())
 }
 fn parse_glm(v: &Value, s: &mut Snapshot) -> Result<(), String> {
-    if v["success"].as_bool() == Some(false) || (!v["code"].is_null() && number(&v["code"]) != Some(200.0) && number(&v["code"]) != Some(0.0)) {
-        return Err("GLM 未返回可用套餐额度，请检查套餐密钥和地区".into());
+    if !v["error"].is_null() || v["success"].as_bool() == Some(false) || (!v["code"].is_null() && number(&v["code"]) != Some(200.0) && number(&v["code"]) != Some(0.0)) {
+        return Err(glm_error(v,None).0);
     }
-    s.plan = "Coding Plan".into();
     let data = if v["data"].is_object() { &v["data"] } else { v };
     let rows = data["limits"].as_array().ok_or("GLM 额度响应缺少限制列表")?;
     if rows.len()>16{return Err("GLM 返回过多额度窗口，请检查响应版本".into());}
-    for row in rows {
-        let kind = row["type"].as_str().unwrap_or_default();
-        if !matches!(kind, "TOKENS_LIMIT" | "CREDIT_LIMIT" | "TIME_LIMIT") { continue; }
-        // percentage is consumed percent, not a raw token count. Never infer
-        // a token balance or plan tier from it.
-        let Some(p) = percent(&row["percentage"]) else { continue; };
-        // The official plugin confirms percent semantics, but does not define
-        // numeric unit codes or nextResetTime units. Do not guess a cadence or
-        // timestamp from secondary implementations. Preserve distinct source types.
-        let label = match kind {
-            "TIME_LIMIT" => "工具额度",
-            "CREDIT_LIMIT" => "积分额度",
-            _ => "编程额度",
-        };
-        let w = window(label, None, 100.0 - p, None);
-        if kind == "TIME_LIMIT" { s.extra.push(w); } else { s.windows.push(w); }
+    if !rows.iter().any(|row|matches!(row["type"].as_str(),Some("TOKENS_LIMIT"|"CREDIT_LIMIT")) && percent(&row["percentage"]).is_some()){
+        return Err("GLM 未返回可识别的编程额度（工具额度不能代替编程额度）".into());
     }
-    // Existing widgets render main windows only. A tools-only response does not
-    // confirm a coding quota and must not yield a blank successful connection.
-    if s.windows.is_empty() { return Err("GLM 未返回可识别的编程额度（工具额度不能代替编程额度）".into()); }
+    // 复用原 ZCode 已支持的周期和重置时间解析，保留两种登录来源的相同口径。
+    *s=super::zcode::coding(&serde_json::json!({"data":data}))?;
+    if let Some(level)=data["level"].as_str().map(str::trim).filter(|v|!v.is_empty()&&v.len()<=64){s.plan=level.into();}
     Ok(())
 }
 
@@ -167,6 +185,52 @@ fn parse_glm(v: &Value, s: &mut Snapshot) -> Result<(), String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test] fn glm_business_errors_are_specific_without_echoing_private_messages(){
+        for provider in [PlanProvider::GlmChina,PlanProvider::GlmGlobal]{
+            for (code,message,expected) in [
+                (401,"token expired or incorrect synthetic-secret","密钥"),
+                (1003,"synthetic-secret","已过期"),
+                (1220,"synthetic-secret","权限"),
+                (1309,"synthetic-secret","套餐已到期"),
+                (1315,"synthetic-secret","套餐 Key"),
+                (1302,"synthetic-secret","频繁"),
+                (500,"用户不存在coding plan synthetic-secret","未查询到有效"),
+                (5555,"synthetic-secret https://private.invalid","5555"),
+            ]{
+                let error=parse(provider,&json!({"success":false,"code":code,"msg":message})).unwrap_err();
+                assert!(error.contains(expected),"{code}: {error}");
+                assert!(!error.contains("synthetic-secret")&&!error.contains("private.invalid"));
+            }
+        }
+    }
+    #[test] fn glm_http_and_business_errors_preserve_their_meaning_and_retry_delay(){
+        for (status,body,expected,delay) in [
+            (429,r#"{"error":{"code":"1309","message":"synthetic-secret"}}"#,"套餐已到期",60),
+            (401,r#"{"error":{"code":"1003","message":"synthetic-secret"}}"#,"已过期",0),
+            (200,r#"{"success":false,"code":1302,"msg":"synthetic-secret"}"#,"频繁",180),
+            (429,"<html>synthetic-secret</html>","频繁",180),
+            (503,"<html>synthetic-secret</html>","503",30),
+        ]{
+            let count=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let calls=count.clone();
+            let agent=ureq::AgentBuilder::new().try_proxy_from_env(false).redirects(0).middleware(move|request:ureq::Request,_:ureq::MiddlewareNext|{
+                calls.fetch_add(1,std::sync::atomic::Ordering::Relaxed);
+                assert_eq!(request.url(),PlanProvider::GlmChina.endpoint());assert_eq!(request.header("Authorization"),Some("synthetic-glm-key"));
+                ureq::Response::new(status,"Test",body)
+            }).build();
+            let (error,retry)=request(&agent,PlanProvider::GlmChina,"synthetic-glm-key").unwrap_err();
+            assert!(error.contains(expected),"{status}: {error}");assert_eq!(retry,delay);
+            assert!(!error.contains("synthetic-secret")&&!error.contains("synthetic-glm-key"));assert_eq!(count.load(std::sync::atomic::Ordering::Relaxed),1);
+        }
+    }
+    #[test] fn glm_pr46_response_keeps_plan_periods_and_rejects_failed_payloads(){
+        let v=json!({"code":200,"success":true,"data":{"level":"lite","limits":[
+            {"type":"CREDIT_LIMIT","unit":3,"number":5,"percentage":46,"nextResetTime":1793892721234i64},
+            {"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":10,"nextResetTime":1794366124964i64}]}});
+        let s=parse(PlanProvider::GlmChina,&v).unwrap();assert_eq!(s.plan,"lite");assert_eq!(s.windows.len(),2);
+        assert_eq!(s.windows[0].remaining,54.0);assert_eq!(s.windows[0].reset,Some(1793892721));assert_eq!(s.windows[1].remaining,90.0);
+        let mut rejected=v.clone();rejected["success"]=json!(false);assert!(parse(PlanProvider::GlmChina,&rejected).is_err());
+        rejected=v;rejected["error"]=json!({"code":"1003","message":"synthetic-secret"});assert!(parse(PlanProvider::GlmChina,&rejected).is_err());
+    }
     #[test] fn opencode_percentage_and_iso_reset() {
         let s = parse(PlanProvider::OpenCodeGo, &json!({"usage":{"rolling":{"percent":25,"resetsAt":"2030-01-01T00:00:00Z"},"weekly":{"percent":100},"monthly":{"percent":0}}})).unwrap();
         assert_eq!(s.windows.len(),3); assert_eq!(s.windows[0].remaining,75.0); assert_eq!(s.windows[0].reset,Some(1893456000)); assert_eq!(s.windows[1].remaining,0.0);
@@ -192,7 +256,7 @@ mod tests {
     }
     #[test] fn glm_used_percentage_windows_and_tools_are_separate() {
         let s = parse(PlanProvider::GlmChina,&json!({"success":true,"code":200,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":20,"nextResetTime":1900000000000i64},{"type":"CREDIT_LIMIT","unit":6,"number":1,"percentage":75},{"type":"TIME_LIMIT","unit":5,"number":1,"percentage":50},{"type":"FUTURE_LIMIT","percentage":0}]}})).unwrap();
-        assert_eq!(s.windows.len(),2); assert_eq!(s.extra.len(),1); assert_eq!(s.windows[0].remaining,80.0); assert_eq!(s.windows[0].reset,None); assert_eq!(s.windows[0].seconds,None); assert_eq!(s.windows[1].remaining,25.0);
+        assert_eq!(s.windows.len(),2); assert_eq!(s.extra.len(),1); assert_eq!(s.windows[0].remaining,80.0); assert_eq!(s.windows[0].reset,Some(1900000000)); assert_eq!(s.windows[0].seconds,Some(18000)); assert_eq!(s.windows[1].remaining,25.0);
         assert!(parse(PlanProvider::GlmChina,&json!({"data":{"limits":[{"type":"TOKENS_LIMIT"}]}})).is_err());
     }
     #[test] fn opencode_unknown_rolling_cadence_preserves_primary_order() {

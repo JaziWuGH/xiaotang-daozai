@@ -465,6 +465,8 @@ pub(crate) struct LyricsState {
     pub song_id: Option<u64>,
     /// 同一首歌已自动重试的次数；达到上限后停止，避免整首歌期间反复读盘或联网。
     pub attempts: u32,
+    /// 用户点了「重试」：下一次查询跳过近期「没有歌词」的记录。
+    pub manual_retry: bool,
     pub lyrics: Option<lyrics::Lyrics>,
     pub rx: Option<std::sync::mpsc::Receiver<Result<(lyrics::Lyrics,bool), lyrics::FetchError>>>,
     pub native_rx: Option<std::sync::mpsc::Receiver<Option<lyrics::Lyrics>>>,
@@ -1681,7 +1683,7 @@ impl App {
                                 =>Some((&mut self.shelf_first,self.shelf.items.len().saturating_sub(5))),
                             _=>None,
                         };
-                        let content_scrolls=(self.page==4 || clipboard_body || calendar_body) && list.as_ref().is_some_and(|(_,max)|*max>0);
+                        let content_scrolls=list.as_ref().is_some_and(|(_,max)|*max>0);
                         let scrolled=list.is_some_and(|(first,max)|{
                             let target=if next {(*first+1).min(max)}else{first.saturating_sub(1)};
                             let changed=target!=*first;*first=target;changed
@@ -2747,6 +2749,7 @@ impl App {
                 && self.ly.error==Some(lyrics::FetchError::NotFound);
             let cached=if key==self.ly.key && np.source.to_ascii_lowercase().contains("kugou"){self.ly.lyrics.take()}else{None};
             let attempts=if key==self.ly.key {self.ly.attempts.saturating_add(1)}else{0};
+            let manual=self.ly.manual_retry;
             self.ly = LyricsState { key, loading: cached.is_none() && !native_only, lyrics:cached.clone(),
                 error:native_only.then_some(lyrics::FetchError::NotFound), song_id:np.song_id, attempts, ..Default::default() };
             let (tx, rx) = std::sync::mpsc::channel();
@@ -2784,7 +2787,7 @@ impl App {
             self.ly_worker=lease.spawn(move || {
                 let result=if native_only {
                     lyrics::kugou_cache::read(&title,&artist,dur).map(|lyrics|(lyrics,false)).ok_or(lyrics::FetchError::NotFound)
-                }else{lyrics::fetch_for_display(&source, &title, &artist, dur, song_id, cached)};
+                }else{lyrics::fetch_for_display_with(&source, &title, &artist, dur, song_id, cached, manual)};
                 let _ = tx.send(result);
             });
             if self.ly_worker.is_none(){self.ly.loading=false;self.ly.key.clear();}
