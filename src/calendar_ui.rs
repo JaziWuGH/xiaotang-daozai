@@ -102,30 +102,13 @@ fn event_status(event:&mail::Meeting,now:i64,today:NaiveDate)->String {
 }
 pub(crate) fn source_icon(c:&Card,source:Source<'_>,x:f32,y:f32,size:f32) {
     let rect=c.rect(x,y,size,size);
-    let png:Option<&[u8]>=match source {
-        Source::Calendar(Some(calendar::Provider::DingTalk))=>Some(include_bytes!("../assets/calendar/dingtalk.png")),
-        _=>None,
-    };
-    if let Some(bytes)=png {
-        let ctx=c.ui.ctx();
-        let key=egui::Id::new(("calendar-source-logo",source.icon_key()));
-        let texture=ctx.data(|data|data.get_temp::<egui::TextureHandle>(key)).unwrap_or_else(||{
-            let mut image=image::load_from_memory(bytes).expect("内置来源图标应为有效图片").into_rgba8();
-            if matches!(source,Source::Calendar(Some(calendar::Provider::DingTalk))) {
-                // 保留白色品牌标记，由统一图标容器绘制蓝色背景和圆角。
-                for pixel in image.pixels_mut(){pixel.0=[255,255,255,(pixel[0] as u16*pixel[3] as u16/255) as u8];}
-            }
-            let image=egui::ColorImage::from_rgba_unmultiplied([image.width() as usize,image.height() as usize],image.as_raw());
-            let texture=ctx.load_texture(source.icon_key(),image,egui::TextureOptions::LINEAR);
-            ctx.data_mut(|data|data.insert_temp(key,texture.clone()));
-            texture
-        });
-        let ding=matches!(source,Source::Calendar(Some(calendar::Provider::DingTalk)));
-        c.fill(x,y,size,size,size*5.0/24.0,if ding{Color32::from_rgb(0,105,255)}else{Color32::WHITE});
-        c.painter.image(texture.id(),rect.shrink(size*0.1),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
-        return;
-    }
+    let ding=matches!(source,Source::Calendar(Some(calendar::Provider::DingTalk)));
+    let rect=if ding{
+        c.fill(x,y,size,size,size*5.0/24.0,Color32::from_rgb(0,127,255));
+        rect.shrink(rect.width()*0.1)
+    }else{rect};
     let icon=match source {
+        Source::Calendar(Some(calendar::Provider::DingTalk))=>egui::include_image!("../assets/calendar/dingtalk.svg"),
         Source::Calendar(Some(calendar::Provider::WeCom))=>egui::include_image!("../assets/calendar/wecom.svg"),
         Source::Mail(_)=>egui::include_image!("../assets/calendar/mail.svg"),
         Source::Calendar(Some(calendar::Provider::Feishu))=>egui::include_image!("../assets/calendar/feishu.svg"),
@@ -171,11 +154,23 @@ mod tests {
     }
 
     #[test]
-    fn dingtalk_logo_has_enough_pixels_for_large_notifications() {
-        let image=image::load_from_memory(include_bytes!("../assets/calendar/dingtalk.png")).unwrap();
-        assert!(image.width()>=256 && image.height()>=256,"通知不能放大低分辨率网站图标");
+    fn dingtalk_logo_rasterizes_at_screen_size_and_reuses_textures(){
+        let ctx=egui::Context::default();egui_extras::install_image_loaders(&ctx);
+        let frame=|ctx:&egui::Context|ctx.run(egui::RawInput{
+            viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()
+        },|ctx|{egui::CentralPanel::default().show(ctx,|ui|{
+            let c=Card::new(ui,egui::Pos2::ZERO,ui.clip_rect());
+            source_icon(&c,Source::Calendar(Some(calendar::Provider::DingTalk)),0.0,0.0,20.0);
+            source_icon(&c.scaled(50.0,0.0,1.5),Source::Calendar(Some(calendar::Provider::DingTalk)),50.0,0.0,20.0);
+        });});
+        let first=frame(&ctx);let sizes=first.textures_delta.set.iter().map(|(_,delta)|delta.image.size()).collect::<Vec<_>>();
+        assert!(sizes.contains(&[32,32]) && sizes.contains(&[48,48]),"图标应按实际物理像素过滤，而非直接缩小原始大图：{sizes:?}");
+        let logo=first.textures_delta.set.iter().find_map(|(_,delta)|match &delta.image{egui::ImageData::Color(image) if image.size==[32,32]=>Some(image),_=>None}).unwrap();
+        let rows=(0..32).filter(|y|logo.pixels[y*32..(y+1)*32].iter().any(|pixel|pixel.a()>=128)).collect::<Vec<_>>();
+        assert!(rows.last().unwrap()-rows.first().unwrap()+1>=30,"钉钉标记不能因重复留白而缩小到丢失翅膀和闪电细节");
+        let next=frame(&ctx);
+        assert!(!next.textures_delta.set.iter().any(|(_,delta)|matches!(delta.image.size(),[32,32]|[48,48])),"不同显示尺寸应各自复用贴图，不能每帧重新上传");
     }
-
     #[test]
     fn date_markers_merge_repeat_sources_and_show_at_most_three_colors() {
         let feishu=Source::Calendar(Some(calendar::Provider::Feishu));

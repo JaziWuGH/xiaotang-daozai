@@ -203,6 +203,14 @@ fn qq_icon(c:&Card,x:f32,y:f32){
 mod tests {
     use super::*;
     #[test]
+    fn qq_logo_has_no_pale_fringe_around_the_black_head(){
+        let image=image::load_from_memory(include_bytes!("../assets/qq-client.png")).unwrap().into_rgba8();
+        for y in image.height()/5..image.height()/3{
+            let edge=(0..image.width()/2).find_map(|x|{let pixel=image.get_pixel(x,y);(pixel[3]>=128).then_some(pixel)}).unwrap();
+            assert!(edge[0]<32 && edge[1]<32 && edge[2]<32,"QQ 黑色头部的外缘不能带浅色描边：{edge:?}");
+        }
+    }
+    #[test]
     fn registered_adapters_have_distinct_identities_and_matching_backends(){
         for client in Messenger::ALL{
             let adapter=client.adapter();assert_eq!(adapter.client,client);

@@ -26,8 +26,12 @@ SOFTWARE.
 
 日程来源标识
 飞书：https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/open/website/favicon-logo.svg
-钉钉：https://gw.alicdn.com/imgextra/i3/O1CN014ZbI6ZTEhdC0ttN2_!!6000000003783-2-tps-444-444.png（官网高清图标）
+钉钉：https://img.alicdn.com/imgextra/i3/O1CN01WMvMRG1ks3Ixc9x1v_!!6000000004738-55-tps-32-32.svg（开放平台官网矢量标记，使用白色标记搭配蓝色底色）
 企业微信：https://wwcdn.weixin.qq.com/node/wwnl/wwnl/style/images/officialImages$h6afc438.svg（官网 LogoSingle 矢量图标）
+
+QQ 客户端标识
+assets/qq-client.png 来自 QQ Windows 客户端 9.9.21 内置的 resource/favicon-default.png（官方透明图标）。
+品牌规范：https://qq.design/brand/BrandDesign/Logo/
 
 TokenBar
 额度接口映射、凭据文件结构及 Windows 代理处理参考本机 TokenBar 项目。

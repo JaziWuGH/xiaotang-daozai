@@ -90,6 +90,24 @@ fn office_notice_gallery(){
 }
 
 #[test]
+#[ignore="按需检查消息图标在深浅皮肤下的实际画面，不操作真实客户端"]
+fn messenger_brand_icon_gallery(){
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_OFFICE_PREVIEW").expect("需指定预览目录"));
+    std::fs::create_dir_all(&dest).unwrap();
+    for skin in [crate::model::Skin::Classic,crate::model::Skin::GlassLight,crate::model::Skin::GlassDark]{
+        let mut h=H::new();enable(&mut h.app);h.app.settings.pet=false;h.app.settings.skin=skin;
+        h.app.receive_messenger_reminder(Unread{source:Messenger::DingTalk,pid:100,window:11});
+        h.app.receive_notification_from("QQ".into(),"QQ".into(),"新消息".into(),Some(Unread{source:Messenger::Qq,pid:200,window:22}));
+        h.app.receive_messenger_reminder(Unread{source:Messenger::Feishu,pid:300,window:33});
+        h.app.alerts.clear();h.app.notice=None;h.app.notification_bell_until=0.0;
+        let mut raster=feature_raster();
+        shoot_unread(&mut h,&mut raster,&dest,skin.key(),90,Some(Pos2::new(WIN_W/2.0,12.0)));
+        shoot_unread(&mut h,&mut raster,&dest,&format!("{}-collapsed",skin.key()),90,Some(Pos2::new(0.0,WIN_H-10.0)));
+    }
+}
+
+#[test]
 fn taskbar_duplicate_flashes_do_not_restart_the_unread_alert(){
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for source in Messenger::ALL.into_iter().filter(|source|source.adapter().capture==crate::messenger::Capture::Taskbar){
