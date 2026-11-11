@@ -146,12 +146,20 @@ pub(crate) struct AccountHistory {
     client:Messenger,
     previous:Option<(i64,Option<Vec<Target>>)>,
     current:Option<(i64,Option<Vec<Target>>)>,
+    single_since:Option<i64>,
     targets:HashMap<u32,(i64,Option<Target>)>,
 }
 impl AccountHistory {
-    pub(crate) fn new(client:Messenger)->Self{Self{client,previous:None,current:None,targets:HashMap::new()}}
+    pub(crate) fn new(client:Messenger)->Self{Self{client,previous:None,current:None,single_since:None,targets:HashMap::new()}}
     pub(crate) fn observe(&mut self,at:i64,accounts:Option<Vec<Target>>){
         let accounts=accounts.filter(|accounts|accounts.iter().all(|target|target.unread.source==self.client));
+        // 连续单账号区间可覆盖延迟到达的通知，多开、采样失败或长时间暂停后重新计时。
+        self.single_since=match(self.current.as_ref(),accounts.as_ref()){
+            (Some((last,Some(previous))),Some(current)) if at>*last && at.checked_sub(*last).is_some_and(|gap|gap<=30_000_000)=>{
+                match(previous.as_slice(),current.as_slice()){([a],[b]) if a==b=>Some(self.single_since.unwrap_or(*last)),_=>None}
+            },
+            _=>None,
+        };
         self.previous=self.current.take();self.current=Some((at,accounts));
     }
     pub(crate) fn target(&mut self,id:u32,created:i64,ready:impl FnOnce(Target)->bool)->Option<Target>{
@@ -171,7 +179,7 @@ impl AccountHistory {
         let (from,Some(previous))=self.previous.as_ref()? else{return None;};
         let (to,Some(current))=self.current.as_ref()? else{return None;};
         if to.checked_sub(*from)? > 30_000_000 || to<=from{return None;}
-        match(previous.as_slice(),current.as_slice()){([a],[b]) if a==b=>Some((*from,*to,*a)),_=>None}
+        match(previous.as_slice(),current.as_slice()){([a],[b]) if a==b=>Some((self.single_since?,*to,*a)),_=>None}
     }
     pub(crate) fn retain(&mut self,exists:impl Fn(u32,i64)->bool){self.targets.retain(|id,(created,_)|exists(*id,*created));}
 }
@@ -240,6 +248,34 @@ mod tests {
         assert_eq!(qq.target(2,25,|_|true),None);
         assert_eq!(qq.target(1,15,|_|true),None);
         assert_eq!(wx.target(1,15,|_|true),Some(target(Messenger::Wechat)));
+    }
+    #[test]
+    fn single_account_notifications_can_arrive_after_the_next_account_sample(){
+        let a=Target{unread:Unread{source:Messenger::Qq,pid:100,window:11},started:1};
+        let b=Target{unread:Unread{pid:200,window:22,..a.unread},started:2};
+        let mut history=AccountHistory::new(Messenger::Qq);
+        for at in [10_000_000,20_000_000,30_000_000]{history.observe(at,Some(vec![a]));}
+        assert_eq!(history.target(1,15_000_000,|_|true),Some(a),"连续单账号期间的延迟通知也应能绑定");
+        history.observe(40_000_000,Some(vec![a,b]));
+        history.observe(50_000_000,Some(vec![b]));history.observe(60_000_000,Some(vec![b]));
+        assert_eq!(history.target(2,35_000_000,|_|true),None,"单账号区间重置后，旧通知不能绑定剩余账号");
+        assert_eq!(history.target(3,45_000_000,|_|true),None,"从多账号变成单账号的交界期间仍不能猜测");
+        assert_eq!(history.target(4,55_000_000,|_|true),Some(b));
+    }
+    #[test]
+    fn single_account_intervals_restart_after_missing_samples_or_long_pauses(){
+        let a=Target{unread:Unread{source:Messenger::Qq,pid:100,window:11},started:1};
+        for interrupted in [None,Some(Vec::new()),Some(vec![Target{started:2,..a}])]{
+            let mut history=AccountHistory::new(Messenger::Qq);
+            for at in [10_000_000,20_000_000,30_000_000]{history.observe(at,Some(vec![a]));}
+            history.observe(40_000_000,interrupted);
+            history.observe(50_000_000,Some(vec![a]));history.observe(60_000_000,Some(vec![a]));
+            assert_eq!(history.target(1,35_000_000,|_|true),None,"中断之前的通知不能借用恢复后的单账号区间");
+            assert_eq!(history.target(2,55_000_000,|_|true),Some(a));
+            history.observe(100_000_000,Some(vec![a]));history.observe(110_000_000,Some(vec![a]));
+            assert_eq!(history.target(3,85_000_000,|_|true),None,"长时间暂停期间也不能猜账号");
+            assert_eq!(history.target(4,105_000_000,|_|true),Some(a));
+        }
     }
     #[test]
     fn errors_use_state_instead_of_translated_error_text(){

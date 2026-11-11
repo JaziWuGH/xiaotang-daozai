@@ -53,21 +53,13 @@ fn paths()->Vec<String>{
     paths
 }
 
-fn ready(target:Target)->bool{unsafe{
-    let window=HWND(target.unread.window as *mut _);
-    if !IsWindow(window).as_bool() || window_pid(window)!=target.unread.pid{return false;}
-    if class_name(window)!="Electron_NotifyIconHostWindow"{return true;}
-    // 同一进程出现多个宿主或图标时，不能按进程号确认正在查看哪个账号。
-    struct Hosts{pid:u32,count:usize}
-    unsafe extern "system" fn count(hwnd:HWND,data:LPARAM)->windows::Win32::Foundation::BOOL{
-        let hosts=&mut *(data.0 as *mut Hosts);
-        if window_pid(hwnd)==hosts.pid && class_name(hwnd)=="Electron_NotifyIconHostWindow"{hosts.count+=1;}
-        true.into()
-    }
-    let mut hosts=Hosts{pid:target.unread.pid,count:0};
-    if EnumWindows(Some(count),LPARAM((&mut hosts as *mut Hosts)as isize)).is_err(){return false;}
-    hosts.count==1 && host_icons(&[(target.unread.pid,window)],target.unread.pid).len()==1
-}}
+fn ready(target:Target)->bool{ready_with_paths(target,&client_paths(Messenger::Qq))}
+fn ready_with_paths(target:Target,paths:&[String])->bool{
+    accounts(paths).is_some_and(|accounts|{
+        let mine=accounts.iter().filter(|account|account.unread.pid==target.unread.pid).collect::<Vec<_>>();
+        matches!(mine.as_slice(),[one] if **one==target)
+    })
+}
 
 pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
     use windows::Win32::Foundation::BOOL;
@@ -86,10 +78,16 @@ pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
     if search.hosts.is_empty() && search.mains.is_empty(){return Some(Vec::new());}
     for &host in &search.hosts{if host_icons(&[(window_pid(host),host)],window_pid(host)).len()!=1{return None;}}
     let owners:Vec<_>=search.hosts.iter().map(|&hwnd|window_pid(hwnd)).collect();
-    let parents=parent_processes();let mut windows=search.hosts;
+    let parents=parent_processes();let mut windows=search.hosts;let mut main_pids=std::collections::HashSet::new();
+    // 已由唯一托盘图标确认的账号，其主窗口和隐藏辅助窗口不再重复计数。
     for main in search.mains{
         let pid=window_pid(main);
-        if account_tray_pid(pid,&owners,&parents).is_none() && !windows.iter().any(|&hwnd|window_pid(hwnd)==pid){windows.push(main);}
+        if account_tray_pid(pid,&owners,&parents).is_none(){
+            // 有相关宿主却无法唯一归属时，不把公共主进程再猜成一个账号。
+            if owners.iter().any(|owner|ancestors(*owner,&parents).contains(&pid)){return None;}
+            if !main_pids.insert(pid){return None;}
+            if !windows.iter().any(|&hwnd|window_pid(hwnd)==pid){windows.push(main);}
+        }
     }
     windows.into_iter().map(|hwnd|{
         let pid=window_pid(hwnd);
@@ -97,3 +95,48 @@ pub(crate) fn accounts(paths:&[String])->Option<Vec<Target>>{unsafe{
         Some(Target{unread:Unread{source:Messenger::Qq,pid,window:hwnd.0 as isize},started:process_started(*process)?})
     }).collect()
 }}
+
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]
+    fn qq_single_tray_account_ignores_its_auxiliary_main_windows(){unsafe{
+        use windows::Win32::{Foundation::LRESULT,System::LibraryLoader::GetModuleHandleW,UI::Shell::*};
+        unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
+        struct Fixture{windows:Vec<HWND>,icon:NOTIFYICONDATAW}
+        impl Drop for Fixture{fn drop(&mut self){unsafe{let _=Shell_NotifyIconW(NIM_DELETE,&self.icon);for &window in &self.windows{let _=DestroyWindow(window);}}}}
+        let instance=GetModuleHandleW(None).unwrap().into();
+        for class in [w!("Chrome_WidgetWin_1"),w!("Electron_NotifyIconHostWindow")]{RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:class,..Default::default()});}
+        let host=CreateWindowExW(WINDOW_EX_STYLE(0),w!("Electron_NotifyIconHostWindow"),w!(""),WS_POPUP,-10000,-10000,0,0,None,None,instance,None).unwrap();
+        let mut fixture=Fixture{windows:vec![host],icon:NOTIFYICONDATAW{cbSize:std::mem::size_of::<NOTIFYICONDATAW>() as u32,hWnd:host,uID:3,uFlags:NIF_ICON|NIF_MESSAGE,hIcon:LoadIconW(None,IDI_APPLICATION).unwrap(),uCallbackMessage:WM_APP+1,..Default::default()}};
+        assert!(Shell_NotifyIconW(NIM_ADD,&fixture.icon).as_bool());
+        for (style,width,height) in [(0x04c70000,800,600),(0x04c20000,280,44),(WS_OVERLAPPEDWINDOW.0,400,500)]{
+            fixture.windows.push(CreateWindowExW(WINDOW_EX_STYLE(0),w!("Chrome_WidgetWin_1"),w!(""),WINDOW_STYLE(style),-10000,-10000,width,height,None,None,instance,None).unwrap());
+        }
+        let pid=std::process::id();let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        assert_eq!(host_icons(&[(pid,host)],pid),vec![(host,3)]);
+        let found=accounts(&paths).expect("单一托盘账号不能因多个隐藏辅助窗口而识别失败");
+        assert_eq!(found.len(),1);assert_eq!(found[0].unread.window,host.0 as isize);
+        assert!(ready_with_paths(found[0],&paths));
+        let mut history=super::super::AccountHistory::new(Messenger::Qq);
+        history.observe(10,Some(found.clone()));history.observe(20,Some(found));
+        assert_eq!(history.target(1,15,|target|ready_with_paths(target,&paths)).unwrap().unread.window,host.0 as isize);
+        let mut second=fixture.icon;second.uID=4;
+        assert!(Shell_NotifyIconW(NIM_ADD,&second).as_bool());
+        let ambiguous=accounts(&paths);let _=Shell_NotifyIconW(NIM_DELETE,&second);
+        assert!(ambiguous.is_none(),"同宿主多个账号图标仍不能假装只有一个账号");
+    }}
+    #[test]
+    fn qq_multiple_main_windows_in_one_process_are_not_a_unique_account(){unsafe{
+        use windows::{core::w,Win32::{Foundation::LRESULT,System::LibraryLoader::GetModuleHandleW}};
+        unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
+        let instance=GetModuleHandleW(None).unwrap().into();let class=w!("TXGuiFoundation");
+        RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:class,..Default::default()});
+        let create=||CreateWindowExW(WINDOW_EX_STYLE(0),class,w!("Daozai synthetic QQ"),WS_OVERLAPPEDWINDOW,-10000,-10000,400,500,None,None,instance,None).unwrap();
+        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        let first=create();let one=accounts(&paths);let original=one.as_ref().unwrap()[0];let before=ready_with_paths(original,&paths);let second=create();let ambiguous=accounts(&paths);let after=ready_with_paths(original,&paths);
+        DestroyWindow(first).unwrap();DestroyWindow(second).unwrap();
+        assert_eq!(one.unwrap().len(),1);assert!(before);assert!(!after,"已经绑定的 QQ 目标在出现同进程多主窗口后也不能继续猜测唤起");
+        assert!(ambiguous.is_none(),"同进程多个 QQ 主窗口不能随便拿第一个当成唯一账号");
+    }}
+}
