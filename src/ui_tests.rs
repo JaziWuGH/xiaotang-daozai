@@ -1918,6 +1918,82 @@ fn kiro_resident_bar_preview(){
 }
 
 #[test]
+#[ignore="按需导出 Kiro 模拟数据与连接状态界面，不读取真实账号"]
+fn kiro_simulated_states_gallery(){
+    use crate::quota::{Account,Event,Provider};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_KIRO_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    let at=chrono::DateTime::parse_from_rfc3339("2026-11-11T01:41:00Z").unwrap().timestamp();
+    let expires=chrono::DateTime::parse_from_rfc3339("2027-11-01T00:00:00Z").unwrap().timestamp();
+    for(skin,theme)in [(crate::model::Skin::Classic,"dark"),(crate::model::Skin::GlassLight,"light")]{
+        for scene in ["monthly","pools","overage","small","power","loading","expired","stale","details","connecting","cancelled","identity"]{
+            let mut h=H::new();h.app.settings.skin=skin;h.app.settings.pet=false;
+            let mut value=serde_json::json!({"userInfo":{"userId":"simulation-user-a"},"subscriptionInfo":{"subscriptionTitle":"KIRO PRO"},"usageBreakdownList":[{"resourceType":"CREDIT","usageLimitWithPrecision":1000.0,"currentUsageWithPrecision":95.91,"nextDateReset":1796083200_i64}]});
+            if matches!(scene,"pools"|"details"){
+                value["usageBreakdownList"][0]["currentUsageWithPrecision"]=serde_json::json!(1000.0);
+                value["usageBreakdownList"][0]["freeTrialInfo"]=serde_json::json!({"freeTrialStatus":"ACTIVE","usageLimit":500,"currentUsage":100,"freeTrialExpiry":expires});
+                value["usageBreakdownList"][0]["bonuses"]=serde_json::json!([{"status":"ACTIVE","displayName":"加购点数","usageLimit":125,"currentUsage":25,"expiresAt":expires}]);
+            }else if scene=="overage"{
+                value["usageBreakdownList"][0]["currentUsageWithPrecision"]=serde_json::json!(1080.0);
+                value["usageBreakdownList"][0]["currentOveragesWithPrecision"]=serde_json::json!(80.0);
+                value["usageBreakdownList"][0]["overageCapWithPrecision"]=serde_json::json!(200.0);
+                value["overageConfiguration"]=serde_json::json!({"overageStatus":"ENABLED"});
+            }else if scene=="small"{value["usageBreakdownList"][0]["currentUsageWithPrecision"]=serde_json::json!(999.99);}
+            else if scene=="power"{value["subscriptionInfo"]["subscriptionTitle"]=serde_json::json!("KIRO POWER");value["usageBreakdownList"][0]["usageLimitWithPrecision"]=serde_json::json!(10000.0);value["usageBreakdownList"][0]["currentUsageWithPrecision"]=serde_json::json!(0.0);}
+            let mut snapshot=crate::quota::parse(Provider::Kiro,&value).unwrap();snapshot.at=at;
+            let id="kiro-simulation".to_owned();let owner=snapshot.kiro.as_ref().unwrap().owner.clone();
+            h.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::Kiro,alias:"Kiro".into(),source:"simulation-kiro.json".into(),slot:Some(owner),enabled:true,pinned:true});h.app.quota.config.selected=id.clone();
+            if !matches!(scene,"loading"|"expired"|"connecting"|"cancelled"){
+                h.app.quota_event(Event{id:id.clone(),result:Ok(snapshot)});
+            }
+            match scene{
+                "loading"=>{h.app.quota.busy.insert(id.clone());},
+                "expired"=>h.app.quota_event(Event{id:id.clone(),result:Err("Kiro 登录已过期，请打开 Kiro 重新登录后刷新额度".into())}),
+                "stale"=>{h.app.quota_event(Event{id:id.clone(),result:Err("无法连接 Kiro 额度服务，请检查网络或代理".into())});assert_eq!(h.app.quota.rows[&id].as_ref().unwrap().at,at);assert!(h.app.quota.stale.contains_key(&id));},
+                "identity"=>{
+                    let account=h.app.quota.config.accounts[0].clone();let mut other=value.clone();other["userInfo"]["userId"]=serde_json::json!("simulation-user-b");let other=crate::quota::parse(Provider::Kiro,&other).unwrap();
+                    let error=crate::quota::kiro::check_owner(&account,&other).unwrap_err();h.app.quota_event(Event{id:id.clone(),result:Err(error)});
+                    assert_eq!(h.app.quota.rows[&id].as_ref().unwrap().kiro.as_ref().unwrap().owner,account.slot.unwrap());
+                },
+                _=>{}
+            }
+            let settings=matches!(scene,"details"|"connecting"|"cancelled"|"identity");
+            if settings{
+                h.app.settings.settings_theme=if theme=="light"{crate::settings_theme::SettingsTheme::Light}else{crate::settings_theme::SettingsTheme::Dark};h.app.settings_tab=11;h.app.open_settings();h.ctx.set_embed_viewports(false);
+                let _pending=if matches!(scene,"connecting"|"cancelled"){
+                    h.app.quota.config.accounts.clear();h.app.quota.provider=Provider::Kiro;h.app.quota.alias="个人账号".into();h.app.quota.connect_open=true;
+                    let(mut connect,tx)=crate::quota::kiro::Connect::pending(None);if scene=="cancelled"{connect.cancel();}h.app.quota.kiro_connecting=Some(connect);Some(tx)
+                }else{None};
+                let size=egui::vec2(690.0,620.0);let ppp=1.5;let output=std::sync::Arc::new(Mutex::new(None));let capture=output.clone();
+                egui::Context::set_immediate_viewport_renderer(move|ctx,mut viewport|{let id=viewport.ids.this;let raw=egui::RawInput{viewport_id:id,screen_rect:Some(Rect::from_min_size(Pos2::ZERO,size)),viewports:std::iter::once((id,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};*capture.lock().unwrap()=Some(ctx.run(raw,|ctx|(viewport.viewport_ui_cb)(ctx)));});
+                let mut raster=crate::preview_raster::Raster::new(1035,930);
+                for frame in 0..8{
+                    let root=h.ctx.run(egui::RawInput::default(),|ctx|h.app.settings_ui(ctx,false));raster.update_textures(&root.textures_delta);let child=output.lock().unwrap().take().unwrap();raster.update_textures(&child.textures_delta);
+                    if frame==7{
+                        if scene=="identity"{let count=child.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text().matches("月度额度").count()),_=>None}).sum::<usize>();assert_eq!(count,1,"普通套餐只显示一行月度额度");}
+                        raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(child.shapes,child.pixels_per_point),child.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);image::save_buffer(dest.join(format!("{theme}-{scene}.png")),&rgba,1035,930,image::ColorType::Rgba8).unwrap();}
+                    raster.free_textures(&root.textures_delta);raster.free_textures(&child.textures_delta);
+                }
+            }else{
+                h.app.show_page(6);let mut raster=feature_raster();
+                for frame in 0..75{
+                    h.t+=1.0/60.0;let cursor=Some(H::local(300.0,60.0));
+                    let env=Env{t:h.t,clock:"09:41:00".into(),today:"2026-11-11".into(),date:"11月11日 周三".into(),cursor,bt_ready:true,..Default::default()};
+                    let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(h.t),events:vec![egui::Event::PointerMoved(cursor.unwrap())],viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+                    let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H)),&env);});});raster.update_textures(&output.textures_delta);
+                    if frame==74{
+                        let texts=output.shapes.iter().filter_map(|s|match &s.shape{egui::Shape::Text(t)=>Some(t.galley.text()),_=>None}).collect::<Vec<_>>().join(" ");
+                        if scene=="small"{assert!(texts.contains("0.01"));}if scene=="loading"{assert!(texts.contains("正在更新"));}if scene=="expired"{assert!(texts.contains("登录已过期"));}
+                        raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                        let image=image::RgbaImage::from_raw(raster.w as u32,raster.h as u32,rgba).unwrap();image::imageops::crop_imm(&image,200,0,880,380).to_image().save(dest.join(format!("{theme}-{scene}.png"))).unwrap();
+                    }raster.free_textures(&output.textures_delta);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn quota_update_status_is_visible_for_every_provider_and_keeps_failed_data(){
     use crate::quota::{Provider,Event,Snapshot,Window};
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());

@@ -207,13 +207,16 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
     at.format(format).to_string()
 }
-fn kiro_details(details:&quota::kiro::Details)->String{
-    details.pools.iter().map(|p|{
+fn kiro_details(snapshot:&Snapshot)->String{
+    let Some(details)=&snapshot.kiro else{return String::new();};
+    let mut lines=details.pools.iter().map(|p|{
         let time=if let Some(at)=p.expires{
             chrono::DateTime::from_timestamp(at,0).map(|t|format!("{} 到期",t.with_timezone(&chrono::Local).format("%Y/%-m/%-d %H:%M"))).unwrap_or_default()
         }else if p.reset.is_some(){reset_text(p.reset,&chrono::Local::now())}else{String::new()};
         format!("{}：{} 点{}",p.label,p.amount.full(),if time.is_empty(){String::new()}else{format!(" · {time}")})
-    }).collect::<Vec<_>>().join("\n")
+    }).collect::<Vec<_>>();
+    for window in snapshot.windows.iter().skip(1){lines.push(format!("{}：{} 点 · {}",window.label,window.value_text(),reset_text(window.reset,&chrono::Local::now())));}
+    lines.join("\n")
 }
 fn quota_reset_text(snapshot:&Snapshot,window:&quota::Window,now:&chrono::DateTime<chrono::Local>)->String{
     if window.label=="可用点数"{
@@ -461,8 +464,8 @@ impl App {
                         }else if a.provider==Provider::ZCode && s.windows.is_empty(){
                             ui.label("已连接 · 暂无体验额度");
                         }else if let Some(details)=&s.kiro{
-                            for window in s.rings(){ui.label(format!("{}：{} 点",window.label,window.value_text()));}
-                            ui.label(egui::RichText::new(kiro_details(details)).size(11.0));
+                            if details.pools.len()>1{if let Some(window)=s.windows.first(){ui.label(format!("{}：{} 点",window.label,window.value_text()));}}
+                            ui.label(egui::RichText::new(kiro_details(s)).size(11.0));
                         }else{
                             let windows=s.rings();let count=windows.len().max(1);let width=(ui.available_width()-12.0*(count-1) as f32)/count as f32;
                             ui.horizontal_top(|ui|{ui.spacing_mut().item_spacing.x=12.0;for window in windows{ui.allocate_ui_with_layout(egui::vec2(width,30.0),egui::Layout::top_down(egui::Align::Min),|ui|{
@@ -596,6 +599,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn kiro_pool_details_include_monthly_reset_and_overage_once(){
+        let s=quota::parse(Provider::Kiro,&serde_json::json!({"userInfo":{"userId":"details-user"},"usageBreakdownList":[{"resourceType":"CREDIT","usageLimitWithPrecision":1000,"currentUsageWithPrecision":1080,"currentOveragesWithPrecision":80,"overageCapWithPrecision":200,"nextDateReset":1796083200_i64}],"overageConfiguration":{"overageStatus":"ENABLED"}})).unwrap();
+        let details=kiro_details(&s);
+        assert_eq!(details.matches("月度额度").count(),1);
+        assert!(details.contains("超额上限余量：120 / 200 点"));
+        assert!(details.contains("重置"));
+    }
     #[test]
     fn claude_local_quota_displays_only_recorded_reset_times(){
         let now=chrono::Local::now();let id="local-fixture".to_string();
