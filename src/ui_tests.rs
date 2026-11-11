@@ -8,6 +8,53 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn weather_hidden_page_opens_its_settings_without_panicking(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.set_page_visible(8,false);h.app.show_page(8);
+    assert!(h.app.settings_open);assert_eq!(h.app.settings_tab,12);
+}
+
+#[test]
+fn weather_settings_maps_to_the_module_switch(){
+    assert_eq!(crate::extras::settings_tab_module(12),Some(8));
+}
+
+#[test]
+fn weather_city_draft_keeps_the_saved_location_until_confirmed(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.weather_city="杭州".into();h.app.settings.wecom_notifications=true;
+    h.app.settings.feishu_notifications=true;h.app.settings.dingtalk_notifications=true;
+    h.app.settings.save();h.app.weather.city_input="北京".into();
+    h.frame(vec![]);
+    assert_eq!(h.app.settings.weather_city,"杭州");
+    let saved=crate::model::Settings::load();
+    assert_eq!(saved.weather_city,"杭州");
+    assert!(saved.wecom_notifications && saved.feishu_notifications && saved.dingtalk_notifications);
+    h.app.set_page_visible(8,false);h.app.apply_weather_city();
+    assert_eq!(h.app.settings.weather_city,"杭州");assert!(!h.app.weather.loading);
+}
+
+#[test]
+fn weather_attribution_opens_its_source_without_changing_pages(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.show_page(8);h.hover(H::local(300.0,60.0),1.0);
+    h.click(H::local(375.0,122.0));
+    assert!(h.cmds.contains(&crate::app::Cmd::OpenUrl("https://open-meteo.com/".into())));
+    assert_eq!(h.app.page(),8);
+}
+
+#[test]
+fn weather_refresh_keeps_music_and_settings_shortcuts_separate(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"歌曲".into(),artist:"歌手".into(),playing:true,..Default::default()};
+    h.app.show_page(8);h.hover(H::local(300.0,60.0),1.0);
+    let rect=|name|h.ctx.read_response(egui::Id::new(("card",true,name))).unwrap().rect;
+    let refresh=rect("weather-refresh");
+    assert!(!refresh.intersects(rect("header-music")));
+    assert!(!refresh.intersects(rect("page-settings")));
+}
+
+#[test]
 fn resized_font_atlases_stop_reuploading_and_release_unused_sizes(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let ctx=egui::Context::default();crate::theme::load_fonts(&ctx);
@@ -454,7 +501,7 @@ fn settings_keep_dark_buttons_when_system_theme_changes() {
 #[test]
 fn expanded_settings_routes_preserve_inline_controls(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for (page,tab) in [1,2,3,5,4,7,11,8].into_iter().enumerate(){
+    for (page,tab) in crate::app::PAGE_SETTINGS_TABS.into_iter().enumerate(){
         let mut h=H::new();h.app.show_page(page);h.hover(H::local(200.0,40.0),1.0);
         h.click(H::local(394.0,18.0));
         assert!(h.app.settings_open,"页面 {page} 应打开设置窗口");

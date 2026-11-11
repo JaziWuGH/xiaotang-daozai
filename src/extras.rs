@@ -973,7 +973,7 @@ pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
 /// 设置分页对应的功能模块（页面序号）；常规、通知、关于、页面管理不属于任何模块。
 pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
     use crate::app::*;
-    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),_=>None}
+    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),_=>None}
 }
 
 pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){

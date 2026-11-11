@@ -104,6 +104,14 @@ fn get(agent: &ureq::Agent, url: &url::Url) -> Result<Value, String> {
         .and_then(json)
 }
 
+fn http_agent() -> ureq::Agent {
+    let mut builder=ureq::AgentBuilder::new().timeout(Duration::from_secs(12));
+    let proxy=["HTTPS_PROXY","https_proxy","ALL_PROXY","all_proxy","HTTP_PROXY","http_proxy"].iter()
+        .find_map(|key|std::env::var(key).ok().filter(|value|!value.is_empty())).or_else(crate::quota::system_proxy);
+    if let Some(proxy)=proxy.and_then(|value|ureq::Proxy::new(value).ok()){builder=builder.proxy(proxy);}
+    builder.build()
+}
+
 /// 按网络出口定位；国内常见出口能拿到中文城市名。
 pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
     let url = url::Url::parse("https://ipwho.is/?lang=zh-CN").map_err(|_| "定位服务地址无效")?;
@@ -214,47 +222,60 @@ pub struct State {
     pub error: Option<String>,
     pub loading: bool,
     pub last_start: f64,
-    /// 上一次请求用的城市；设置里改了城市就立即重取。
+    /// 城市输入草稿，确认后才写入设置并发起查询。
+    pub city_input: String,
+    /// 上一次请求使用的城市。
     last_city: Option<String>,
     rx: Option<Receiver<Result<Snapshot, String>>>,
     cache: Option<PathBuf>,
 }
 
 impl State {
-    pub fn load() -> Self {
-        if cfg!(test) { return Self::default(); }
+    pub fn load(city: &str) -> Self {
+        let mut state=Self {city_input:city.to_string(),..Default::default()};
+        if cfg!(test) { return state; }
         let path = crate::model::config_dir().join("weather.json");
-        let snapshot = std::fs::read(&path).ok().and_then(|raw| serde_json::from_slice::<Snapshot>(&raw).ok());
-        Self { snapshot, error: None, loading: false, last_start: 0.0, last_city: None, rx: None, cache: Some(path) }
+        state.snapshot=std::fs::read(&path).ok().and_then(|raw|serde_json::from_slice::<Snapshot>(&raw).ok());
+        state.cache=Some(path);
+        state
     }
 
     /// 设置里的城市是否和上次请求不一致（首次启动也算）。
     pub fn city_changed(&self, city: &str) -> bool { self.last_city.as_deref() != Some(city.trim()) }
 
-    pub fn refresh(&mut self, city: &str, t: f64, force: bool) {
-        if self.loading { return; }
-        // 失败后不要连点连试：成功过就等 30 秒，连续失败拉长到 2 分钟。
-        let cooldown = if self.error.is_some() { 120.0 } else { 30.0 };
-        if !force && self.last_start > 0.0 && t - self.last_start < cooldown { return; }
+    pub fn can_refresh(&self, city: &str, t: f64) -> bool {
+        !self.loading && (self.city_changed(city) || t-self.last_start>=if self.error.is_some(){120.0}else{30.0})
+    }
+
+    pub fn should_refresh(&self, city: &str, t: f64, now: i64, enabled: bool) -> bool {
+        enabled && (self.city_changed(city) || self.stale(now)) && self.can_refresh(city,t)
+    }
+
+    pub fn refresh(&mut self, city: &str, t: f64) -> bool {
+        if !self.can_refresh(city,t) { return false; }
         let city = city.trim().to_string();
+        if self.last_city.is_some() && self.city_changed(&city) {self.snapshot=None;self.error=None;}
         self.last_city = Some(city.clone());
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.loading = true;
         self.last_start = t;
         std::thread::spawn(move || {
-            let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(12)).build();
+            let agent = http_agent();
             let _ = tx.send(fetch(&agent, &city));
         });
+        true
     }
 
     /// 是否有新结果（外壳据此立即重绘）。
-    pub fn poll(&mut self) -> bool {
+    pub fn poll(&mut self, city: &str, enabled: bool) -> bool {
         let Some(rx) = &self.rx else { return false; };
         match rx.try_recv() {
             Ok(result) => {
                 self.rx = None;
                 self.loading = false;
+                // 关闭模块或确认了别的城市后，旧请求不再更新界面和缓存。
+                if !enabled || self.city_changed(city) { return true; }
                 match result {
                     Ok(snapshot) => {
                         if let Some(path) = &self.cache {
@@ -271,7 +292,7 @@ impl State {
             Err(TryRecvError::Disconnected) => {
                 self.rx = None;
                 self.loading = false;
-                self.error = Some("天气服务没有响应".into());
+                if enabled && !self.city_changed(city) {self.error=Some("天气服务没有响应".into());}
                 true
             }
         }
@@ -285,6 +306,61 @@ impl State {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn weather_manual_refresh_respects_success_and_failure_cooldowns(){
+        for (error,cooldown) in [(None,30.0),(Some("网络不可用".to_string()),120.0)] {
+            let mut state=State {last_start:100.0,last_city:Some("杭州".into()),error,..Default::default()};
+            state.refresh("杭州",100.0+cooldown-1.0);
+            assert!(!state.loading,"手动刷新也应遵守 {cooldown} 秒请求间隔");
+            assert!(state.can_refresh("杭州",100.0+cooldown));
+        }
+    }
+
+    #[test]
+    fn weather_scheduler_stops_when_disabled_and_bounds_retries(){
+        let mut state=State::default();
+        assert!(state.should_refresh("杭州",0.0,1000,true));
+        assert!(!state.should_refresh("杭州",0.0,1000,false));
+        state.last_city=Some("杭州".into());state.last_start=0.0;
+        assert!(!state.can_refresh("杭州",29.0),"启动时刻为零也必须限流");
+        assert!(state.should_refresh("杭州",30.0,1000,true));
+        state.error=Some("网络不可用".into());
+        assert!(!state.should_refresh("杭州",119.0,1000,true));
+        assert!(state.should_refresh("杭州",120.0,1000,true));
+        assert!(state.can_refresh("北京",1.0),"确认其他城市后可以立即查询");
+        state.loading=true;
+        assert!(!state.can_refresh("北京",1000.0),"在途请求结束前不能堆积线程");
+        state.loading=false;state.error=None;
+        state.snapshot=Some(Snapshot{at:1000,..Default::default()});
+        assert!(!state.should_refresh("杭州",1000.0,1000+INTERVAL-1,true));
+        assert!(state.should_refresh("杭州",1000.0,1000+INTERVAL,true));
+    }
+
+    #[test]
+    fn weather_late_results_do_not_restore_disabled_or_changed_locations(){
+        for (city,enabled) in [("杭州",false),("北京",true)] {
+            let (tx,rx)=mpsc::channel();
+            let path=std::env::temp_dir().join(format!("daozai-weather-discard-{}-{enabled}.json",std::process::id()));
+            let mut state=State{snapshot:Some(Snapshot{place:"上次天气".into(),..Default::default()}),
+                loading:true,last_city:Some("杭州".into()),rx:Some(rx),cache:Some(path.clone()),..Default::default()};
+            tx.send(Ok(Snapshot{place:"杭州".into(),..Default::default()})).unwrap();
+            assert!(state.poll(city,enabled));
+            assert!(!state.loading);
+            assert_eq!(state.snapshot.as_ref().unwrap().place,"上次天气");
+            assert!(state.error.is_none());assert!(!path.exists(),"丢弃的响应不能落盘");
+        }
+    }
+
+    #[test]
+    fn weather_current_result_updates_the_snapshot_and_clears_errors(){
+        let (tx,rx)=mpsc::channel();
+        let mut state=State{last_city:Some("杭州".into()),loading:true,rx:Some(rx),error:Some("旧错误".into()),..Default::default()};
+        tx.send(Ok(Snapshot{place:"杭州".into(),temp:9.0,..Default::default()})).unwrap();
+        assert!(state.poll(" 杭州 ",true));
+        assert_eq!(state.snapshot.as_ref().unwrap().temp,9.0);
+        assert!(!state.loading && state.error.is_none());assert!(!state.poll("杭州",true));
+    }
 
     fn sample() -> Value {
         json!({
@@ -369,7 +445,7 @@ mod tests {
     #[test]
     #[ignore="按需联网核验本机定位与天气"]
     fn weather_local_probe(){
-        let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(15)).build();
+        let agent = http_agent();
         let auto = fetch(&agent, "").expect("自动定位失败");
         eprintln!("auto_place={} temp={:.1} code={} sunrise={:?} sunset={:?} days={:?}", auto.place, auto.temp, auto.code, auto.sunrise, auto.sunset,
             auto.days.iter().map(|d| (&d.label, d.high, d.low, d.rain)).collect::<Vec<_>>());

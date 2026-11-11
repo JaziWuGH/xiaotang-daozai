@@ -1,5 +1,5 @@
 //! 天气页与天气设置：实况 + 四日预报，图标全部用面板矢量绘制。
-use crate::app::{App, Cmd, Env};
+use crate::app::{App, Cmd, Env, WEATHER_PAGE};
 use crate::paint::{self, Card, H};
 use crate::theme::{self, W};
 use crate::weather::{self, Kind};
@@ -109,21 +109,27 @@ fn icon(c: &Card, cx: f32, cy: f32, size: f32, kind: Kind) {
 impl App {
     /// 后台取数的轮询与自动刷新；数据过期就重新拉一次。
     pub(crate) fn weather_tick(&mut self) {
-        self.weather.poll();
-        // 单元测试不联网：数据由测试直接塞进状态。
-        if cfg!(test) { return; }
-        let city = self.settings.weather_city.trim().to_string();
-        if self.weather.city_changed(&city) {
-            self.weather.refresh(&city, self.t, true);
-        } else if self.weather.stale(chrono::Utc::now().timestamp()) {
-            self.weather.refresh(&city, self.t, false);
+        let enabled=self.module_on(WEATHER_PAGE);
+        self.weather.poll(&self.settings.weather_city,enabled);
+        if self.weather.should_refresh(&self.settings.weather_city,self.t,chrono::Utc::now().timestamp(),enabled) {
+            // 单元测试仍执行模块开关与刷新判定，仅跳过实际联网。
+            if !cfg!(test) {self.weather.refresh(&self.settings.weather_city,self.t);}
+        }
+    }
+
+    pub(crate) fn apply_weather_city(&mut self) {
+        if !self.module_on(WEATHER_PAGE) {return;}
+        let city=self.weather.city_input.trim().to_string();
+        if self.weather.refresh(&city,self.t) {
+            self.settings.weather_city=city.clone();
+            self.weather.city_input=city;
         }
     }
 
     /// 常驻胶囊上的天气徽标：有快照、天气页可见且非极简时才占位。
     pub(crate) fn weather_pill(&self) -> Option<&crate::weather::Snapshot> {
         self.weather.snapshot.as_ref()
-            .filter(|_| self.settings.visible_pages[8] && !self.effective_minimal())
+            .filter(|_| self.module_on(WEATHER_PAGE) && !self.effective_minimal())
     }
 
     /// 温度文字比基础槽宽时需要补的宽度（负数会被调用方忽略）。
@@ -140,10 +146,10 @@ impl App {
         let Some(snapshot) = self.weather_pill().cloned() else { return };
         self.paint_pill_weather(c, x, layout, &snapshot);
         let width = layout.widths[crate::bar_layout::WEATHER];
-        let tip = format!("{} · {}\n更新于 {}", snapshot.place, weather::describe(snapshot.code), weather::clock(snapshot.at));
+        let tip = format!("{} · {}\n更新于 {} · Open-Meteo", snapshot.place, weather::describe(snapshot.code), weather::clock(snapshot.at));
         // 用 bar_tooltip：常驻胶囊上的提示不能用 on_hover_text，悬浮层会盖住指针、抢走点击。
         if crate::quota_ui::bar_tooltip(c.hit(x - width / 2.0, 1.0, width, 28.0, "weather-pill"), tip).clicked() {
-            self.show_page(8);
+            self.show_page(WEATHER_PAGE);
         }
     }
 
@@ -162,11 +168,16 @@ impl App {
         c.text(left + 16.0, 21.0, &pill_temp_text(snapshot), theme::size::PILL_CLOCK, W::Bold, if stale { theme::GRAY } else { theme::WHITE }, H::Left);
     }
 
-    pub(crate) fn page_weather(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
+    pub(crate) fn page_weather(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
         let loading = self.weather.loading;
-        c.text(370.0, 23.0, if loading { "更新中" } else { "刷新" }, 10.5, W::Regular, if loading { theme::DIM } else { theme::GRAY }, H::Right);
-        if c.hit(328.0, 10.0, 44.0, 22.0, "weather-refresh").on_hover_text("重新获取当地天气").clicked() && !loading {
-            self.weather.refresh(&self.settings.weather_city, self.t, true);
+        let ready=self.weather.can_refresh(&self.settings.weather_city,self.t);
+        c.text(326.0, 23.0, if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" }, 10.5, W::Regular, if ready { theme::GRAY } else { theme::DIM }, H::Center);
+        if c.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取当地天气；请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
+            self.weather.refresh(&self.settings.weather_city,self.t);
+        }
+        c.text(404.0,125.0,"Open-Meteo",8.5,W::Regular,theme::DIM,H::Right);
+        if c.hit(348.0,116.0,58.0,13.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("天气数据来自 Open-Meteo，按 CC BY 4.0 授权").clicked() {
+            cmds.push(Cmd::OpenUrl("https://open-meteo.com/".into()));
         }
 
         let Some(snapshot) = self.weather.snapshot.clone() else {
@@ -205,8 +216,8 @@ impl App {
         let offline = self.weather.error.is_some();
         let stamp = weather::clock(snapshot.at);
         let stale = offline || age > 3600;
-        c.text(322.0, 23.0, &stamp, 9.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
-        c.hit(296.0, 12.0, 28.0, 20.0, "weather-stamp").on_hover_text(format!(
+        c.text(344.0, 125.0, &stamp, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
+        c.hit(312.0, 116.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
             "上次更新 {stamp}{}",
             if offline { "，当前显示的是缓存" } else { "" }
         ));
@@ -229,12 +240,13 @@ impl App {
         use crate::extras::{settings_card, settings_control_row, settings_hint, settings_label};
         settings_label(ui, "位置");
         settings_card(ui, |ui| {
-            settings_control_row(ui, "城市", 56.0, |ui| {
+            let response=settings_control_row(ui, "城市", 56.0, |ui| {
                 let width = (ui.available_width() - 8.0).min(300.0);
-                ui.add_sized([width, 30.0], egui::TextEdit::singleline(&mut self.settings.weather_city)
+                ui.add_sized([width, 30.0], egui::TextEdit::singleline(&mut self.weather.city_input)
                     .vertical_align(egui::Align::Center).hint_text("留空则按网络出口自动定位，例如：杭州"))
             });
-            settings_hint(ui, "填中文或英文城市名都行；改完点下面的「刷新天气」立即生效。留空则按当前网络出口定位。");
+            if response.lost_focus() && ui.input(|input|input.key_pressed(egui::Key::Enter)) {self.apply_weather_city();}
+            settings_hint(ui, "输入中文或英文城市名，按回车或点「刷新天气」应用。自动定位使用网络出口的大致位置，可能受代理影响。");
         });
 
         settings_label(ui, "当前");
@@ -253,15 +265,20 @@ impl App {
                 ui.add(egui::Label::new(egui::RichText::new(error).size(11.5).color(WARN)).wrap());
             }
             ui.horizontal(|ui| {
-                if ui.add_enabled(!self.weather.loading, egui::Button::new(if self.weather.loading { "正在获取…" } else { "刷新天气" })).clicked() {
-                    self.weather.refresh(&self.settings.weather_city, self.t, true);
+                let ready=self.weather.can_refresh(&self.weather.city_input,self.t);
+                if ui.add_enabled(ready, egui::Button::new(if self.weather.loading { "正在获取…" } else { "刷新天气" })).clicked() {
+                    self.apply_weather_city();
                 }
-                if ui.add_enabled(!self.weather.loading, egui::Button::new("自动定位")).on_hover_text("清空城市，按当前网络出口重新定位").clicked() {
-                    self.settings.weather_city.clear();
-                    self.weather.refresh("", self.t, true);
+                if ui.add_enabled(self.weather.can_refresh("",self.t), egui::Button::new("自动定位")).on_hover_text("清空城市，按当前网络出口重新定位").clicked() {
+                    self.weather.city_input.clear();
+                    self.apply_weather_city();
                 }
             });
-            settings_hint(ui, "数据来自 Open-Meteo（免费、无需密钥）；岛仔只上传城市名或由定位服务给出的坐标，不涉及账号信息。");
+            settings_hint(ui, "同一城市请求间隔至少 30 秒，失败后至少 2 分钟。只查询位置与天气，不涉及账号信息。");
+            ui.horizontal(|ui|{
+                ui.hyperlink_to("天气数据：Open-Meteo","https://open-meteo.com/");
+                ui.hyperlink_to("CC BY 4.0","https://creativecommons.org/licenses/by/4.0/");
+            });
         });
     }
 }

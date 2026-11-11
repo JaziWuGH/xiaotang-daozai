@@ -30,6 +30,7 @@ pub const TODO_PAGE: usize = 4;
 pub const MAIL_PAGE: usize = 5;
 pub const QUOTA_PAGE: usize = 6;
 pub const CALENDAR_PAGE: usize = 7;
+pub const WEATHER_PAGE: usize = 8;
 pub(crate) const CALENDAR_H: f32 = 216.0;
 pub const BAR_W: f32 = 163.0; // 收起药丸宽
 pub const BAR_H: f32 = 30.0; // 收起药丸高
@@ -57,6 +58,7 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
     }
 }
 pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气"];
+pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -756,6 +758,7 @@ impl App {
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
         let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
+        let weather=crate::weather::State::load(&settings.weather_city);
         Self {
             opts,
             settings,
@@ -841,7 +844,7 @@ impl App {
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
-            weather: crate::weather::State::load(),
+            weather,
             updates: Default::default(),
             resident: Default::default(), resident_power:(None,false),
         }
@@ -1299,7 +1302,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=PAGE_SETTINGS_TABS[page];
             self.open_settings();
             return;
         }
@@ -2477,7 +2480,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,12][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=PAGE_SETTINGS_TABS[self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);

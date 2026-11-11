@@ -22,6 +22,7 @@ impl crate::app::App {
         let mut layout=preview_layout(&order,count,weather_snapshot.is_some());
         for (position,extra) in self.quota_balance_layout(ui.ctx()){layout.balance_tail(position,extra);}
         if self.settings.clock_period!=0 { layout.widen_clock(40.0); }
+        if let Some(extra)=self.weather_pill_extra(ui.ctx()){layout.widen(WEATHER,extra);}
         let (stage,_)=ui.allocate_exact_size(Vec2::new(ui.available_width(),100.0),egui::Sense::hover());
         ui.painter().rect_filled(stage,10.0,Color32::from_rgb(19,25,36));
         let scale=((stage.width()-28.0)/layout.width).min(1.0);
@@ -57,7 +58,7 @@ impl crate::app::App {
             }};
             let left=if slot==QUOTA{cx+layout.quota_slots().filter_map(|i|layout.x[i].map(|x|x-layout.widths[i]/2.0)).fold(f32::INFINITY,f32::min)}else{x-width/2.0};
             // 天气与时钟成组，拖拽热区一并盖住，拖时钟会带着天气走。
-            let (left,width)=if slot==CLOCK&&layout.x[WEATHER].is_some(){(left,width+12.0+WEATHER_WIDTH)}else{(left,width)};
+            let (left,width)=if slot==CLOCK&&layout.x[WEATHER].is_some(){(left,width+12.0+layout.widths[WEATHER])}else{(left,width)};
             let rect=card.rect(left-5.0,1.0,width+10.0,28.0);
             let response=ui.interact(rect,ui.id().with(("resident-icon",slot)),egui::Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::Grab);
             response.dnd_set_drag_payload(slot);

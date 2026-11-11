@@ -61605,3 +61605,9 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
+
+Open-Meteo 天气数据
+https://open-meteo.com/
+天气与地理编码数据按 CC BY 4.0 授权，来源信息见 https://open-meteo.com/en/licence 。
+许可：https://creativecommons.org/licenses/by/4.0/
+界面会将温度取整显示，并将天气代码转换为中文描述与矢量图标。
