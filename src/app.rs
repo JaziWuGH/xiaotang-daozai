@@ -2014,7 +2014,7 @@ impl App {
     fn unread_slot(&self,height:f32)->f32 {
         if self.pending_messengers.len()>=3 {(height-4.0)/3.0} else {UNREAD_SLOT}
     }
-    /// 收起时叠放的来源图标（最多两个）。
+    /// 收起时叠放的来源图标，每个客户端各占一个。
     fn unread_sources(&self)->Vec<Messenger>{
         let mut sources=Vec::new();
         for u in &self.pending_messengers {if !sources.contains(&u.source){sources.push(u.source);}}
@@ -2022,7 +2022,7 @@ impl App {
     }
     /// 收起时叠放区沿胶囊方向的长度。
     fn unread_stack_len(&self,horizontal:bool)->f32 {
-        let icons=self.unread_sources().len().min(2) as f32;
+        let icons=self.unread_sources().len() as f32;
         32.0+unread_step(horizontal)*(icons-1.0)
     }
 
@@ -2105,7 +2105,7 @@ impl App {
     fn draw_unread_stack(&mut self,c:&Card,horizontal:bool,cmds:&mut Vec<Cmd>){
         let sources=self.unread_sources();
         let count=self.pending_messengers.len();
-        let icons=sources.len().min(2);
+        let icons=sources.len();
         let step=unread_step(horizontal);
         let at=|k:usize|if horizontal {(16.0+step*k as f32,14.0)}else{(16.0,14.0+step*k as f32)};
         for k in 0..icons {

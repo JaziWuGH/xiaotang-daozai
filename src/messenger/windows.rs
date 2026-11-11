@@ -68,7 +68,13 @@ pub(crate) fn company_name(path:&str)->String{
 pub(crate) fn path_allowed(image:&str,paths:&[String])->bool{
     if paths.iter().any(|p|p==image){return true;}
     let file=image.rsplit('\\').next().unwrap_or(image);
-    paths.iter().any(|p|p.strip_prefix('*').is_some_and(|name|name==file)) && company_name(image).to_lowercase().contains("tencent")
+    paths.iter().any(|p|p.strip_prefix('*').is_some_and(|name|name==file)) && publisher_allowed(file,&company_name(image))
+}
+
+fn publisher_allowed(file:&str,company:&str)->bool{
+    let company=company.to_lowercase();
+    Messenger::ALL.into_iter().any(|client|client.adapter().process_names.iter().any(|name|name.eq_ignore_ascii_case(file))
+        && client.adapter().publishers.iter().any(|publisher|company.contains(publisher)))
 }
 
 pub(crate) unsafe fn matches(hwnd: HWND, paths: &[String]) -> bool {
@@ -95,7 +101,9 @@ pub(crate) fn window_pid(hwnd:HWND)->u32{
 pub(crate) unsafe fn foreground_main_pid(source:Messenger,paths:&[String])->Option<u32>{
     let hwnd=GetForegroundWindow();
     if IsIconic(hwnd).as_bool() || !visible_main_frame(hwnd,source) || !matches(hwnd,paths){return None;}
-    Some(window_pid(hwnd))
+    if Messenger::OFFICE.contains(&source) && !super::desktop::main_window(hwnd,source){return None;}
+    let pid=window_pid(hwnd);
+    Some(if source==Messenger::Wechat{crate::wechat::account_pid(pid,paths)}else{pid})
 }
 
 pub(crate) unsafe fn visible_main_frame(hwnd:HWND,source:Messenger)->bool{
@@ -254,9 +262,20 @@ impl Default for Runtime {
 impl Runtime {
     pub fn foreground(&self,sources:&[Messenger])->Option<(Messenger,u32)>{
         let (client,pid)=foreground_client(sources)?;
+        let pid=if client==Messenger::Qq{
+            let accounts=(client.adapter().native.accounts?)(&client_paths(client))?;
+            self.qq_account_pid(pid,&accounts,&parent_processes())?
+        }else{pid};
+        if client.adapter().keep_unidentified && !self.targets.values().any(|target|target.unread.source==client && target.unread.pid==pid){return None;}
         if self.targets.values().filter(|target|target.unread.source==client && target.unread.pid==pid)
             .any(|target|!(client.adapter().native.ready)(*target)){return None;}
         Some((client,pid))
+    }
+    fn qq_account_pid(&self,pid:u32,accounts:&[Target],parents:&HashMap<u32,u32>)->Option<u32>{
+        let mut pids:Vec<_>=accounts.iter().filter(|target|target.unread.source==Messenger::Qq).map(|target|target.unread.pid).collect();
+        pids.sort_unstable();pids.dedup();
+        let pid=account_tray_pid(pid,&pids,parents)?;
+        self.targets.values().any(|target|target.unread.source==Messenger::Qq && target.unread.pid==pid).then_some(pid)
     }
     pub fn poll_taskbar(&mut self,ctx:&eframe::egui::Context,settings:&Settings)->Vec<TaskbarEvent>{
         let mut events=Vec::new();
@@ -276,9 +295,18 @@ impl Runtime {
                 if entry.source.is_some(){format!("正在监听 · {}任务栏闪动时提醒",entry.client.name())}else{entry.status.clone()}
             };
             if entry.status!=status{entry.status=status.clone();events.push(TaskbarEvent::Status(entry.client,status));}
-            if let Some(source)=&entry.source{events.extend(source.take().into_iter().filter(|(pid,_)|*pid!=0).map(|(pid,window)|TaskbarEvent::Message(Unread{source:entry.client,pid,window})));}
+            if let Some(source)=&entry.source{
+                for (pid,window) in source.take().into_iter().filter(|(pid,_)|*pid!=0 || entry.client.adapter().keep_unidentified){
+                    events.push(TaskbarEvent::Message(Unread{source:entry.client,pid,window}));
+                }
+            }
         }
         events
+    }
+    /// 前台已确认查看该账号时同步重置监听端，避免遗漏激活事件后吞掉下一条消息。
+    pub fn viewed_client(&self,client:Messenger,pid:u32){
+        if pid==0{return;}
+        for entry in &self.taskbar{if entry.client==client{if let Some(source)=&entry.source{source.forget(pid);}}}
     }
     pub fn track(&mut self,target:Target)->Result<(),OpenError>{
         let process=check_target(target)?;
@@ -376,6 +404,15 @@ pub(crate) fn client_in_foreground(source:Messenger)->bool{unsafe{foreground_mai
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn client_publishers_are_checked_against_the_actual_executable_name(){
+        assert!(publisher_allowed("WXWork.exe","Tencent"));
+        assert!(publisher_allowed("Feishu.exe","Beijing Feishu Technology Co., Ltd."));
+        assert!(publisher_allowed("DingTalk.exe","Alibaba Group."));
+        assert!(!publisher_allowed("Feishu.exe","Tencent"));
+        assert!(!publisher_allowed("DingTalk.exe","Unknown Publisher"));
+        assert!(!publisher_allowed("WXWorkHelper.exe","Tencent"));
+    }
     use windows::{core::w,Win32::Foundation::{LRESULT,WPARAM}};
     #[test]
     fn taskbar_sources_follow_settings_and_cannot_supply_another_client_identity(){
@@ -400,6 +437,33 @@ mod tests {
         assert!(events.iter().any(|event|matches!(event,TaskbarEvent::Status(Messenger::Wechat,status) if status.contains("总开关已关闭"))));
         settings.wechat_notifications=false;
         assert!(runtime.poll_taskbar(&ctx,&settings).iter().any(|event|matches!(event,TaskbarEvent::Status(Messenger::Wechat,status) if status.is_empty())));
+    }
+    #[test]
+    fn qq_foreground_children_resolve_to_the_bound_account_without_using_the_remaining_account(){
+        let mut runtime=Runtime::default();
+        for pid in [100,200,300]{let unread=Unread{source:Messenger::Qq,pid,window:pid as isize};runtime.targets.insert(unread,Target{unread,started:1});}
+        let accounts=runtime.targets.values().copied().collect::<Vec<_>>();
+        let parents=HashMap::from([(101,100),(201,200),(301,300),(100,10),(200,10),(300,10)]);
+        for (child,account) in [(101,100),(201,200),(301,300)]{assert_eq!(runtime.qq_account_pid(child,&accounts,&parents),Some(account));}
+        assert_eq!(runtime.qq_account_pid(10,&accounts,&parents),None,"共同的管理进程不能猜成某个账号");
+        let saved=runtime.targets.clone();runtime.targets.retain(|unread,_|unread.pid==100);
+        assert_eq!(runtime.qq_account_pid(10,&accounts,&parents),None,"只有一个账号有岛上提醒时，也必须考虑其他正在运行的账号");runtime.targets=saved;
+        runtime.targets.retain(|unread,_|unread.pid!=100);
+        assert_eq!(runtime.qq_account_pid(101,&accounts,&parents),None,"原账号退出后不能转绑剩余账号");
+    }
+    #[test]
+    fn confirming_a_view_only_rearms_that_clients_account(){
+        use std::{cell::RefCell,rc::Rc};
+        struct Source{client:Messenger,seen:Rc<RefCell<Vec<(Messenger,u32)>>>}
+        impl TaskbarSource for Source{
+            fn registered(&self)->bool{true}
+            fn take(&self)->Vec<(u32,isize)>{vec![]}
+            fn forget(&self,pid:u32){self.seen.borrow_mut().push((self.client,pid));}
+        }
+        let seen=Rc::new(RefCell::new(vec![]));let mut runtime=Runtime::default();
+        for entry in &mut runtime.taskbar{entry.source=Some(Box::new(Source{client:entry.client,seen:seen.clone()}));}
+        runtime.viewed_client(Messenger::Wechat,100);runtime.viewed_client(Messenger::DingTalk,0);runtime.viewed_client(Messenger::DingTalk,200);
+        assert_eq!(*seen.borrow(),[(Messenger::Wechat,100),(Messenger::DingTalk,200)]);
     }
     #[test]
     fn opening_clients_share_one_worker_slot_until_the_worker_finishes(){
@@ -516,7 +580,7 @@ mod tests {
     #[test]
     fn exited_accounts_report_their_status_even_when_other_accounts_remain(){
         use crate::app::{Messenger,Unread};
-        for source in [Messenger::Wechat,Messenger::Qq]{
+        for source in Messenger::ALL{
             let mut clients=[ClientProcess::new(),ClientProcess::new(),ClientProcess::new()];
             let unread=Unread{source,pid:clients[0].0.id(),window:0};
             assert!(validate_unread_with(unread,|_|panic!("不能改选其他账号")).is_ok());
@@ -537,7 +601,7 @@ mod tests {
     #[test]
     fn exited_messenger_accounts_are_removed_individually(){
         use crate::app::{Messenger,Unread};
-        for source in [Messenger::Wechat,Messenger::Qq]{
+        for source in Messenger::ALL{
             let mut clients=[ClientProcess::new(),ClientProcess::new(),ClientProcess::new()];
             let mut unreads=clients.iter().map(|client|Unread{source,pid:client.0.id(),window:0}).collect::<Vec<_>>();
             let mut monitor=Runtime::default();
@@ -554,7 +618,7 @@ mod tests {
     #[test]
     fn reminders_clear_when_the_client_exits_before_the_first_check(){
         use crate::app::{Messenger,Unread};
-        for source in [Messenger::Wechat,Messenger::Qq]{
+        for source in Messenger::ALL{
             let mut client=ClientProcess::new();
             let unread=Unread{source,pid:client.0.id(),window:0};
             client.exit();drop(client);
@@ -565,7 +629,7 @@ mod tests {
     #[test]
     fn unknown_messenger_accounts_clear_only_after_the_whole_client_exits(){
         use crate::app::{Messenger,Unread};
-        for source in [Messenger::Wechat,Messenger::Qq]{
+        for source in Messenger::ALL{
             let unread=Unread::of(source);let mut monitor=Runtime::default();
             assert!(monitor.exited_with(&[unread],|_|Some(vec![100,200])).is_empty());
             assert!(monitor.exited_with(&[unread],|_|Some(vec![200])).is_empty());
@@ -577,7 +641,7 @@ mod tests {
     fn messenger_reminders_survive_hidden_or_destroyed_windows(){unsafe{
         use crate::app::{Messenger,Unread};
         let mut monitor=Runtime::default();
-        for source in [Messenger::Wechat,Messenger::Qq]{
+        for source in Messenger::ALL{
             let window=CreateWindowExW(WS_EX_TOOLWINDOW,w!("STATIC"),w!(""),WS_POPUP,-10000,-10000,10,10,None,None,None,None).unwrap();
             let unread=Unread{source,pid:std::process::id(),window:window.0 as isize};
             let hidden=monitor.exited(&[unread]);DestroyWindow(window).unwrap();

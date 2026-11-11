@@ -5,7 +5,7 @@ use eframe::egui::{self, Color32, Pos2};
 use daozai::app::{self, App, Cmd, Env, Options};
 use daozai::smtc;
 #[cfg(windows)]
-use daozai::messenger::{self,NotificationFilter,OpenError,TaskbarEvent};
+use daozai::messenger::{self,OpenError,TaskbarEvent};
 use daozai::poll_clock::PollClock;
 use std::time::{Duration, Instant};
 
@@ -146,7 +146,7 @@ impl Shell {
         });
         diagnostics::startup("初始化通知监听");
         #[cfg(windows)]
-        let incoming=if app.settings.read_notifications {match daozai::system::connect(cc.egui_ctx.clone(),NotificationFilter::for_settings(&app.settings)){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
+        let incoming=if app.settings.read_notifications {match daozai::system::connect_with_settings(cc.egui_ctx.clone(),&app.settings){Ok(rx)=>Some(rx),Err(e)=>{app.listener_status=format!("Windows 无法读取通知：{}",e.code());None}}}else{None};
         // 音频、网络与输入法查询由后台完成，避免首帧等待系统服务。
         diagnostics::startup("创建后台采样与窗口");
         let initial_input=None;
@@ -432,6 +432,7 @@ impl eframe::App for Shell {
                 }
             }}
             if let Some(rx)=&self.incoming {
+                rx.taskbar_settings(&self.app.settings);
                 while let Ok(event)=rx.try_recv(){match event {
                     daozai::system::Incoming::Revoked=>{self.app.settings.read_notifications=false;self.app.settings.save();},
                     daozai::system::Incoming::Status(s)=>self.app.listener_status=s,
@@ -451,6 +452,7 @@ impl eframe::App for Shell {
                 match self.messengers.foreground(&sources){
                     Some((source,pid))=>{
                         if self.app.pending_messengers.iter().any(|u|u.source==source){messenger::windows::trace(format!("岛上清除 {} 账号 {pid}（前台切换={foreground_changed}）",source.name()));}
+                        self.messengers.viewed_client(source,pid);
                         self.app.viewed_client(source,pid);
                     }
                     None=>if foreground_changed && !sources.is_empty(){messenger::windows::trace(format!("前台切换但不是消息客户端主窗口：{}；岛上未读 {:?}",messenger::windows::describe_foreground(),self.app.pending_messengers.iter().map(|u|(u.source.name(),u.pid)).collect::<Vec<_>>()));},
@@ -480,7 +482,7 @@ impl eframe::App for Shell {
                 else if started.elapsed()>=Duration::from_secs(4){
                     self.opening_messenger=None;
                     match self.messengers.foreground(&[unread.source]){
-                        Some((source,pid)) if unread.pid==0||unread.pid==pid=>self.app.viewed_client(source,pid),
+                        Some((source,pid)) if unread.pid==0||unread.pid==pid=>{self.messengers.viewed_client(source,pid);self.app.viewed_client(source,pid);},
                         _=>self.app.messenger_unavailable(format!("{}尚未切到前台，可点图标重试",unread.source.name())),
                     }
                 }
@@ -641,7 +643,7 @@ impl eframe::App for Shell {
                     #[cfg(windows)] if let Some(tray)=&self.tray{tray.notify(&title,&body,self.app.settings.sound);}
                 },
                 cmd @ (Cmd::RequestNotifications|Cmd::RequestQqNotifications)=>{
-                    #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect(ctx.clone(),NotificationFilter::for_settings(&self.app.settings)){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
+                    #[cfg(windows)] {self.app.settings.qq_only=matches!(cmd,Cmd::RequestQqNotifications);self.app.settings.read_notifications=true;self.app.settings.save();self.incoming=None;match daozai::system::connect_with_settings(ctx.clone(),&self.app.settings){Ok(rx)=>{self.incoming=Some(rx);self.app.listener_status="正在请求 Windows 通知权限…".into();},Err(e)=>self.app.listener_status=format!("Windows 未允许读取通知：{}。需要相应的系统权限或应用身份。",e.code())}}
                 },
                 // 模块关闭时设置项已置灰；万一仍有命令到达，只提示，不为它临时启动服务。
                 Cmd::MailSync=>if let Some(mail)=&self.mail {

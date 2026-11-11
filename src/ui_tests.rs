@@ -1,5 +1,7 @@
 //! 无窗口交互测试：直接向 egui 注入输入事件，验证悬停展开、切页、按钮。
 use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
+#[path="messenger/ui_tests.rs"]
+mod enterprise_messenger;
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
@@ -2837,6 +2839,7 @@ fn minimal_island_hides_messenger_notices_until_expanded(){
         match source {
             Messenger::Wechat=>h.app.receive_wechat_reminder_from(4242,0x1234),
             Messenger::Qq=>h.app.receive_notification("QQ".into(),"QQ".into(),"QQ · 新消息".into()),
+            Messenger::WeCom|Messenger::Feishu|Messenger::DingTalk=>h.app.receive_messenger_reminder(crate::app::Unread::of(source)),
         }
         for _ in 0..30 {h.frame(vec![]);}
         assert!(h.app.notice.as_ref().and_then(|a|a.messenger())==Some(source),"{source:?} {shape:?}：极简刘海照常弹横幅");
@@ -3967,10 +3970,10 @@ fn new_notification_sways_twice_then_stops_and_restarts_on_the_next_one() {
     }
     assert_eq!(crate::paint::bell_swing(1.0),0.0);
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
-    h.app.settings.read_notifications=true;h.app.receive_notification("微信".into(),"wechat".into(),"第一条".into());
+    h.app.settings.read_notifications=true;h.app.receive_notification("测试通知".into(),"test.notification".into(),"第一条".into());
     let first=h.app.notification_bell_at;
     for _ in 0..90{h.frame(vec![]);}
-    h.app.settings.read_notifications=true;h.app.receive_notification("微信".into(),"wechat".into(),"第二条".into());
+    h.app.settings.read_notifications=true;h.app.receive_notification("测试通知".into(),"test.notification".into(),"第二条".into());
     assert!(h.app.notification_bell_at>first+1.0);
     h.frame(vec![]);
     assert!(h.app.notification_bell_until>h.t);
@@ -6085,10 +6088,10 @@ fn messenger_window_replacement_removes_stale_banner_targets_without_clearing_ot
     use crate::app::{Cmd,Messenger,Unread};
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for source in Messenger::ALL{
-        let mut h=H::new();h.app.settings.read_notifications=true;h.app.settings.wechat_notifications=true;
+        let mut h=H::new();h.app.settings.read_notifications=true;h.app.settings.wechat_notifications=true;h.app.settings.wecom_notifications=true;h.app.settings.feishu_notifications=true;h.app.settings.dingtalk_notifications=true;
         let old=Unread{source,pid:100,window:11};let other=Unread{source,pid:200,window:22};let current=Unread{window:33,..old};
         let receive=|app:&mut App,unread:Unread|match source{
-            Messenger::Wechat=>app.receive_messenger_reminder(unread),
+            Messenger::Wechat|Messenger::WeCom|Messenger::Feishu|Messenger::DingTalk=>app.receive_messenger_reminder(unread),
             Messenger::Qq=>app.receive_notification_from("QQ".into(),"QQ".into(),"有新消息".into(),Some(unread)),
         };
         receive(&mut h.app,old);h.frame(vec![]);receive(&mut h.app,other);receive(&mut h.app,current);

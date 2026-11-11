@@ -8,10 +8,12 @@ pub mod windows;
 #[cfg(windows)]
 mod qq;
 #[cfg(windows)]
+pub(crate) mod desktop;
+#[cfg(windows)]
 pub use windows::{Runtime,ToastAccounts,TaskbarEvent};
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq,Hash)]
-pub enum Messenger {Wechat,Qq}
+pub enum Messenger {Wechat,Qq,WeCom,Feishu,DingTalk}
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Capture {Taskbar,SystemToast}
@@ -25,6 +27,7 @@ pub struct Adapter {
     pub aliases:&'static [&'static str],
     pub display_names:&'static [&'static str],
     pub process_names:&'static [&'static str],
+    pub publishers:&'static [&'static str],
     pub keep_unidentified:bool,
     pub dismiss_unread:bool,
     pub icon_scale:f32,
@@ -38,22 +41,47 @@ pub struct Adapter {
 
 const WECHAT:Adapter=Adapter{
     client:Messenger::Wechat,name:"微信",capture:Capture::Taskbar,notification_id:"WeChat",
-    aliases:&["Weixin","Tencent.WeChat","Tencent.Weixin"],display_names:&["微信","WeChat","Weixin"],process_names:&["Weixin.exe","WeChat.exe"],
+    aliases:&["Weixin","Tencent.WeChat","Tencent.Weixin"],display_names:&["微信","WeChat","Weixin"],process_names:&["Weixin.exe","WeChat.exe"],publishers:&["tencent"],
     keep_unidentified:false,dismiss_unread:false,icon_scale:1.0,collapsed_icon_scale:0.85,
     enabled:|settings|settings.wechat_notifications,tray_enabled:|settings|settings.wechat_tray_open,paint_icon:wechat_icon,
     #[cfg(windows)] native:&crate::wechat::ADAPTER,
 };
 const QQ:Adapter=Adapter{
     client:Messenger::Qq,name:"QQ",capture:Capture::SystemToast,notification_id:"QQ",
-    aliases:&[],display_names:&["QQ"],process_names:&["QQ.exe"],
+    aliases:&[],display_names:&["QQ"],process_names:&["QQ.exe"],publishers:&["tencent"],
     keep_unidentified:true,dismiss_unread:true,icon_scale:1.12,collapsed_icon_scale:0.92,
     enabled:|settings|settings.read_notifications,tray_enabled:|_|true,paint_icon:qq_icon,
     #[cfg(windows)] native:&qq::ADAPTER,
 };
 
+const WECOM:Adapter=Adapter{
+    client:Messenger::WeCom,name:"企业微信",capture:Capture::Taskbar,notification_id:"WXWork",
+    aliases:&["WeCom","WeWork","Tencent.WeWork"],display_names:&["企业微信","WXWork"],process_names:&["WXWork.exe"],publishers:&["tencent"],
+    keep_unidentified:true,dismiss_unread:true,icon_scale:1.0,collapsed_icon_scale:0.85,
+    enabled:|settings|settings.wecom_notifications,tray_enabled:|_|true,paint_icon:|c,x,y|crate::calendar_ui::source_icon(c,crate::calendar_ui::Source::Calendar(Some(crate::calendar::Provider::WeCom)),x-10.0,y-10.0,20.0),
+    #[cfg(windows)] native:&desktop::WECOM,
+};
+
+const FEISHU:Adapter=Adapter{
+    client:Messenger::Feishu,name:"飞书",capture:Capture::Taskbar,notification_id:"Feishu",
+    aliases:&["com.electron.Feishu"],display_names:&["飞书","Feishu"],process_names:&["Feishu.exe"],publishers:&["beijing feishu technology","bytedance"],
+    keep_unidentified:true,dismiss_unread:true,icon_scale:1.0,collapsed_icon_scale:0.85,
+    enabled:|settings|settings.feishu_notifications,tray_enabled:|_|true,paint_icon:|c,x,y|crate::calendar_ui::source_icon(c,crate::calendar_ui::Source::Calendar(Some(crate::calendar::Provider::Feishu)),x-10.0,y-10.0,20.0),
+    #[cfg(windows)] native:&desktop::FEISHU,
+};
+
+const DINGTALK:Adapter=Adapter{
+    client:Messenger::DingTalk,name:"钉钉",capture:Capture::Taskbar,notification_id:"DingTalk",
+    aliases:&[],display_names:&["钉钉","DingTalk"],process_names:&["DingTalk.exe"],publishers:&["alibaba","dingtalk"],
+    keep_unidentified:true,dismiss_unread:true,icon_scale:1.0,collapsed_icon_scale:0.85,
+    enabled:|settings|settings.dingtalk_notifications,tray_enabled:|_|true,paint_icon:|c,x,y|crate::calendar_ui::source_icon(c,crate::calendar_ui::Source::Calendar(Some(crate::calendar::Provider::DingTalk)),x-10.0,y-10.0,20.0),
+    #[cfg(windows)] native:&desktop::DINGTALK,
+};
+
 impl Messenger {
-    pub const ALL:[Self;2]=[Self::Wechat,Self::Qq];
-    pub fn adapter(self)->&'static Adapter{match self{Self::Wechat=>&WECHAT,Self::Qq=>&QQ}}
+    pub const ALL:[Self;5]=[Self::Wechat,Self::Qq,Self::WeCom,Self::Feishu,Self::DingTalk];
+    pub const OFFICE:[Self;3]=[Self::WeCom,Self::Feishu,Self::DingTalk];
+    pub fn adapter(self)->&'static Adapter{match self{Self::Wechat=>&WECHAT,Self::Qq=>&QQ,Self::WeCom=>&WECOM,Self::Feishu=>&FEISHU,Self::DingTalk=>&DINGTALK}}
     pub fn name(self)->&'static str{self.adapter().name}
     pub fn from_notification_id(id:&str)->Option<Self>{
         Self::ALL.into_iter().find(|client|{
@@ -64,11 +92,20 @@ impl Messenger {
     pub fn enabled(self,settings:&Settings)->bool{settings.notifications && (self.adapter().enabled)(settings)}
 }
 
-pub fn ignores_system_toast(app:&str,id:&str)->bool{
-    Messenger::ALL.into_iter().any(|client|{
+pub fn taskbar_client(app:&str,id:&str)->Option<Messenger>{
+    if let Some(client)=Messenger::from_notification_id(id){return (client.adapter().capture==Capture::Taskbar).then_some(client);}
+    Messenger::ALL.into_iter().find(|client|{
         let adapter=client.adapter();adapter.capture==Capture::Taskbar
-            && (Messenger::from_notification_id(id)==Some(client) || adapter.display_names.iter().any(|name|name.eq_ignore_ascii_case(app.trim())))
+            && adapter.display_names.iter().any(|name|name.eq_ignore_ascii_case(app.trim()))
     })
+}
+
+pub fn toast_suppression(settings:&Settings)->u8{
+    Messenger::ALL.into_iter().filter(|client|client.adapter().capture==Capture::Taskbar && (*client==Messenger::Wechat || (client.adapter().enabled)(settings)))
+        .fold(0,|mask,client|mask|(1<<(client as u8)))
+}
+pub fn suppresses_toast(app:&str,id:&str,mask:u8)->bool{
+    taskbar_client(app,id).is_some_and(|client|mask&(1<<(client as u8))!=0)
 }
 
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
@@ -169,14 +206,16 @@ mod tests {
         }
         assert_eq!(Messenger::from_notification_id(" qq "),Some(Messenger::Qq));
         assert_eq!(Messenger::from_notification_id("Tencent.Weixin"),Some(Messenger::Wechat));
-        for id in ["QQMusic","WeCom","企业微信","Feishu","DingTalk"]{assert_eq!(Messenger::from_notification_id(id),None,"未接入的应用不能误认为现有客户端");}
+        for id in ["QQMusic","企业微信助手","FeishuMeeting","DingTalkHelper","unknown"]{assert_eq!(Messenger::from_notification_id(id),None,"未接入的应用不能误认为现有客户端");}
     }
     #[test]
     fn taskbar_clients_do_not_duplicate_system_toasts_or_hide_other_apps(){
-        assert!(ignores_system_toast("微信","unknown"));
-        assert!(ignores_system_toast("unknown","Tencent.WeChat"));
-        assert!(!ignores_system_toast("企业微信","WeCom"));
-        assert!(!ignores_system_toast("飞书","Feishu"));
+        assert_eq!(taskbar_client("微信","unknown"),Some(Messenger::Wechat));
+        assert_eq!(taskbar_client("unknown","Tencent.WeChat"),Some(Messenger::Wechat));
+        assert_eq!(taskbar_client("企业微信","WeCom"),Some(Messenger::WeCom));
+        assert_eq!(taskbar_client("飞书","com.electron.Feishu"),Some(Messenger::Feishu));
+        assert_eq!(taskbar_client("微信","com.electron.Feishu"),Some(Messenger::Feishu));
+        assert_eq!(taskbar_client("微信","QQ"),None,"可信应用标识优先于显示名称");
         assert!(NotificationFilter::Only(Messenger::Qq).allows("qq"));
         assert!(!NotificationFilter::Only(Messenger::Qq).allows("WeChat"));
         assert!(NotificationFilter::All.allows("DingTalk"));
