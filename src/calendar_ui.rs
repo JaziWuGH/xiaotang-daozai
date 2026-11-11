@@ -10,6 +10,7 @@ pub(crate) struct State {
     pub events: Vec<mail::Meeting>,
     pub loading: bool,
     pub error: String,
+    pub warning:String,
     pub focus: Option<String>,
     pub scroll_to_focus: bool,
     pub first: usize,
@@ -19,7 +20,7 @@ impl Default for State {
     fn default() -> Self {
         let day=chrono::Local::now().date_naive();
         Self { month:calendar::month_start(day), day, loaded:None, events:vec![], loading:false,
-            error:String::new(), focus:None, scroll_to_focus:false, first:0, show_ended:false }
+            error:String::new(), warning:String::new(), focus:None, scroll_to_focus:false, first:0, show_ended:false }
     }
 }
 
@@ -214,7 +215,7 @@ impl App {
 
     pub(crate) fn select_calendar_day(&mut self, day:NaiveDate) {
         let month=calendar::month_start(day);
-        if month!=self.calendar.view.month {self.calendar.view.month=month;self.calendar.view.loading=false;self.calendar.view.error.clear();}
+        if month!=self.calendar.view.month {self.calendar.view.month=month;self.calendar.view.loading=false;self.calendar.view.error.clear();self.calendar.view.warning.clear();}
         self.calendar.view.day=day;
         self.calendar.view.show_ended=day<chrono::Local::now().date_naive();
         self.calendar.view.focus=None;
@@ -227,8 +228,8 @@ impl App {
         let has_accounts=!self.calendar_configs().is_empty();
         let view=&mut self.calendar.view;
         if !has_accounts || !force && (view.loaded==Some(view.month) || view.loading || !view.error.is_empty()){return;}
-        view.loading=true;view.error.clear();
-        for feed in &mut self.calendar.feeds {feed.month.loading=true;feed.month.error.clear();}
+        view.loading=true;view.error.clear();view.warning.clear();
+        for feed in &mut self.calendar.feeds {feed.month.loading=true;feed.month.error.clear();feed.month.warning.clear();}
         self.pending.push(Cmd::CalendarMonth(view.month));
     }
 
@@ -315,9 +316,9 @@ impl App {
         let day=self.calendar.view.day;
         let heading=format!("{} · {}月{}日",if day==today{"今天"}else{["周一","周二","周三","周四","周五","周六","周日"][day.weekday().num_days_from_monday() as usize]},day.month(),day.day());
         c.text(167.0,44.0,&heading,8.8,W::Semibold,accent,H::Left);
-        let status=if self.calendar.view.loading{"同步中".to_string()}else if !self.calendar.view.error.is_empty(){"重试同步".to_string()}else {let at=self.calendar.feeds.iter().map(|feed|feed.last_sync.as_str()).max().unwrap_or(&self.calendar.last_sync);if at.is_empty(){"".into()}else{format!("{} 更新",at.split_whitespace().last().unwrap_or(""))}};
+        let status=if self.calendar.view.loading{"同步中".to_string()}else if !self.calendar.view.error.is_empty(){"重试同步".to_string()}else if !self.calendar.view.warning.is_empty(){"部分同步".to_string()}else {let at=self.calendar.feeds.iter().map(|feed|feed.last_sync.as_str()).max().unwrap_or(&self.calendar.last_sync);if at.is_empty(){"".into()}else{format!("{} 更新",at.split_whitespace().last().unwrap_or(""))}};
         c.text(376.0,44.0,&status,7.4,W::Regular,muted,H::Right);
-        let sync_hint=if self.calendar.view.error.is_empty(){"同步这个月份"}else{self.calendar.view.error.as_str()};
+        let sync_hint=if !self.calendar.view.error.is_empty(){self.calendar.view.error.as_str()}else if !self.calendar.view.warning.is_empty(){self.calendar.view.warning.as_str()}else{"同步这个月份"};
         if !self.calendar_configs().is_empty() && !self.calendar.view.loading && c.hit(326.0,33.0,52.0,15.0,"calendar-sync").on_hover_text(sync_hint).clicked(){self.request_calendar_month(true);}
         let focus=self.calendar.view.focus.clone();
         let scroll_to_focus=if c.live{std::mem::take(&mut self.calendar.view.scroll_to_focus)}else{false};
@@ -334,7 +335,7 @@ impl App {
         if scroll_to_focus {first=0;}
         first=first.min(max);
         if featured_index.is_none() {
-            let message=if self.calendar.view.loading && events.is_empty(){"正在获取日程…"}else if !self.calendar.view.error.is_empty() && events.is_empty(){"暂时无法获取日程"}else if ended_count>0 && events.is_empty(){"当天日程已结束"}else if events.is_empty(){"当天暂无日程"}else{"暂无待开始的定时日程"};
+            let message=if self.calendar.view.loading && events.is_empty(){"正在获取日程…"}else if !self.calendar.view.error.is_empty() && events.is_empty(){"暂时无法获取日程"}else if !self.calendar.view.warning.is_empty() && events.is_empty(){"部分日程未同步"}else if ended_count>0 && events.is_empty(){"当天日程已结束"}else if events.is_empty(){"当天暂无日程"}else{"暂无待开始的定时日程"};
             c.centered_text(271.0,76.0,message,11.0,W::Regular,theme::GRAY,H::Center);
             if events.is_empty(){
                 let (button,b)=paint::capsule(c,214.0,93.0,70.0,20.0,"calendar-empty-add",theme::BTN,theme::BTN_HOVER);

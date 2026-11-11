@@ -545,6 +545,7 @@ pub(crate) struct CalendarState {
     pub test_password: String,
     /// 导入 .ics 文件的结果说明。
     pub import_note: String,
+    pub warning:String,
 }
 
 pub(crate) struct CalendarFeed {
@@ -555,12 +556,13 @@ pub(crate) struct CalendarFeed {
     pub last_sync: String,
     pub failures: u32,
     pub error: String,
+    pub warning:String,
 }
 
 impl CalendarFeed {
     fn new(config: calendar::Config) -> Self {
         Self { config, events: vec![], month: Default::default(), connected: false,
-            last_sync: String::new(), failures: 0, error: String::new() }
+            last_sync: String::new(), failures: 0, error: String::new(), warning:String::new() }
     }
 }
 
@@ -999,8 +1001,9 @@ impl App {
                     self.calendar.note_error = true;
                     return;
                 }
-                self.calendar.note = format!("已连接 · 未来 24 小时 {count} 个日程");
+                self.calendar.note = if message=="连接成功"{format!("已连接 · 未来 24 小时 {count} 个日程")}else{format!("已连接 · {message}")};
                 self.calendar.note_error = false;
+                self.calendar.warning.clear();
                 if self.calendar.config.as_ref()!=Some(&cfg) {
                     self.calendar.events.clear();
                     self.calendar.view.events.clear();
@@ -1024,7 +1027,7 @@ impl App {
             }
             calendar::Event::Synced { config, events, at } => {
                 if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) {
-                    feed.events=events.clone();feed.connected=true;feed.failures=0;feed.error.clear();feed.last_sync=at.clone();
+                    feed.events=events.clone();feed.connected=true;feed.failures=0;feed.error.clear();feed.warning.clear();feed.last_sync=at.clone();
                 }
                 if self.calendar.config.as_ref()!=Some(&config){return;}
                 self.calendar.events = events;
@@ -1032,12 +1035,14 @@ impl App {
                 self.calendar.failures = 0;
                 self.calendar.error.clear();
                 self.calendar.last_sync = at;
+                self.calendar.warning.clear();
             }
             calendar::Event::MonthLoaded { config, month, result } => {
                 if !self.calendar.feeds.is_empty() {
                     if month!=self.calendar.view.month {return;}
                     let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) else{return;};
                     feed.month.loading=false;
+                    feed.month.warning.clear();
                     match result {
                         Ok(events)=>{feed.month.events=events;feed.month.loaded=Some(month);feed.month.error.clear();}
                         Err(message)=>feed.month.error=message,
@@ -1048,19 +1053,34 @@ impl App {
                 let view=&mut self.calendar.view;
                 if month!=view.month || self.calendar.config.as_ref()!=Some(&config){return;}
                 view.loading=false;
+                view.warning.clear();
                 match result {
                     Ok(events)=>{view.events=events;view.loaded=Some(month);view.error.clear();}
                     Err(message)=>view.error=message,
                 }
             }
+            calendar::Event::Warning{config,month,message}=>{
+                if let Some(month)=month{
+                    if month!=self.calendar.view.month{return;}
+                    if self.calendar.feeds.is_empty(){
+                        if self.calendar.config.as_ref()==Some(&config){self.calendar.view.warning=message;}
+                    }else if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config){
+                        feed.month.warning=message;self.refresh_calendar_month_status();
+                    }
+                }else{
+                    if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config){feed.warning=message.clone();}
+                    if self.calendar.config.as_ref()==Some(&config){self.calendar.warning=message;}
+                }
+            }
             calendar::Event::Failed { config, message } => {
                 if let Some(feed)=self.calendar.feeds.iter_mut().find(|feed|feed.config==config) {
-                    feed.connected=false;feed.failures=feed.failures.saturating_add(1);feed.error=message.clone();
+                    feed.connected=false;feed.failures=feed.failures.saturating_add(1);feed.error=message.clone();feed.warning.clear();
                 }
                 if self.calendar.config.as_ref()==Some(&config) {
                     self.calendar.connected = false;
                     self.calendar.failures = self.calendar.failures.saturating_add(1);
                     self.calendar.error = message;
+                    self.calendar.warning.clear();
                 }
             }
         }
@@ -1084,6 +1104,8 @@ impl App {
         self.calendar.view.loaded=(!self.calendar.feeds.is_empty() && self.calendar.feeds.iter().all(|feed|feed.month.loaded==Some(month))).then_some(month);
         self.calendar.view.error=self.calendar.feeds.iter().filter(|feed|!feed.month.error.is_empty())
             .map(|feed|format!("{}：{}",feed.config.provider.label(),feed.month.error)).collect::<Vec<_>>().join("；");
+        self.calendar.view.warning=self.calendar.feeds.iter().filter(|feed|feed.month.loaded==Some(month)&&!feed.month.warning.is_empty())
+            .map(|feed|format!("{}：{}",feed.config.provider.label(),feed.month.warning)).collect::<Vec<_>>().join("；");
     }
 
     pub(crate) fn select_calendar_provider(&mut self, provider: calendar::Provider) {
@@ -1100,6 +1122,7 @@ impl App {
         self.calendar.last_sync=feed.map(|feed|feed.last_sync.clone()).unwrap_or_default();
         self.calendar.failures=feed.map(|feed|feed.failures).unwrap_or_default();
         self.calendar.error=feed.map(|feed|feed.error.clone()).unwrap_or_default();
+        self.calendar.warning=feed.map(|feed|feed.warning.clone()).unwrap_or_default();
         self.calendar.form=CalendarForm{provider,username:self.calendar.config.as_ref().map(|cfg|cfg.username.clone()).unwrap_or_default(),
             server:self.calendar.config.as_ref().filter(|cfg|cfg.provider.custom_server()).and_then(|cfg|cfg.server.clone()).unwrap_or_default(),..Default::default()};
         self.calendar.note.clear();self.calendar.note_error=false;
@@ -1122,6 +1145,7 @@ impl App {
         self.calendar.failures = 0;
         self.calendar.error.clear();
         self.calendar.note.clear();
+        self.calendar.warning.clear();
         old
     }
 

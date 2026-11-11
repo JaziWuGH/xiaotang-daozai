@@ -2,6 +2,8 @@
 use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
 #[path="messenger/ui_tests.rs"]
 mod enterprise_messenger;
+#[path="calendar/ui_compatibility_tests.rs"]
+mod calendar_compatibility;
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
