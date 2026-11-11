@@ -1,4 +1,4 @@
-//! 天气：按城市（留空时按网络出口定位）读取 Open-Meteo 的实况与四日预报。
+//! 天气：按城市（留空时按网络出口定位）读取 Open-Meteo 的实况与七日预报。
 //! 只保留最近一次结果用于离线展示，不读取、也不上传任何账号信息。
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,16 +9,17 @@ use std::time::Duration;
 
 /// 自动刷新的间隔（秒）：Open-Meteo 的实况本身每 15 分钟更新一次。
 pub const INTERVAL: i64 = 900;
+pub const FORECAST_DAYS: usize = 7;
 
 /// 天气现象；决定画太阳、云、雨还是雪。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind { Sun, Moon, Partly, Cloud, Fog, Drizzle, Rain, Shower, Snow, Thunder }
+pub enum Kind { Sun, Moon, Partly, PartlyNight, Cloud, Fog, Drizzle, Rain, Shower, Snow, Thunder }
 
 /// WMO 天气代码 → 图标类型（`day` 决定太阳还是月亮）。
 pub fn kind(code: u8, day: bool) -> Kind {
     match code {
         0 => if day { Kind::Sun } else { Kind::Moon },
-        1 | 2 => Kind::Partly,
+        1 | 2 => if day {Kind::Partly} else {Kind::PartlyNight},
         3 => Kind::Cloud,
         45 | 48 => Kind::Fog,
         51 | 53 | 55 | 56 | 57 => Kind::Drizzle,
@@ -70,6 +71,50 @@ pub struct Day {
     pub rain: u32,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SunTimes {
+    pub day_start: i64,
+    pub day_end: i64,
+    pub sunrise: i64,
+    pub sunset: i64,
+    pub timezone: String,
+}
+
+impl SunTimes {
+    pub fn midpoint(&self) -> i64 {self.sunrise+(self.sunset-self.sunrise)/2}
+
+    pub fn clock(&self, at: i64) -> String {
+        self.timezone.parse::<chrono_tz::Tz>().ok().and_then(|zone| {
+            chrono::DateTime::from_timestamp(at,0).map(|time|time.with_timezone(&zone).format("%H:%M").to_string())
+        }).unwrap_or_else(||"--:--".into())
+    }
+
+    /// 以当地午夜、日出、白昼中点、日落和次日午夜映射日照进度。
+    pub fn progress(&self, now: i64) -> Option<f32> {
+        if !(self.day_start..self.day_end).contains(&now) {return None;}
+        let marks=[(self.day_start,0.0),(self.sunrise,0.12),(self.midpoint(),0.5),(self.sunset,0.88),(self.day_end,1.0)];
+        for pair in marks.windows(2) {
+            let ((from,start),(to,end))=(pair[0],pair[1]);
+            if now<=to {return Some(start+(end-start)*((now-from)as f32/(to-from).max(1)as f32).clamp(0.0,1.0));}
+        }
+        Some(1.0)
+    }
+}
+
+fn parse_sun_times(value:&Value)->Option<SunTimes> {
+    use chrono::TimeZone;
+    let timezone=value["timezone"].as_str()?;
+    let zone=timezone.parse::<chrono_tz::Tz>().ok()?;
+    let daily=&value["daily"];
+    let date=chrono::NaiveDate::parse_from_str(daily["time"][0].as_str()?,"%Y-%m-%d").ok()?;
+    let at=|time|zone.from_local_datetime(&time).earliest().map(|time|time.timestamp());
+    let day_start=at(date.and_hms_opt(0,0,0)?)?;
+    let day_end=at(date.succ_opt()?.and_hms_opt(0,0,0)?)?;
+    let sunrise=at(chrono::NaiveDateTime::parse_from_str(daily["sunrise"][0].as_str()?,"%Y-%m-%dT%H:%M").ok()?)?;
+    let sunset=at(chrono::NaiveDateTime::parse_from_str(daily["sunset"][0].as_str()?,"%Y-%m-%dT%H:%M").ok()?)?;
+    (day_start<=sunrise && sunrise<sunset && sunset<=day_end).then(||SunTimes{day_start,day_end,sunrise,sunset,timezone:timezone.into()})
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub place: String,
@@ -86,6 +131,8 @@ pub struct Snapshot {
     pub sunrise: Option<String>,
     #[serde(default)]
     pub sunset: Option<String>,
+    #[serde(default)]
+    pub sun_times: Option<SunTimes>,
     pub days: Vec<Day>,
     /// 取得这份数据的 Unix 时间（秒）。
     pub at: i64,
@@ -138,7 +185,7 @@ pub fn geocode(agent: &ureq::Agent, name: &str) -> Result<Position, String> {
     Ok(Position { lat, lon, label })
 }
 
-/// 拉一次天气：先定位，再取实况与四日预报。
+/// 拉一次天气：先定位，再取实况与七日预报。
 pub fn fetch(agent: &ureq::Agent, city: &str) -> Result<Snapshot, String> {
     let city = city.trim();
     let position = if city.is_empty() { locate(agent)? } else { geocode(agent, city)? };
@@ -150,7 +197,7 @@ pub fn fetch(agent: &ureq::Agent, city: &str) -> Result<Snapshot, String> {
         query.append_pair("current", "temperature_2m,relative_humidity_2m,apparent_temperature,is_day,weather_code,wind_speed_10m");
         query.append_pair("daily", "weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,sunrise,sunset");
         query.append_pair("timezone", "auto");
-        query.append_pair("forecast_days", "4");
+        query.append_pair("forecast_days", &FORECAST_DAYS.to_string());
     }
     parse(&position.label, &get(agent, &url)?)
 }
@@ -176,7 +223,7 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
     let lows = daily["temperature_2m_min"].as_array();
     let rains = daily["precipitation_probability_max"].as_array();
     let mut days = Vec::new();
-    for (index, date) in dates.iter().enumerate().take(4) {
+    for (index, date) in dates.iter().enumerate().take(FORECAST_DAYS) {
         let date = date.as_str().unwrap_or_default();
         let pick = |list: Option<&Vec<Value>>| list.and_then(|items| items.get(index)).and_then(Value::as_f64);
         days.push(Day {
@@ -203,6 +250,7 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
         low: days.first().map(|d| d.low),
         sunrise: hhmm(daily["sunrise"].as_array()),
         sunset: hhmm(daily["sunset"].as_array()),
+        sun_times: parse_sun_times(value),
         days,
         at: chrono::Utc::now().timestamp(),
     })
@@ -224,6 +272,7 @@ pub struct State {
     pub last_start: f64,
     /// 城市输入草稿，确认后才写入设置并发起查询。
     pub city_input: String,
+    pub solar_open: bool,
     /// 上一次请求使用的城市。
     last_city: Option<String>,
     rx: Option<Receiver<Result<Snapshot, String>>>,
@@ -405,6 +454,56 @@ mod tests {
     }
 
     #[test]
+    fn weather_parses_seven_days_and_keeps_older_caches_readable() {
+        let mut payload=sample();
+        payload["daily"]["time"]=json!(["2026-11-09","2026-11-10","2026-11-11","2026-11-12","2026-11-13","2026-11-14","2026-11-15"]);
+        payload["daily"]["temperature_2m_max"]=json!([15,14,17,19,20,21,22]);
+        payload["daily"]["temperature_2m_min"]=json!([6,4,5,8,9,10,11]);
+        let snapshot=parse("杭州",&payload).unwrap();
+        assert_eq!(snapshot.days.len(),7);
+        assert_eq!(snapshot.days[6].label,"周日");
+        assert_eq!(snapshot.days[6].high,22.0);
+        let mut cached=serde_json::to_value(parse("杭州",&sample()).unwrap()).unwrap();
+        cached.as_object_mut().unwrap().remove("sun_times");
+        let older:Snapshot=serde_json::from_value(cached).unwrap();
+        assert_eq!(older.days.len(),4);
+        assert_eq!(older.sunrise.as_deref(),Some("06:52"));
+        assert!(older.sun_times.is_none());
+    }
+
+    #[test]
+    fn weather_solar_progress_uses_the_location_timezone_and_actual_day_length() {
+        use chrono::TimeZone;
+        let mut payload=sample();payload["timezone"]=json!("Asia/Shanghai");
+        let times=parse("杭州",&payload).unwrap().sun_times.unwrap();
+        assert_eq!(times.sunrise,chrono::Utc.with_ymd_and_hms(2026,11,8,22,52,0).unwrap().timestamp());
+        assert_eq!(times.clock(times.midpoint()),"12:06");
+        assert_eq!(times.sunset-times.sunrise,10*3600+29*60);
+        for (at,expected) in [(times.day_start,0.0),(times.sunrise,0.12),(times.midpoint(),0.5),(times.sunset,0.88)] {
+            assert!((times.progress(at).unwrap()-expected).abs()<0.0001);
+        }
+        assert!(times.progress(times.day_start-1).is_none());
+        assert!(times.progress(times.day_end).is_none());
+        payload["timezone"]=json!("America/New_York");
+        payload["daily"]["time"][0]=json!("2026-11-01");
+        payload["daily"]["sunrise"][0]=json!("2026-11-01T06:30");
+        payload["daily"]["sunset"][0]=json!("2026-11-01T16:50");
+        let times=parse("纽约",&payload).unwrap().sun_times.unwrap();
+        assert_eq!(times.day_end-times.day_start,25*3600,"夏令时结束当天有25小时");
+        assert_eq!(times.sunrise,chrono::Utc.with_ymd_and_hms(2026,11,1,11,30,0).unwrap().timestamp());
+        assert_eq!(times.clock(times.sunrise),"06:30");
+    }
+
+    #[test]
+    fn weather_missing_or_invalid_solar_times_do_not_invent_progress() {
+        for (zone,rise,set) in [(json!("Asia/Shanghai"),Value::Null,Value::Null),(json!("Asia/Shanghai"),json!("2026-11-09T18:00"),json!("2026-11-09T06:00")),(Value::Null,json!("2026-11-09T06:52"),json!("2026-11-09T17:21"))] {
+            let mut payload=sample();payload["timezone"]=zone;
+            payload["daily"]["sunrise"][0]=rise;payload["daily"]["sunset"][0]=set;
+            assert!(parse("当地",&payload).unwrap().sun_times.is_none());
+        }
+    }
+
+    #[test]
     fn rejects_payload_without_temperature() {
         assert!(parse("杭州", &json!({"daily": {"time": ["2026-11-09"]}})).is_err());
         assert!(parse("杭州", &json!({"current": {"temperature_2m": 3.0}})).is_err(), "没有日预报也不应假装成功");
@@ -414,6 +513,7 @@ mod tests {
     fn kind_and_text_follow_wmo_codes() {
         assert_eq!(kind(0, true), Kind::Sun);
         assert_eq!(kind(0, false), Kind::Moon);
+        assert_eq!(kind(2, false), Kind::PartlyNight);
         assert_eq!(kind(95, true), Kind::Thunder);
         assert_eq!(kind(75, true), Kind::Snow);
         assert_eq!(describe(0), "晴");

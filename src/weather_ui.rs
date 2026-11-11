@@ -1,5 +1,5 @@
-//! 天气页与天气设置：实况 + 四日预报，图标全部用面板矢量绘制。
-use crate::app::{App, Cmd, Env, WEATHER_PAGE};
+//! 天气页与天气设置：实况、七日预报与日照时段，图标全部用面板矢量绘制。
+use crate::app::{App, Cmd, Env, WEATHER_PAGE, WEATHER_H};
 use crate::paint::{self, Card, H};
 use crate::theme::{self, W};
 use crate::weather::{self, Kind};
@@ -28,24 +28,23 @@ fn sun(c: &Card, cx: f32, cy: f32, s: f32) {
     }
 }
 
-/// 弯月：外圆减去偏右的内圆，用一条闭合多边形画出来，不依赖背景色。
+/// 弯月：外圆与偏右内圆之间的三角带，保留透明月牙缺口。
 fn moon(c: &Card, cx: f32, cy: f32, s: f32) {
     let (outer, inner, offset) = (0.62 * s, 0.55 * s, 0.30 * s);
     let x = (offset * offset + outer * outer - inner * inner) / (2.0 * offset);
     let y = (outer * outer - x * x).max(0.0).sqrt();
-    let mut points = Vec::with_capacity(40);
-    let (top, bottom) = (y.atan2(x), (-y).atan2(x));
+    let (outer_top,inner_top)=(y.atan2(x),y.atan2(x-offset));
+    let mut mesh=egui::Mesh::default();
     let steps = 18;
     for i in 0..=steps {
-        let angle = top + (bottom + std::f32::consts::TAU - top) * i as f32 / steps as f32;
-        points.push((cx + angle.cos() * outer, cy + angle.sin() * outer));
+        let t=i as f32/steps as f32;
+        let a=outer_top+(std::f32::consts::TAU-2.0*outer_top)*t;
+        let b=inner_top+(std::f32::consts::TAU-2.0*inner_top)*t;
+        mesh.colored_vertex(c.pos(cx+a.cos()*outer,cy+a.sin()*outer),SNOW);
+        mesh.colored_vertex(c.pos(cx+offset+b.cos()*inner,cy+b.sin()*inner),SNOW);
+        if i>0 {let n=i*2;mesh.add_triangle(n-2,n,n+1);mesh.add_triangle(n-2,n+1,n-1);}
     }
-    let (inner_bottom, inner_top) = ((-y).atan2(x - offset), y.atan2(x - offset) - std::f32::consts::TAU);
-    for i in 0..=steps {
-        let angle = inner_bottom + (inner_top - inner_bottom) * i as f32 / steps as f32;
-        points.push((cx + offset + angle.cos() * inner, cy + angle.sin() * inner));
-    }
-    c.poly(&points, SNOW);
+    c.painter.add(egui::Shape::mesh(mesh));
 }
 
 fn cloud(c: &Card, cx: f32, cy: f32, s: f32, color: Color32) {
@@ -61,6 +60,7 @@ fn icon(c: &Card, cx: f32, cy: f32, size: f32, kind: Kind) {
         Kind::Sun => sun(c, cx, cy, s),
         Kind::Moon => moon(c, cx, cy, s * 1.05),
         Kind::Partly => { sun(c, cx + s * 0.30, cy - s * 0.30, s * 0.60); cloud(c, cx - s * 0.10, cy + s * 0.22, s * 0.90, CLOUD); }
+        Kind::PartlyNight => {moon(c,cx+s*0.30,cy-s*0.30,s*0.65);cloud(c,cx-s*0.10,cy+s*0.22,s*0.90,CLOUD);}
         Kind::Cloud => cloud(c, cx, cy, s * 0.98, CLOUD),
         Kind::Fog => {
             cloud(c, cx, cy - s * 0.14, s * 0.90, CLOUD);
@@ -106,6 +106,75 @@ fn icon(c: &Card, cx: f32, cy: f32, size: f32, kind: Kind) {
     }
 }
 
+fn weather_now(env:&Env)->i64 {
+    use chrono::TimeZone;
+    chrono::NaiveDateTime::parse_from_str(&format!("{} {}",env.today,env.clock),"%Y-%m-%d %H:%M:%S").ok()
+        .and_then(|time|chrono::Local.from_local_datetime(&time).earliest()).map(|time|time.timestamp())
+        .unwrap_or_else(||chrono::Utc::now().timestamp())
+}
+
+fn paint_sun_times(c:&Card,snapshot:&weather::Snapshot,now:i64) {
+    let times=snapshot.sun_times.as_ref();
+    let progress=times.and_then(|times|times.progress(now));
+    let rise=snapshot.sunrise.as_deref().unwrap_or("--:--");
+    let set=snapshot.sunset.as_deref().unwrap_or("--:--");
+    c.text(390.0,47.0,&c.fit(&snapshot.place,10.5,W::Regular,180.0),10.5,W::Regular,theme::GRAY,H::Right);
+    let mut target=None;
+    if let Some(times)=times.filter(|_|progress.is_some()) {
+        if now<times.sunset {
+            let (title,event,label,index)=if now<times.sunrise {("距离日出",times.sunrise,rise,0)}else{("距离日落",times.sunset,set,2)};
+            let minutes=((event-now).max(0)+59)/60;
+            c.text(40.0,77.0,title,10.5,W::Regular,theme::GRAY,H::Left);
+            c.text(40.0,110.0,&format!("{:02}:{:02}",minutes/60,minutes%60),29.0,W::Bold,theme::WHITE,H::Left);
+            c.text(40.0,125.0,"小时 : 分钟",9.5,W::Regular,theme::DIM,H::Left);
+            c.text(40.0,147.0,&format!("{} {label}",if index==0{"日出"}else{"日落"}),11.0,W::Semibold,SUN,H::Left);
+            target=Some(index);
+        }else{
+            c.text(40.0,77.0,"今日已日落",10.5,W::Regular,theme::GRAY,H::Left);
+            c.text(40.0,110.0,set,29.0,W::Bold,theme::WHITE,H::Left);
+            c.text(40.0,130.0,"白昼已经结束",10.0,W::Regular,theme::DIM,H::Left);
+        }
+    }else{
+        c.text(40.0,77.0,"日出时间",10.5,W::Regular,theme::GRAY,H::Left);
+        c.text(40.0,110.0,rise,29.0,W::Bold,theme::WHITE,H::Left);
+        c.text(40.0,134.0,"日照进度待更新",9.5,W::Regular,WARN,H::Left);
+    }
+    if let Some(times)=times {
+        let minutes=(times.sunset-times.sunrise)/60;
+        c.text(40.0,178.0,&format!("白昼 {}小时{:02}分",minutes/60,minutes%60),10.0,W::Regular,theme::GRAY,H::Left);
+    }
+
+    // 参考 Oyenza Studio prayer::draw_day 的点状弧线与分段时间映射，按 egui 重新绘制。
+    // 来源与 MIT 许可见 THIRD_PARTY_NOTICES.txt。
+    let point=|pos:f32|(198.0+pos*174.0,116.0-46.0*(std::f32::consts::PI*pos).sin());
+    c.text(285.0,60.0,if progress.is_some(){"今日日照"}else{"日照时段"},10.0,W::Regular,theme::GRAY,H::Center);
+    c.seg((198.0,117.0),(372.0,117.0),0.7,Color32::from_white_alpha(16));
+    for index in 0..=36 {
+        let pos=index as f32/36.0;
+        if [0.12f32,0.5,0.88].iter().any(|at|((pos-at)*174.0).abs()<9.0)
+            || progress.is_some_and(|at|((pos-at)*174.0).abs()<12.0){continue;}
+        let (x,y)=point(pos);
+        c.circle(x,y,0.9,if progress.is_some_and(|at|pos<=at){paint::alpha(SUN,0.72)}else{Color32::from_white_alpha(55)});
+    }
+    let midpoint=times.map(|times|times.clock(times.midpoint())).unwrap_or_else(||"--:--".into());
+    for (index,(pos,label,time)) in [(0.12,"日出",rise),(0.5,"白昼中点",midpoint.as_str()),(0.88,"日落",set)].into_iter().enumerate() {
+        let (x,y)=point(pos);
+        let next=target==Some(index);
+        c.circle(x,y,2.8,if next{SUN}else if progress.is_some_and(|at|pos<=at){theme::GRAY}else{Color32::from_gray(86)});
+        if next {c.arc(x,y,6.5,0.0,std::f32::consts::TAU,1.1,paint::alpha(SUN,0.8));}
+        c.text(x,144.0,label,9.5,W::Regular,if next{SUN}else{theme::GRAY},H::Center);
+        c.text(x,160.0,time,11.0,W::Semibold,theme::WHITE,H::Center);
+    }
+    if let (Some(progress),Some(times))=(progress,times) {
+        let (x,y)=point(progress);
+        let day=(times.sunrise..times.sunset).contains(&now);
+        c.glow(x,y,12.0,paint::alpha(if day{SUN}else{RAIN},0.2));
+        if day {c.circle(x,y,4.5,SUN);c.circle(x-1.0,y-1.0,1.2,Color32::from_white_alpha(210));}
+        else {moon(c,x,y,7.0);}
+    }
+    crate::quota_ui::bar_tooltip(c.hit(188.0,63.0,192.0,111.0,"weather-solar-arc"),"按当地日出日落时间计算的日照进度，弧线不代表太阳真实高度".into());
+}
+
 impl App {
     /// 后台取数的轮询与自动刷新；数据过期就重新拉一次。
     pub(crate) fn weather_tick(&mut self) {
@@ -123,6 +192,7 @@ impl App {
         if self.weather.refresh(&city,self.t) {
             self.settings.weather_city=city.clone();
             self.weather.city_input=city;
+            self.weather.solar_open=false;
         }
     }
 
@@ -149,8 +219,19 @@ impl App {
         let tip = format!("{} · {}\n更新于 {} · Open-Meteo", snapshot.place, weather::describe(snapshot.code), weather::clock(snapshot.at));
         // 用 bar_tooltip：常驻胶囊上的提示不能用 on_hover_text，悬浮层会盖住指针、抢走点击。
         if crate::quota_ui::bar_tooltip(c.hit(x - width / 2.0, 1.0, width, 28.0, "weather-pill"), tip).clicked() {
+            self.weather.solar_open=false;
             self.show_page(WEATHER_PAGE);
         }
+    }
+
+    pub(crate) fn draw_side_weather(&mut self,c:&Card,cx:f32,cy:f32) {
+        let Some(snapshot)=self.weather_pill() else{return;};
+        icon(c,cx,cy-8.0,PILL_ICON,weather::kind(snapshot.code,snapshot.day));
+        let stale=chrono::Utc::now().timestamp()-snapshot.at>weather::INTERVAL*2;
+        c.text(cx,cy+14.0,&c.fit(&pill_temp_text(snapshot),10.5,W::Bold,30.0),10.5,W::Bold,if stale{theme::GRAY}else{theme::WHITE},H::Center);
+        let tip=format!("{} · {}\n更新于 {} · Open-Meteo",snapshot.place,weather::describe(snapshot.code),weather::clock(snapshot.at));
+        let response=crate::quota_ui::bar_tooltip(c.hit(cx-17.0,cy-19.0,34.0,38.0,"weather-side"),tip);
+        if response.clicked(){self.weather.solar_open=false;self.show_page(WEATHER_PAGE);}
     }
 
     /// 只画不响应命中，设置页的常驻预览复用。
@@ -168,15 +249,16 @@ impl App {
         c.text(left + 16.0, 21.0, &pill_temp_text(snapshot), theme::size::PILL_CLOCK, W::Bold, if stale { theme::GRAY } else { theme::WHITE }, H::Left);
     }
 
-    pub(crate) fn page_weather(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
+    pub(crate) fn page_weather(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let loading = self.weather.loading;
         let ready=self.weather.can_refresh(&self.settings.weather_city,self.t);
         c.text(326.0, 23.0, if loading { "更新中" } else if ready { "刷新" } else { "稍后刷新" }, 10.5, W::Regular, if ready { theme::GRAY } else { theme::DIM }, H::Center);
         if c.hit(304.0, 8.0, 44.0, 21.0, "weather-refresh").on_hover_text("重新获取当地天气；请求间隔至少 30 秒，失败后至少 2 分钟").clicked() && ready {
             self.weather.refresh(&self.settings.weather_city,self.t);
         }
-        c.text(404.0,125.0,"Open-Meteo",8.5,W::Regular,theme::DIM,H::Right);
-        if c.hit(348.0,116.0,58.0,13.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("天气数据来自 Open-Meteo，按 CC BY 4.0 授权").clicked() {
+        let footer=WEATHER_H-4.0;
+        c.text(404.0,footer,"Open-Meteo",8.5,W::Regular,theme::DIM,H::Right);
+        if c.hit(348.0,footer-9.0,58.0,13.0,"weather-source").on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("天气数据来自 Open-Meteo，按 CC BY 4.0 授权").clicked() {
             cmds.push(Cmd::OpenUrl("https://open-meteo.com/".into()));
         }
 
@@ -188,51 +270,55 @@ impl App {
             } else {
                 ("还没有天气数据", "点右上「刷新」重试".to_string())
             };
-            c.text(209.5, 72.0, title, 13.0, W::Semibold, theme::WHITE, H::Center);
-            c.text(209.5, 90.0, &c.fit(&detail, 10.5, W::Regular, 320.0), 10.5, W::Regular, theme::GRAY, H::Center);
+            c.text(209.5, 104.0, title, 13.0, W::Semibold, theme::WHITE, H::Center);
+            c.text(209.5, 124.0, &c.fit(&detail, 10.5, W::Regular, 320.0), 10.5, W::Regular, theme::GRAY, H::Center);
             return;
         };
 
-        // 左：当前实况。图标、温度、天气与城市自上而下排开。
-        icon(c, 46.0, 61.0, 42.0, weather::kind(snapshot.code, snapshot.day));
-        c.text(78.0, 74.0, &format!("{:.0}°", snapshot.temp), 30.0, W::Bold, theme::WHITE, H::Left);
-        c.text(80.0, 92.0, weather::describe(snapshot.code), 12.0, W::Semibold, theme::WHITE, H::Left);
-        c.text(80.0, 106.0, &c.fit(&snapshot.place, 10.5, W::Regular, 106.0), 10.5, W::Regular, theme::GRAY, H::Left);
-
-        // 底部一行：体感、湿度、风速。
-        let mut meta = Vec::new();
-        if let Some(feels) = snapshot.feels { meta.push(format!("体感 {feels:.0}°")); }
-        if let Some(humidity) = snapshot.humidity { meta.push(format!("湿度 {humidity}%")); }
-        if let Some(wind) = snapshot.wind { meta.push(format!("风 {wind:.0} km/h")); }
-        if !meta.is_empty() {
-            c.text(20.0, 121.0, &c.fit(&meta.join(" · "), 9.5, W::Regular, 166.0), 9.5, W::Regular, theme::DIM, H::Left);
-        }
-        // 日出日落竖排在温度右侧、分隔线前的留白里；接口没给或旧缓存里没有就不显示。
-        if let (Some(sunrise), Some(sunset)) = (&snapshot.sunrise, &snapshot.sunset) {
-            c.text(190.0, 78.0, &format!("日出 {sunrise}"), 9.5, W::Regular, theme::DIM, H::Right);
-            c.text(190.0, 92.0, &format!("日落 {sunset}"), 9.5, W::Regular, theme::DIM, H::Right);
-        }
         let age = chrono::Utc::now().timestamp() - snapshot.at;
         let offline = self.weather.error.is_some();
         let stamp = weather::clock(snapshot.at);
         let stale = offline || age > 3600;
-        c.text(344.0, 125.0, &stamp, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
-        c.hit(312.0, 116.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
+        c.text(344.0, footer, &stamp, 8.5, W::Regular, if stale { WARN } else { theme::DIM }, H::Right);
+        c.hit(312.0, footer-9.0, 32.0, 13.0, "weather-stamp").on_hover_text(format!(
             "上次更新 {stamp}{}",
             if offline { "，当前显示的是缓存" } else { "" }
         ));
 
-        // 右：四日预报，等宽分栏。
-        c.seg((196.0, 34.0), (196.0, 108.0), 0.8, Color32::from_white_alpha(16));
-        let count = snapshot.days.len().clamp(1, 4);
-        let span = (404.0 - 200.0) / count as f32;
-        for (index, day) in snapshot.days.iter().take(4).enumerate() {
-            let x = 200.0 + span * (index as f32 + 0.5);
-            c.text(x, 45.0, &day.label, 9.5, W::Regular, if index == 0 { theme::WHITE } else { theme::GRAY }, H::Center);
-            icon(c, x, 66.0, 24.0, weather::kind(day.code, true));
-            c.text(x, 90.0, &format!("{:.0}°", day.high), 12.5, W::Semibold, theme::WHITE, H::Center);
-            c.text(x, 103.0, &format!("{:.0}°", day.low), 10.5, W::Regular, theme::GRAY, H::Center);
-            if day.rain >= 20 { c.text(x, 114.0, &format!("{}%", day.rain), 8.5, W::Regular, RAIN, H::Center); }
+        if self.weather.solar_open {
+            let back=c.hit(38.0,34.0,94.0,22.0,"weather-solar-back").on_hover_cursor(egui::CursorIcon::PointingHand);
+            if back.clicked(){self.weather.solar_open=false;}
+        }else if c.hit(35.0,36.0,170.0,84.0,"weather-today").on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){
+            self.weather.solar_open=true;
+        }
+        if self.weather.solar_open {
+            c.text(40.0,48.0,"‹ 返回天气",10.5,W::Regular,theme::GRAY,H::Left);
+            paint_sun_times(c,&snapshot,weather_now(env));
+            return;
+        }
+
+        // 上方实况；当天区域可进入日照时段。
+        icon(c,52.0,65.0,34.0,weather::kind(snapshot.code,snapshot.day));
+        c.text(84.0,73.0,&pill_temp_text(&snapshot),30.0,W::Bold,theme::WHITE,H::Left);
+        c.text(84.0,89.0,weather::describe(snapshot.code),11.5,W::Semibold,theme::WHITE,H::Left);
+        c.text(84.0,103.0,&c.fit(&snapshot.place,10.5,W::Regular,118.0),10.5,W::Regular,theme::GRAY,H::Left);
+        c.text(84.0,117.0,"日出日落 ›",9.5,W::Regular,SUN,H::Left);
+        if let Some(feels)=snapshot.feels {c.text(236.0,54.0,&format!("体感 {feels:.0}°"),11.0,W::Regular,theme::GRAY,H::Left);}
+        if let Some(humidity)=snapshot.humidity {c.text(236.0,75.0,&format!("湿度 {humidity}%"),11.0,W::Regular,theme::GRAY,H::Left);}
+        if let Some(wind)=snapshot.wind {c.text(236.0,96.0,&format!("风 {wind:.0} km/h"),11.0,W::Regular,theme::GRAY,H::Left);}
+
+        // 下方七日预报，旧缓存中缺少的日期保持空位，刷新后补齐。
+        c.seg((24.0,123.0),(395.0,123.0),0.8,Color32::from_white_alpha(16));
+        let span=371.0/weather::FORECAST_DAYS as f32;
+        for index in 0..weather::FORECAST_DAYS {
+            let x=24.0+span*(index as f32+0.5);
+            if index==0 {c.fill(x-23.0,126.0,46.0,76.0,7.0,Color32::from_white_alpha(8));}
+            let Some(day)=snapshot.days.get(index) else {c.text(x,165.0,"—",12.0,W::Regular,theme::DIM,H::Center);continue;};
+            c.text(x,138.0,&day.label,9.5,W::Regular,if index==0{theme::WHITE}else{theme::GRAY},H::Center);
+            icon(c,x,153.0,18.0,weather::kind(day.code,true));
+            c.text(x,175.0,&format!("{:.0}°",day.high),11.5,W::Semibold,theme::WHITE,H::Center);
+            c.text(x,189.0,&format!("{:.0}°",day.low),10.0,W::Regular,theme::GRAY,H::Center);
+            if day.rain>=20 {c.text(x,200.0,&format!("{}%",day.rain),8.5,W::Regular,RAIN,H::Center);}
         }
     }
 

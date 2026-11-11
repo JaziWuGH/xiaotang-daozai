@@ -22,9 +22,16 @@ fn weather_week_shows_all_seven_days(){
 #[test]
 fn weather_today_opens_solar_details_and_returns_to_forecast(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
-    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,sunrise:Some("06:52".into()),sunset:Some("17:21".into()),..Default::default()});
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,..Default::default()});
     h.app.show_page(8);h.hover(H::local(250.0,65.0),1.0);h.click(H::local(100.0,75.0));
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains("返回天气"))),"点击当天区域后应进入日出日落视图");
+    for phrase in ["日出","日落","06:52","17:21","日照进度待更新"] {
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"旧缓存日照视图缺少 {phrase}");
+    }
+    assert!(!h.app.weather.loading,"浏览日照视图不应额外发起网络请求");
+    h.click(H::local(80.0,44.0));
+    assert!(!h.app.weather.solar_open);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="日出日落 ›")));
 }
 
 #[test]
@@ -34,7 +41,90 @@ fn weather_side_bar_shows_a_clickable_temperature_on_both_edges(){
         let mut h=H::new();h.app.settings.dock=dock;
         h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:-12.0,code:0,day:true,..Default::default()});
         for _ in 0..60{side_frame(&mut h,Some(Pos2::new(250.0,580.0)));}
-        assert!(h.ctx.read_response(egui::Id::new(("card",true,"weather-side"))).is_some(),"{dock:?} 应提供常驻天气入口");
+        let response=h.ctx.read_response(egui::Id::new(("card",true,"weather-side"))).expect("两侧都应提供常驻天气入口");
+        let temp=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="-12°"=>Some((s.clip_rect,t.visual_bounding_rect())),_=>None}).expect("负温度应完整显示");
+        assert!(temp.0.contains_rect(temp.1),"{dock:?} 负温度不应裁切");
+        let click=response.rect.center();
+        side_frame(&mut h,Some(click));
+        for pressed in [true,false] {
+            h.t+=1.0/60.0;
+            let env=Env{t:h.t,clock:"09:41:00".into(),cursor:Some(click),..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(500.0,600.0))),time:Some(h.t),focused:true,
+                events:vec![egui::Event::PointerButton{pos:click,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}],..Default::default()};
+            let _=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{h.app.frame(ui,ui.max_rect(),&env);});});
+        }
+        assert_eq!(h.app.page(),8,"{dock:?} 点击侧边温度应进入天气页");
+        assert!(!h.app.weather.solar_open);
+        h.app.settings.visible_pages[8]=false;
+        assert!(!h.app.side_items().contains(&crate::side_dock::SideItem::Weather));
+        h.app.settings.visible_pages[8]=true;h.app.settings.minimal=true;
+        assert!(!h.app.side_items().contains(&crate::side_dock::SideItem::Weather));
+    }
+}
+
+#[test]
+fn weather_solar_view_preserves_readable_times_across_skins_and_scales(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for skin in crate::model::Skin::ALL {for scale in [1.0,1.25,1.5] {
+        let mut h=H::new();h.app.settings.skin=skin;h.ctx.set_pixels_per_point(scale);
+        h.app.weather.snapshot=Some(crate::weather::parse("杭州",&serde_json::json!({"timezone":"Asia/Shanghai","current":{"temperature_2m":19},
+            "daily":{"time":["2026-10-28"],"sunrise":["2026-10-28T06:52"],"sunset":["2026-10-28T17:21"]}})).unwrap());
+        h.app.weather.solar_open=true;h.app.show_page(8);h.hover(H::local(180.0,185.0),1.0);
+        for phrase in ["返回天气","距离日落","07:40","白昼中点","12:06","06:52","17:21","白昼 10小时29分"] {
+            assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"{skin:?} / {scale} 日照视图缺少 {phrase}");
+        }
+        for s in &h.shapes {if let egui::Shape::Text(t)=&s.shape {assert!(s.clip_rect.contains_rect(t.visual_bounding_rect()),"日照文字不应裁切：{}",t.galley.text());}}
+    }}
+}
+
+#[test]
+#[ignore="按需导出七日预报、日照和两侧常驻天气的实际画面"]
+fn weather_foundation_preview(){
+    use crate::model::{Dock,Skin};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_WEATHER_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    for (name,dock,solar,clock,skin) in [
+        ("weather-week",Dock::Top,false,"14:08:00",Skin::ALL[0]),
+        ("weather-sun",Dock::Top,true,"14:08:00",Skin::ALL[0]),
+        ("weather-night",Dock::Top,true,"20:08:00",Skin::ALL[0]),
+        ("weather-side-left",Dock::Left,false,"14:08:00",Skin::ALL[0]),
+        ("weather-side-right",Dock::Right,false,"14:08:00",Skin::ALL[0]),
+        ("weather-week-cream",Dock::Top,false,"14:08:00",Skin::Cream),
+        ("weather-sun-cream",Dock::Top,true,"14:08:00",Skin::Cream),
+        ("weather-week-glass",Dock::Top,false,"14:08:00",Skin::GlassDark),
+        ("weather-sun-glass",Dock::Top,true,"14:08:00",Skin::GlassDark),
+    ] {
+        let mut h=H::new();h.app.settings.dock=dock;h.app.settings.skin=skin;h.app.settings.pet=false;
+        let mut snapshot=crate::weather::parse("杭州",&serde_json::json!({"timezone":"Asia/Shanghai",
+            "current":{"temperature_2m":19,"apparent_temperature":18,"relative_humidity_2m":58,"wind_speed_10m":12,"weather_code":2,"is_day":1},
+            "daily":{"time":["2026-11-11","2026-11-12","2026-11-13","2026-11-14","2026-11-15","2026-11-16","2026-11-17"],
+                "weather_code":[2,0,3,61,80,2,0],"temperature_2m_max":[23,24,22,19,18,20,22],"temperature_2m_min":[15,16,14,13,12,12,14],
+                "precipitation_probability_max":[10,0,20,70,55,10,0],"sunrise":["2026-11-11T06:52"],"sunset":["2026-11-11T17:21"]}})).unwrap();
+        if clock=="20:08:00" {snapshot.day=false;}
+        h.app.weather.snapshot=Some(snapshot);
+        if dock==Dock::Top {h.app.weather.solar_open=solar;h.app.show_page(8);}
+        let (w,hgt)=if dock==Dock::Top {(crate::app::CANVAS_W,WIN_H)}else{(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)};
+        let mut raster=feature_raster_sized(w,hgt);
+        for frame in 0..90 {
+            h.t+=1.0/60.0;
+            let cursor=Some(if dock==Dock::Top{H::local(180.0,185.0)}else{Pos2::new(250.0,580.0)});
+            let env=Env{t:h.t,clock:clock.into(),today:"2026-11-11".into(),date:"11月11日 周三".into(),cursor,battery:Some(76),bt_ready:true,..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
+                events:vec![egui::Event::PointerMoved(cursor.unwrap())],viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(if dock==Dock::Top{WIN_W}else{w},hgt)),&env);});});
+            raster.update_textures(&output.textures_delta);
+            if frame==89 {
+                raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw((w*2.0)as u32,(hgt*2.0)as u32,rgba).unwrap();
+                let (x,y,crop_w,crop_h)=if dock==Dock::Top {(200,0,880,456)}else{
+                    let rect=h.app.island_rect(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt)),h.app.w.pos,h.app.h.pos);
+                    (if dock==Dock::Left{0}else{880},((rect.top()-12.0)*2.0)as u32,120,((rect.height()+24.0)*2.0)as u32)
+                };
+                image::imageops::crop_imm(&image,x,y,crop_w,crop_h).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
     }
 }
 
@@ -98,7 +188,7 @@ fn weather_city_draft_keeps_the_saved_location_until_confirmed(){
 fn weather_attribution_opens_its_source_without_changing_pages(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.show_page(8);h.hover(H::local(300.0,60.0),1.0);
-    h.click(H::local(375.0,122.0));
+    h.click(H::local(375.0,209.0));
     assert!(h.cmds.contains(&crate::app::Cmd::OpenUrl("https://open-meteo.com/".into())));
     assert_eq!(h.app.page(),8);
 }
@@ -5926,7 +6016,7 @@ fn side_dock_stacks_ai_quota_and_opens_the_account(){
     let total=h.app.side_bar_len()-14.0;
     let mut y=top+(h.app.h.pos-total)/2.0;
     for item in h.app.side_items() {
-        let height=match item {crate::side_dock::SideItem::Quota(i,hh) if h.app.quota.config.accounts[i].id==wb=>{y+=hh/2.0;break;},crate::side_dock::SideItem::Quota(_,hh)=>hh,crate::side_dock::SideItem::Clock=>32.0,crate::side_dock::SideItem::Battery=>20.0,crate::side_dock::SideItem::Music=>18.0,crate::side_dock::SideItem::Focus|crate::side_dock::SideItem::Bell=>22.0};
+        let height=match item {crate::side_dock::SideItem::Quota(i,hh) if h.app.quota.config.accounts[i].id==wb=>{y+=hh/2.0;break;},crate::side_dock::SideItem::Quota(_,hh)=>hh,crate::side_dock::SideItem::Clock=>32.0,crate::side_dock::SideItem::Weather=>40.0,crate::side_dock::SideItem::Battery=>20.0,crate::side_dock::SideItem::Music=>18.0,crate::side_dock::SideItem::Focus|crate::side_dock::SideItem::Bell=>22.0};
         y+=height;
     }
     let click=Pos2::new(18.0,y);
@@ -6009,7 +6099,8 @@ fn side_frame(h:&mut H,cursor:Option<Pos2>)->crate::app::FrameOut{
     let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
         events:cursor.map(|p|vec![egui::Event::PointerMoved(p)]).unwrap_or_default(),..Default::default()};
     let app=&mut h.app;let mut out=None;
-    let _=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{out=Some(app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(w,hgt)),&env));});});
+    let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{out=Some(app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(w,hgt)),&env));});});
+    h.shapes=output.shapes;
     out.unwrap()
 }
 
@@ -6959,7 +7050,7 @@ fn weather_page_shows_the_local_snapshot_and_forecast(){
     let mut h=H::new();
     h.app.settings.pet=false;
     h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),
-        sunrise:Some("06:52".into()),sunset:Some("17:21".into()),
+        sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,
         days:vec![
             crate::weather::Day{label:"今天".into(),high:15.2,low:6.8,code:51,rain:60},
             crate::weather::Day{label:"明天".into(),high:14.5,low:4.7,code:2,rain:0},
@@ -6968,7 +7059,7 @@ fn weather_page_shows_the_local_snapshot_and_forecast(){
         ],at:chrono::Utc::now().timestamp()});
     h.app.show_page(8);h.hover(H::local(300.0,60.0),1.0);
     assert_eq!(h.app.page,8,"天气应是第九个页面");
-    for phrase in ["9°","毛毛雨","杭州","今天","明天","周三","周四","60%","体感 6°","湿度 58%","日出 06:52","日落 17:21"]{
+    for phrase in ["9°","毛毛雨","杭州","今天","明天","周三","周四","60%","体感 6°","湿度 58%","日出日落 ›"]{
         assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"天气页缺少：{phrase}");
     }
     for s in &h.shapes{if let egui::Shape::Text(t)=&s.shape{assert!(s.clip_rect.contains_rect(t.visual_bounding_rect()),"天气页文字被裁切：{}",t.galley.text());}}
@@ -6992,7 +7083,7 @@ fn weather_page_explains_when_data_is_missing(){
 fn weather_chip_sits_after_the_clock_on_the_resident_bar(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.settings.pet=false;
-    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),days:vec![],at:chrono::Utc::now().timestamp()});
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,days:vec![],at:chrono::Utc::now().timestamp()});
     for _ in 0..60{h.frame(vec![]);}
     let layout=h.app.resident.current();
     let clock=layout.x[crate::bar_layout::CLOCK].expect("时钟应常驻");
@@ -7012,7 +7103,7 @@ fn weather_chip_hides_without_data_or_when_the_page_is_hidden(){
     let mut h=H::new();h.app.settings.pet=false;
     for _ in 0..60{h.frame(vec![]);}
     assert!(h.app.resident.current().x[crate::bar_layout::WEATHER].is_none(),"没有快照时不占位");
-    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:None,humidity:None,wind:None,code:0,day:true,high:None,low:None,sunrise:None,sunset:None,days:vec![],at:chrono::Utc::now().timestamp()});
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:None,humidity:None,wind:None,code:0,day:true,high:None,low:None,sunrise:None,sunset:None,sun_times:None,days:vec![],at:chrono::Utc::now().timestamp()});
     for _ in 0..60{h.frame(vec![]);}
     assert!(h.app.resident.current().x[crate::bar_layout::WEATHER].is_some(),"有快照时占位");
     h.app.settings.visible_pages[8]=false;
@@ -7027,7 +7118,7 @@ fn weather_resident_bar_preview(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_WEATHER_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
     let mut h=H::new();h.app.settings.pet=false;
-    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),days:vec![],at:chrono::Utc::now().timestamp()});
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,days:vec![],at:chrono::Utc::now().timestamp()});
     let mut raster=crate::preview_raster::Raster::new(1280,380);
     for frame in 0..90{
         let t=frame as f64/60.0;let env=Env{t,clock:"18:07:00".into(),battery:Some(80),charging:false,..Default::default()};
@@ -7041,7 +7132,7 @@ fn weather_resident_bar_preview(){
     }
     // 设置页「常驻排列」预览：天气徽标应跟随时钟一起出现。换一个 H，避免复用纹理缓存。
     let mut h=H::new();h.app.settings.pet=false;h.quota_accounts(1);
-    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),days:vec![],at:chrono::Utc::now().timestamp()});
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,days:vec![],at:chrono::Utc::now().timestamp()});
     let mut raster=crate::preview_raster::Raster::new(1200,300);
     for frame in 0..3{
         let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(600.0,150.0))),time:Some(frame as f64),
@@ -7062,7 +7153,7 @@ fn weather_settings_preview(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_WEATHER_SETTINGS_PREVIEW").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
     let mut h=H::new();h.app.settings.weather_city="杭州".into();
-    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),days:vec![],at:chrono::Utc::now().timestamp()});
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:9.0,feels:Some(5.6),humidity:Some(58),wind:Some(13.9),code:51,day:true,high:Some(15.2),low:Some(6.8),sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,days:vec![],at:chrono::Utc::now().timestamp()});
     let mut raster=crate::preview_raster::Raster::new(1200,1000);let mut t=0.0;
     for frame in 0..4{
         t+=1.0/60.0;
