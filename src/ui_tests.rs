@@ -808,7 +808,7 @@ fn island_drag_frame(h:&mut H,bounds:crate::display_layout::Bounds,ppp:f32,point
     let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W.max(width),height))),time:Some(h.t),events,focused:true,
         viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(ppp),..Default::default()})).collect(),..Default::default()};
     let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
-        let out=h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(width,height)),&env);h.cmds.extend(out.cmds);
+        let out=h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(width,height)),&env);h.region=out.region;h.hit=out.hit;h.cmds.extend(out.cmds);
     });});
     h.shapes=output.shapes;
     screen
@@ -850,24 +850,84 @@ fn island_position_drag_tracks_screen_coordinates_and_saves_on_release(){
 }
 
 #[test]
-fn island_position_drag_clamps_to_existing_limits_and_keeps_open_outside(){
+fn island_position_drag_clamps_to_existing_limits_and_stays_resident(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
     for dock in crate::model::Dock::ALL {for shape in crate::model::IslandShape::ALL {
         let mut h=H::new();h.app.settings.dock=dock;h.app.settings.island_shape=shape;
         let start=island_drag_header(&mut h,bounds,1.0);
         island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
-        let delta=if dock.is_side(){Vec2::new(3000.0,3000.0)}else{Vec2::new(3000.0,1000.0)};
-        for _ in 0..240{island_drag_frame(&mut h,bounds,1.0,Some(start+delta),None);}
-        assert!(h.app.open,"{dock:?} 拖到窗口外也应保持展开");
+        let end=if dock.is_side(){Pos2::new(start.x,3000.0)}else{Pos2::new(1855.0,start.y)};
+        for _ in 0..120{island_drag_frame(&mut h,bounds,1.0,Some(end),None);}
+        assert!(!h.app.open,"{dock:?} 拖动期间应保持常驻形态");
+        assert!(h.app.progress()<0.01,"拖动期间不应保留展开面板");
+        assert!(!h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="10月28日 周三")),"拖动期间不应显示展开顶栏");
         assert_eq!(h.app.settings.island_offset,crate::model::ISLAND_OFFSET_MAX);
-        island_drag_frame(&mut h,bounds,1.0,Some(start-delta),None);
+        let end=if dock.is_side(){Pos2::new(start.x,65.0)}else{Pos2::new(65.0,start.y)};
+        island_drag_frame(&mut h,bounds,1.0,Some(end),None);
         assert_eq!(h.app.settings.island_offset,-crate::model::ISLAND_OFFSET_MAX);
-        island_drag_frame(&mut h,bounds,1.0,Some(start-delta),Some(false));
+        assert_eq!(h.app.settings.dock,dock);
+        island_drag_frame(&mut h,bounds,1.0,Some(end),Some(false));
         let offset=h.app.settings.island_offset;
         for _ in 0..40{island_drag_frame(&mut h,bounds,1.0,Some(start),None);}
         assert_eq!(h.app.settings.island_offset,offset,"松手后不能继续跟着鼠标移动");
     }}
+}
+
+#[test]
+fn island_position_drag_switches_between_all_three_edges_and_saves_on_release(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    use crate::model::{Dock,IslandShape,Settings};
+    let bounds=crate::display_layout::Bounds{left:-2560,top:-400,right:0,bottom:1040};
+    for from in Dock::ALL {for to in Dock::ALL.into_iter().filter(|to|*to!=from) {for ppp in [1.0,1.5] {for shape in IslandShape::ALL {
+        let mut h=H::new();h.app.settings.dock=from;h.app.settings.island_shape=shape;h.app.settings.save();
+        let start=island_drag_header(&mut h,bounds,ppp);
+        island_drag_frame(&mut h,bounds,ppp,Some(start),Some(true));
+        let size=Vec2::new(2560.0,1440.0)/ppp;
+        let end=match to {Dock::Top=>Pos2::new(size.x*0.6,0.0),Dock::Left=>Pos2::new(0.0,size.y*0.6),Dock::Right=>Pos2::new(size.x,size.y*0.6)};
+        for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,Some(end),None);}
+        assert_eq!(h.app.settings.dock,to,"{from:?} → {to:?} / {ppp} / {shape:?}");
+        assert!(!h.app.open && h.app.progress()<0.01,"切换停靠边后仍应显示常驻形态");
+        assert_eq!(Settings::load().dock,from,"拖动中不能写入停靠设置");
+        let offset=h.app.settings.island_offset;
+        for _ in 0..15{island_drag_frame(&mut h,bounds,ppp,Some(end),None);}
+        assert_eq!(h.app.settings.island_offset,offset,"换边后持有不能漂移");
+        island_drag_frame(&mut h,bounds,ppp,Some(end),Some(false));
+        let saved=Settings::load();assert_eq!((saved.dock,saved.island_offset),(to,offset));
+        for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,Some(end),None);}
+        assert!(!h.app.open,"松手后应留在常驻形态");
+        let screen=island_drag_frame(&mut h,bounds,ppp,Some(end),None);
+        let resident=h.hit.center()-screen.min.to_vec2();
+        for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,Some(resident),None);}
+        assert!(!h.app.open,"松手后光标留在岛上不能立即展开");
+        for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,None,None);}
+        for _ in 0..60{island_drag_frame(&mut h,bounds,ppp,Some(resident),None);}
+        assert!(h.app.open,"光标离开再悬停，应能正常展开");
+        assert_eq!(h.app.settings.display_id,"");
+    }}}}
+}
+
+#[test]
+fn island_position_drag_keeps_the_edge_in_the_middle_and_does_not_flap_at_corners(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    use crate::model::Dock;
+    let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
+    let mut h=H::new();let start=island_drag_header(&mut h,bounds,1.0);
+    island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
+    for (point,dock) in [(Pos2::new(500.0,500.0),Dock::Top),(Pos2::new(0.0,500.0),Dock::Left),
+        (Pos2::new(960.0,540.0),Dock::Left),(Pos2::new(4.0,3.0),Dock::Left),
+        (Pos2::new(3.0,4.0),Dock::Left),(Pos2::new(100.0,0.0),Dock::Top),
+        (Pos2::new(1920.0,500.0),Dock::Right),(Pos2::new(1918.0,3.0),Dock::Right),
+        (Pos2::new(1500.0,0.0),Dock::Top)] {
+        for _ in 0..5{island_drag_frame(&mut h,bounds,1.0,Some(point),None);}
+        assert_eq!(h.app.settings.dock,dock,"光标={point:?}");
+        assert!(!h.app.open);
+    }
+    island_drag_frame(&mut h,bounds,1.0,None,Some(false));
+    island_drag_frame(&mut h,bounds,1.0,Some(start),Some(false));
+    let dock=h.app.settings.dock;let offset=h.app.settings.island_offset;
+    island_drag_frame(&mut h,bounds,1.0,Some(Pos2::new(0.0,500.0)),None);
+    assert_eq!((h.app.settings.dock,h.app.settings.island_offset),(dock,offset),"松手后不能继续拖动");
 }
 
 #[test]

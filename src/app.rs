@@ -585,6 +585,13 @@ impl CalendarState {
 
 }
 
+#[derive(Clone, Copy)]
+struct PositionDrag {
+    start: Vec2,
+    offset: i32,
+    original: (model::Dock, i32),
+}
+
 pub struct App {
     pub opts: Options,
     pub settings: model::Settings,
@@ -601,7 +608,7 @@ pub struct App {
     /// 前台切换导致的强制收起：光标离开前不再自动展开。
     pub hover_lock: bool,
     pub(crate) reveal: f32,
-    position_drag: Option<(Vec2,i32)>,
+    position_drag: Option<PositionDrag>,
 
     // 切页
     pub(crate) page: usize,
@@ -1707,7 +1714,7 @@ impl App {
             }
         } else {self.wheel_delta=0.0;}
         let volume_dragging=self.music_volume_open && ctx.is_being_dragged(egui::Id::new(("card-drag",true,"m-volume-track")));
-        let want = self.position_drag.is_some() || (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
+        let want = (inside && !self.hover_lock && (self.compact_notices()||self.notice.is_none()||self.open)) || self.open && on_notice || (self.open && self.t<self.forced_open_until) || self.drag_hot || volume_dragging || (self.is_editing() && self.open);
         self.morph(want, inside, env.t, dt);
         self.update_pet(env, cx);
 
@@ -1920,20 +1927,7 @@ impl App {
             shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
             shapes
         });
-        if let Some((start,offset))=self.position_drag {
-            if let (Some(cursor),Some(screen))=(env.cursor,env.screen) {
-                // 用屏幕内坐标计算总位移，避免窗口跟随移动后反过来改变拖动距离。
-                let delta=cursor-screen.min-start;
-                let (distance,travel)=if side {(delta.y,screen.height()/2.0-crate::side_dock::SIDE_HALF_EXTENT)}
-                    else {(delta.x,screen.width()/2.0-crate::display_layout::ISLAND_HALF_EXTENT)};
-                let limit=model::ISLAND_OFFSET_MAX;
-                if travel>0.0 {self.settings.island_offset=(offset as f32+distance/travel*limit as f32).round().clamp(-limit as f32,limit as f32) as i32;}
-            }
-            if !ctx.input(|i|i.pointer.primary_down()) || !self.open {
-                self.position_drag=None;
-                if self.settings.island_offset!=offset {self.settings.save();}
-            }else{ctx.set_cursor_icon(egui::CursorIcon::Grabbing);}
-        }
+        self.update_position_drag(&ctx,env);
         let transitioning = self.position_drag.is_some() || !self.w.settled(PW)
             || !self.h.settled(self.expanded_height())
             || self.page_e() < 0.7
@@ -2248,8 +2242,48 @@ impl App {
         }
     }
 
+    fn update_position_drag(&mut self,ctx:&egui::Context,env:&Env) {
+        let Some(mut drag)=self.position_drag else{return;};
+        if let (Some(cursor),Some(screen))=(env.cursor,env.screen) {
+            // 使用屏幕内坐标，窗口移动或横竖画布切换不会累积位移。
+            let cursor=cursor-screen.min;
+            let edges=[(model::Dock::Top,cursor.y.max(0.0)),(model::Dock::Left,cursor.x.max(0.0)),(model::Dock::Right,(screen.width()-cursor.x).max(0.0))];
+            let &(nearest,distance)=edges.iter().min_by(|a,b|a.1.total_cmp(&b.1)).unwrap();
+            let current=edges.iter().find(|(dock,_)|*dock==self.dock()).unwrap().1;
+            // 靠近新边缘才换边；角落保留缓冲，防止横竖形态来回跳变。
+            let switch=nearest!=self.dock() && distance<=64.0 && distance+24.0<current;
+            if switch {self.settings.dock=nearest;}
+            let (position,length,extent,start)=if self.side() {(cursor.y,screen.height(),crate::side_dock::SIDE_HALF_EXTENT,drag.start.y)}
+                else {(cursor.x,screen.width(),crate::display_layout::ISLAND_HALF_EXTENT,drag.start.x)};
+            let travel=(length/2.0-extent).max(0.0);
+            let limit=model::ISLAND_OFFSET_MAX as f32;
+            let offset=if travel<=0.0 {0.0}else if switch {(position-length/2.0)/travel*limit}
+                else {drag.offset as f32+(position-start)/travel*limit};
+            self.settings.island_offset=offset.round().clamp(-limit,limit) as i32;
+            if switch {drag.start=cursor;drag.offset=self.settings.island_offset;}
+        }
+        if !ctx.input(|i|i.pointer.primary_down()) {
+            self.position_drag=None;
+            self.hover_lock=true;
+            if (self.dock(),self.settings.island_offset)!=drag.original {self.settings.save();}
+        }else{
+            self.position_drag=Some(drag);
+            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+    }
+
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。
     fn morph(&mut self, want: bool, inside: bool, t: f64, dt: f32) {
+        if self.position_drag.is_some() {
+            self.open=false;
+            self.hover_lock=true;
+            self.hover_since=None;
+            self.leave_since=None;
+            self.forced_open_until=0.0;
+            let (bw,bh)=self.base_size();
+            self.w.snap(bw);self.h.snap(bh);
+            return;
+        }
         let (bw, bh) = self.base_size();
         if want {
             self.leave_since = None;
@@ -2404,7 +2438,7 @@ impl App {
                 if right>left {
                     let response=base.hit_drag(left,4.0,right-left,26.0,"island-position").on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("按住拖动位置");
                     if response.drag_started_by(egui::PointerButton::Primary) {
-                        if let Some(start)=base.ui.input(|i|i.pointer.press_origin()) {self.position_drag=Some((start-screen.min,self.settings.island_offset));}
+                        if let Some(start)=base.ui.input(|i|i.pointer.press_origin()) {self.position_drag=Some(PositionDrag{start:start-screen.min,offset:self.settings.island_offset,original:(self.dock(),self.settings.island_offset)});}
                     }
                 }
             }
