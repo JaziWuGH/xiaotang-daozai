@@ -212,7 +212,6 @@ mod tests{
         assert_eq!(s.windows.len(),2);
         assert_eq!(s.windows[0].label,"月度额度");assert_eq!(s.windows[0].remaining,90.0);assert_eq!(s.windows[0].reset,Some(1900000000));
         assert_eq!(s.windows[0].amount,Some(Amount::new(900.0,1000.0)));
-        assert_eq!(s.windows[0].headline(),"900");assert_eq!(s.windows[0].unit(),"点");
         assert_eq!(s.windows[0].summary(),"月度额度剩余 900 / 1000");
         assert_eq!(s.windows[1].label,"超额上限余量");assert_eq!(s.windows[1].remaining,84.75);
         assert_eq!(s.windows[1].amount,Some(Amount::new(169.5,200.0)));assert_eq!(s.windows[1].summary(),"超额上限余量剩余 169.5 / 200");

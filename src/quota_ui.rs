@@ -188,16 +188,13 @@ fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,color
             }
         }
     }
-    if a.provider==Provider::ZCode && windows.is_empty(){logo(c,a.provider,x,y,if size<35.0{size-3.0}else{size*0.72});}
+    if a.provider==Provider::Kiro{logo(c,a.provider,x,y,if size<35.0{if dual{10.0}else{12.0}}else if dual{24.0}else{34.0});}
+    else if a.provider==Provider::ZCode && windows.is_empty(){logo(c,a.provider,x,y,if size<35.0{size-3.0}else{size*0.72});}
     else if size<35.0 {logo(c,a.provider,x,y,if dual{10.0}else{12.0});}else if dual {logo(c,a.provider,x,y,24.0);}else if let Some(w)=windows.first(){
-        // 点数比百分比长，字号按位数收一档，保证数字和单位都不越出内环。
-        let value=w.headline();let points=w.amount.is_some();
-        let mut large=if points{if value.len()>3{18.0}else if value.len()>2{20.0}else if value.len()>1{24.0}else{26.0}}else if value.len()>2{22.0}else{28.0};
-        let unit_size=if points{9.5}else{11.0};
-        if points{let available=(radius-stroke/2.0)*1.65-c.text_w(w.unit(),unit_size,W::Semibold)-2.0;large*= (available/c.text_w(&value,large,W::Bold).max(available)).min(1.0);}
-        let number_width=c.text_w(&value,large,W::Bold);let width=number_width+c.text_w(w.unit(),unit_size,W::Semibold)+2.0;
+        let value=format!("{:.0}",w.remaining);let large=if value.len()>2{22.0}else{28.0};
+        let number_width=c.text_w(&value,large,W::Bold);let width=number_width+c.text_w("%",11.0,W::Semibold)+2.0;
         let left=x-width/2.0;c.centered_text(left,y,&value,large,W::Bold,theme::WHITE,H::Left);
-        c.centered_text(left+number_width+2.0,y+3.0,w.unit(),unit_size,W::Semibold,theme::GRAY,H::Left);
+        c.centered_text(left+number_width+2.0,y+3.0,"%",11.0,W::Semibold,theme::GRAY,H::Left);
     }else{c.centered_text(x,y,"—",24.0,W::Semibold,theme::DIM,H::Center);}
 }
 fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {

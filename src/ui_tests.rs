@@ -1798,20 +1798,22 @@ fn kiro_connection_save_failure_keeps_the_original_account_and_cache(){
 }
 
 #[test]
-fn kiro_point_text_fits_small_balances_and_power_plans_in_every_skin(){
+fn kiro_ring_uses_logo_for_all_point_balances_and_skins(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for skin in crate::model::Skin::ALL{for remaining in [0.0,0.01,99.9,1000.0,10000.0]{
-        let mut h=H::new();h.app.settings.skin=skin;let snapshot=kiro_snapshot(remaining,10000.0);let head=snapshot.windows[0].headline();let full=format!("{} 点",snapshot.windows[0].value_text());
+        let mut h=H::new();h.app.settings.skin=skin;let snapshot=kiro_snapshot(remaining,10000.0);let full=format!("{} 点",snapshot.windows[0].value_text());
         h.app.quota.config.accounts.push(crate::quota::Account{id:"kiro".into(),provider:crate::quota::Provider::Kiro,alias:"Kiro".into(),source:"kiro.json".into(),slot:None,enabled:true,pinned:true});h.app.quota.config.selected="kiro".into();
         h.app.quota_event(crate::quota::Event{id:"kiro".into(),result:Ok(snapshot)});h.app.show_page(6);h.hover(H::local(300.0,60.0),0.7);
         let find=|wanted:&str|h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(t)if t.galley.text()==wanted=>Some(t.visual_bounding_rect()),_=>None}).unwrap_or_else(||panic!("缺少文本 {wanted}"));
-        let rect=find(&head);let center=H::local(103.0,105.0);for corner in [rect.left_top(),rect.right_top(),rect.left_bottom(),rect.right_bottom()]{assert!(corner.distance(center)<27.5,"{skin:?} {remaining} 点越出圆环");}
+        let center=H::local(103.0,105.0);
+        let logo=h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Mesh(mesh)=>{let rect=mesh.calc_bounds();(rect.center().distance(center)<0.8&&(30.0..36.0).contains(&rect.width())).then_some(rect)},_=>None}).expect("圆环中心应显示 Kiro 标识");
+        for corner in [logo.left_top(),logo.right_top(),logo.left_bottom(),logo.right_bottom()]{assert!(corner.distance(center)<27.5,"{skin:?} 的标识应位于圆环内");}
         assert!(!find("月度额度剩余").intersects(find(&full)),"{skin:?} {remaining} 点的标签重叠");
     }}
 }
 
 #[test]
-fn kiro_credits_replace_percentages_and_fit_the_card(){
+fn kiro_logo_and_point_details_fit_the_card(){
     use crate::quota::{Amount,Event,Provider,Snapshot,Window};
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();
@@ -1827,9 +1829,10 @@ fn kiro_credits_replace_percentages_and_fit_the_card(){
         egui::Shape::Path(path) if path.points.len()>2 && path.stroke.width>0.0=>{let radius=path.points[0].distance(center);((15.0..35.0).contains(&radius) && path.points.iter().all(|point|(point.distance(center)-radius).abs()<0.5)).then_some(radius-path.stroke.width/2.0)},
         _=>None}).reduce(f32::min).unwrap_or(35.0);
     let text=|wanted:&str|h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Text(text)if text.galley.text()==wanted=>Some(text.visual_bounding_rect()),_=>None});
-    let head=text("904").expect("环内应显示剩余点数而不是百分比");
-    for corner in [head.left_top(),head.right_top(),head.left_bottom(),head.right_bottom()]{assert!(corner.distance(center)+0.5<inner,"点数不得碰到额度环：inner={inner} head={head:?} center={center:?}");}
-    assert!(text("点").is_some(),"点数应带单位");assert!(text("%").is_none(),"有具体数值时不再显示百分比");
+    let logo=h.shapes.iter().find_map(|shape|match &shape.shape{egui::Shape::Mesh(mesh)=>{let rect=mesh.calc_bounds();(rect.center().distance(center)<0.8&&(30.0..36.0).contains(&rect.width())).then_some(rect)},_=>None}).expect("圆环中心应显示 Kiro 标识");
+    for corner in [logo.left_top(),logo.right_top(),logo.left_bottom(),logo.right_bottom()]{assert!(corner.distance(center)+0.5<inner,"标识应位于额度环内");}
+    let center_area=Rect::from_center_size(center,Vec2::splat(40.0));
+    assert!(!h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(t) if center_area.intersects(t.visual_bounding_rect()))),"圆环中心应只显示 Kiro 标识");
     let label=text("月度额度剩余").expect("周期说明");let value=text("904.1 / 1000 点").expect("剩余量与总额");
     assert!(!label.intersects(value),"说明与数值不得重叠");
     assert!(h.shapes.iter().any(|shape|matches!(&shape.shape,egui::Shape::Text(text) if text.galley.text()=="Kiro · KIRO PRO")),"套餐名应显示");
@@ -1991,6 +1994,36 @@ fn kiro_simulated_states_gallery(){
             }
         }
     }
+}
+
+#[test]
+#[ignore="按需导出 Kiro 常驻刘海岛和胶囊岛，不读取真实账号"]
+fn kiro_resident_states_gallery(){
+    use crate::quota::{Account,Event,Provider};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_KIRO_PREVIEW_DIR").expect("需指定预览目录"));std::fs::create_dir_all(&dest).unwrap();
+    for(skin,theme)in [(crate::model::Skin::Classic,"dark"),(crate::model::Skin::GlassLight,"light")]{for mixed in [false,true]{
+        let mut h=H::new();h.app.settings.skin=skin;h.app.settings.pet=false;h.app.settings.show_battery=true;
+        h.app.settings.island_shape=if mixed{crate::model::IslandShape::Pill}else{crate::model::IslandShape::Notch};
+        if mixed{h.quota_accounts(1);}
+        let id="kiro-resident".to_owned();let snapshot=kiro_snapshot(904.09,1000.0);
+        h.app.quota.config.accounts.push(Account{id:id.clone(),provider:Provider::Kiro,alias:"Kiro".into(),source:"simulation-kiro.json".into(),slot:Some(snapshot.kiro.as_ref().unwrap().owner.clone()),enabled:true,pinned:true});
+        h.app.quota_event(Event{id:id.clone(),result:Ok(snapshot)});
+        if mixed{let wb=h.app.quota.config.connect_workbuddy("preview".into(),"WorkBuddy".into());h.app.quota_event(Event{id:wb,result:crate::quota::parse(Provider::WorkBuddy,&serde_json::json!({"code":0,"data":{"Packages":[{"CycleRemainCapacity":"1970"}],"CreditGroups":[{"Kind":"plan_base","CycleRemainCapacity":"1970"}]}}))});}
+        h.app.quota.config.selected=id.clone();let mut raster=crate::preview_raster::Raster::new(1280,380);
+        for frame in 0..90{
+            let t=frame as f64/60.0;let env=Env{t,clock:"12:17:00".into(),today:"2026-11-11".into(),date:"11月11日 周三".into(),battery:Some(80),charging:true,..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(640.0,190.0))),time:Some(t),viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::NONE).show(ctx,|ui|{h.app.frame(ui,ui.max_rect(),&env);});});raster.update_textures(&output.textures_delta);
+            if frame==89{
+                assert_eq!(h.app.quota_bar_indices().len(),if mixed{3}else{1});
+                assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="904")),"常驻栏应显示剩余点数");
+                raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                let image=image::RgbaImage::from_raw(1280,380,rgba).unwrap();let width=(h.app.current_width()*2.0+72.0).ceil().clamp(300.0,1280.0) as u32;
+                image::imageops::crop_imm(&image,(1280-width)/2,0,width,130).to_image().save(dest.join(format!("{theme}-{}.png",if mixed{"residentmixed"}else{"resident"}))).unwrap();
+            }raster.free_textures(&output.textures_delta);
+        }
+    }}
 }
 
 #[test]

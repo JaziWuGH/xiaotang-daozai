@@ -204,17 +204,13 @@ pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pu
 pub struct Amount {pub remaining:f64,pub limit:f64}
 impl Amount {
     pub fn new(remaining:f64,limit:f64)->Self{let limit=limit.max(0.0);Self{remaining:remaining.clamp(0.0,limit),limit}}
-    /// 环内主数字：三位数以上取整，避免撑破圆环。
+    /// 常驻栏剩余点数：三位数以上取整。
     pub fn short(&self)->String{if self.remaining>=100.0{format!("{:.0}",self.remaining)}else{number_text(self.remaining)}}
     /// 列表与提示里的完整写法：剩余 / 总额。
     pub fn full(&self)->String{format!("{} / {}",number_text(self.remaining),number_text(self.limit))}
 }
 fn number_text(v:f64)->String{let digits=if v<1.0{2}else{1};let factor=10f64.powi(digits);let rounded=(v*factor).round()/factor;if rounded>=1000.0||rounded.fract()==0.0{format!("{rounded:.0}")}else{format!("{rounded:.digits$}",digits=digits as usize)}}
 impl Window {
-    /// 环内的主数字：有具体数值时是剩余点数，否则是剩余百分比。
-    pub fn headline(&self)->String{self.amount.as_ref().map(Amount::short).unwrap_or_else(||format!("{:.0}",self.remaining))}
-    /// 主数字单位：数值型额度用“点”，其余按百分比。
-    pub fn unit(&self)->&'static str{if self.amount.is_some(){"点"}else{"%"}}
     /// 剩余量的书面写法：数值型额度给出“剩余 / 总额”，其余给出百分比。
     pub fn value_text(&self)->String{self.amount.as_ref().map(Amount::full).unwrap_or_else(||format!("{:.0}%",self.remaining))}
     /// 一句话额度摘要，用于小岛提示与设置页。
