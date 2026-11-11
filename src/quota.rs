@@ -62,9 +62,11 @@ impl Config {
         Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
     }
     fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
-    pub fn save(&self) {
-        let dir=crate::model::config_dir();let _=fs::create_dir_all(&dir);
-        if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
+    pub fn save(&self) {let _=self.save_checked();}
+    pub(crate) fn save_checked(&self)->Result<(),String>{
+        let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
+        let raw=serde_json::to_vec_pretty(&self.json()).map_err(|_|"无法生成额度配置")?;
+        crate::model::atomic_write(&dir.join("ai-quota.json"),&raw).map_err(|_|"无法保存额度配置，原账号未变更".into())
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
         if provider==Provider::ZCode{return zcode::add(self,&source,&alias);}
@@ -141,9 +143,7 @@ impl Config {
     pub fn discover(&mut self)->Discovery {
         let home=std::env::var_os("USERPROFILE").or_else(||std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
         let mut candidates=vec![(Provider::Codex,home.join(".codex/auth.json")),(Provider::Claude,claude::code_path()),(Provider::Kimi,home.join(".kimi/credentials/kimi-code.json")),(Provider::Kimi,home.join(".kimi-code/credentials/kimi-code.json")),(Provider::Kiro,home.join(".aws/sso/cache/kiro-auth-token.json"))];
-        for (provider,key,file) in [(Provider::Codex,"CODEX_HOME","auth.json"),(Provider::Claude,"CLAUDE_CONFIG_DIR",".credentials.json")]{
-            if let Some(dir)=std::env::var_os(key).filter(|s|!s.is_empty()){candidates.push((provider,PathBuf::from(dir).join(file)));}
-        }
+        if let Some(dir)=std::env::var_os("CODEX_HOME").filter(|s|!s.is_empty()){candidates.push((Provider::Codex,PathBuf::from(dir).join("auth.json")));}
         candidates.extend(self.accounts.iter().filter(|a|matches!(a.provider,Provider::Codex|Provider::Kimi)||(a.provider==Provider::Claude&&a.slot.is_none())).map(|a|(a.provider,a.source.clone())));
         let before=self.accounts.len();
         let mut notes=self.discover_files(&candidates);
@@ -160,6 +160,11 @@ impl Config {
         let mut notes=Vec::new();
         for (provider,path) in candidates.iter().filter(|(_,p)|p.is_file()){
             if *provider==Provider::Claude{if let Err(error)=self.import_claude(path,""){notes.push(error);}continue;}
+            if *provider==Provider::Kiro{
+                let source=fs::canonicalize(path).unwrap_or_else(|_|path.clone());
+                if !self.accounts.iter().any(|a|a.provider==Provider::Kiro&&a.source==source){if let Err(e)=kiro::add(self,path,""){notes.push(e);}}
+                continue;
+            }
             let auth=match credentials(*provider,path){Ok(auth)=>auth,Err(error)=>{notes.push(format!("{}：{error}",provider.name()));continue;}};
             if let Some(existing)=self.accounts.iter_mut().filter(|a|a.provider==*provider).find(|a|account_credentials(a).is_ok_and(|old|same_login(&old,&auth))){
                 if auth.stamp>fs::metadata(&existing.source).and_then(|m|m.modified()).ok(){existing.source=fs::canonicalize(path).unwrap_or_else(|_|path.clone());}
@@ -198,13 +203,13 @@ pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pu
 #[derive(serde::Serialize,serde::Deserialize)]
 pub struct Amount {pub remaining:f64,pub limit:f64}
 impl Amount {
-    pub fn new(remaining:f64,limit:f64)->Self{Self{remaining:remaining.max(0.0),limit:limit.max(0.0)}}
+    pub fn new(remaining:f64,limit:f64)->Self{let limit=limit.max(0.0);Self{remaining:remaining.clamp(0.0,limit),limit}}
     /// 环内主数字：三位数以上取整，避免撑破圆环。
     pub fn short(&self)->String{if self.remaining>=100.0{format!("{:.0}",self.remaining)}else{number_text(self.remaining)}}
     /// 列表与提示里的完整写法：剩余 / 总额。
     pub fn full(&self)->String{format!("{} / {}",number_text(self.remaining),number_text(self.limit))}
 }
-fn number_text(v:f64)->String{let rounded=(v*10.0).round()/10.0;if rounded>=1000.0||rounded.fract()==0.0{format!("{rounded:.0}")}else{format!("{rounded:.1}")}}
+fn number_text(v:f64)->String{let digits=if v<1.0{2}else{1};let factor=10f64.powi(digits);let rounded=(v*factor).round()/factor;if rounded>=1000.0||rounded.fract()==0.0{format!("{rounded:.0}")}else{format!("{rounded:.digits$}",digits=digits as usize)}}
 impl Window {
     /// 环内的主数字：有具体数值时是剩余点数，否则是剩余百分比。
     pub fn headline(&self)->String{self.amount.as_ref().map(Amount::short).unwrap_or_else(||format!("{:.0}",self.remaining))}
@@ -217,7 +222,7 @@ impl Window {
 }
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>}
+pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)]pub kiro:Option<kiro::Details>}
 impl Account {
     pub(crate) fn cache_identity_marker(&self)->Value {
         if claude::is_desktop(&self.source){json!(2)}else{json!(true)}
@@ -227,6 +232,7 @@ impl Account {
         if entry["provider"].as_str()!=Some(self.provider.name()) || entry["slot"].as_str()!=self.slot.as_deref(){return None;}
         if self.provider==Provider::Claude && (entry["source"].as_str()!=self.source.to_str() || entry["local_identity_checked"]!=self.cache_identity_marker()){return None;}
         let snapshot:Snapshot=serde_json::from_value(entry["snapshot"].clone()).ok()?;
+        if self.provider==Provider::Kiro && (self.slot.is_none()||entry["source"].as_str()!=self.source.to_str()||kiro::check_owner(self,&snapshot).is_err()){return None;}
         (snapshot.at>0 && !snapshot.wallet.as_ref().is_some_and(|w|w.balances.is_empty())).then_some(snapshot)
     }
 }
@@ -315,13 +321,13 @@ impl Service {
             let mut cooldowns:HashMap<_,(Instant,String)>=HashMap::new();
             while let Ok(accounts)=requests.recv(){
                 let agent=http_agent();
-                let mut groups=[Vec::new(),Vec::new(),Vec::new()];
+                let mut groups=[Vec::new(),Vec::new(),Vec::new(),Vec::new()];
                 for a in accounts.into_iter().filter(|a|a.enabled){
                     let key=(a.id.clone(),a.slot.clone(),a.source.clone());
                     if let Some((until,message))=cooldowns.get(&key){
                         if *until>Instant::now(){let _=results.send((a,Err(message.clone())));continue;}
                     }
-                    let group=match a.provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,_=>0};
+                    let group=match a.provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::Kiro=>3,_=>0};
                     groups[group].push((key,a));
                 }
                 cooldowns.retain(|_,(until,_)|*until>Instant::now());
@@ -381,7 +387,7 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
-    if account.provider==Provider::Kiro{return kiro::fetch(agent,account).map_err(|e|(e,60));}
+    if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
     let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek|Provider::Kiro=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");

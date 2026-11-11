@@ -1,125 +1,47 @@
-# 功能建议：支持读取 Kiro 额度
+# Kiro 额度适配
 
-> 建议类型：功能新增（AI 额度模块新增 `Provider::Kiro`）
+通过本机 Kiro 登录缓存查询 GetUsageLimits。只读登录文件，不保存令牌副本，不回写，不使用 refreshToken 自动续期。
 
-## 背景
+## 登录与身份
 
-[Kiro](https://kiro.dev/) 是 AWS 推出的 AI IDE（付费订阅制，Free / Pro / Power 三档）。它的 CLI 本身就有 `kiro-cli /usage` 命令可以查看额度，说明客户端走的是 AWS 官方 API。如果岛仔能像支持 Codex / Claude / Kimi 那样支持 Kiro，就可以在桌面上直接看到 Kiro 的月度额度消耗。
+默认路径为 `%USERPROFILE%\.aws\sso\cache\kiro-auth-token.json`，也可选择其他登录 JSON。连接与重连在后台核验成功、配置保存成功后生效。取消或关闭窗口后，晚到结果不会保存账号。
 
-经过在本机（Windows + Kiro 桌面版，KIRO PRO 订阅）上抓包和实测，完整链路如下，可直接采用。
+- `accessToken`：Bearer 凭据，仅发往下列固定官方端点。
+- `profileArn`：有值时随请求发送；缺少时允许空请求体，兼容企业 IdC 登录。
+- `region`：与 ARN 区域一致时使用；缺少时从 ARN 提取，两者都缺少时使用美国东部区域。
+- `expiresAt`：RFC3339 时间，过期时提示在 Kiro 中重新登录。
+- `userInfo.userId`：使用响应中的用户标识绑定账号，配置和缓存仅保存其 SHA-256 摘要。缺少可核验用户标识时不显示额度。
 
-## 一、凭据来源（本机登录文件，只读）
+客户端注册 `clientIdHash`、profile ARN 和访问令牌均不作为用户身份。原版本尚未核验的身份需要重新连接；已经核验的账号重连时必须仍是原用户。重连保留账号 ID、备注、配色及常驻设置。
 
-Kiro 桌面版登录后会在本机生成 AWS SSO 缓存：
+## 请求边界
 
-```
-Windows:  %USERPROFILE%\.aws\sso\cache\kiro-auth-token.json
-macOS/Linux:  ~/.aws/sso/cache/kiro-auth-token.json
-```
-
-关键字段（全部实测确认）：
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| `accessToken` | string | Bearer 令牌，用于调 API |
-| `expiresAt` | RFC3339 string | 令牌过期时间，用于提示用户重新登录 |
-| `profileArn` | string? | 社交登录（Google/GitHub 等）有；**企业 IAM Identity Center（IdC）账号没有此字段** |
-| `clientIdHash` | string? | 企业 IdC 账号有，且不随令牌续期变化 |
-| `region` | string? | 区域，缺省按 `us-east-1` 处理 |
-| `authMethod` | string | `"social"` / `"IdC"` |
-| `refreshToken` | string | 建议不使用，见「设计原则」 |
-
-这与项目现有模式（Codex 的 `auth.json`、Claude 的 `.credentials.json`）完全同构：**只读识别本机登录文件，不回写、不自动续期**，令牌过期时提示用户打开 Kiro 重新登录。
-
-## 二、额度查询 API
-
-```
-POST https://codewhisperer.us-east-1.amazonaws.com/
-```
-
-| 项 | 值 |
+| 区域 | 固定端点 |
 | --- | --- |
-| `Content-Type` | `application/x-amz-json-1.0` |
-| `X-Amz-Target` | `AmazonCodeWhispererService.GetUsageLimits` |
-| `Authorization` | `Bearer <accessToken>` |
+| us-east-1 | https://codewhisperer.us-east-1.amazonaws.com/ |
+| eu-central-1 | https://q.eu-central-1.amazonaws.com/ |
 
-**端点按 `profileArn` / `region` 的区域选择**：
+其他区域暂不支持，不根据登录文件拼接任意主机。请求使用 POST、`application/x-amz-json-1.0` 和 `X-Amz-Target: AmazonCodeWhispererService.GetUsageLimits`。禁用重定向，使用既有代理与请求超时；解压后响应上限为 1 MiB。
 
-- `us-east-1` → `codewhisperer.us-east-1.amazonaws.com`
-- `eu-central-1` → `q.eu-central-1.amazonaws.com`
-- 其他区域 → `codewhisperer.<region>.amazonaws.com`（实测 us-east-1 与文档一致；其余区域按 CLIProxyAPI 的做法泛化）
+401 / 403 提示重新登录；429 保留服务端 Retry-After 并按账号退避。查询期间登录文件发生变化时丢弃结果。Kiro 请求独立执行，避免阻塞其他额度服务。
 
-**请求体**（重要细节）：
+## 点数与时间
 
-```json
-{ "profileArn": "<来自登录文件>" }
-```
+从 `usageBreakdownList` 的 CREDIT 项读取套餐用量。优先精度字段，缺少精度字段时兼容对应整数；负数、非有限值及损坏字段不按零处理。
 
-- 社交登录账号：传 `profileArn`。
-- **企业 IdC 账号：登录文件里没有 `profileArn`，实测传空对象 `{}` 服务端就能按令牌识别身份并正确返回额度**。不要把它当错误处理（这一点容易踩坑，我是真机联调才发现的）。
+- 月度套餐：总额减去套餐内消耗。套餐内消耗使用总用量减超额用量，不因赠送列表是否非空切换公式。
+- 试用：仅计入 ACTIVE 且未过期的 `freeTrialInfo`。
+- 赠送 / 加购：仅计入 ACTIVE 且未过期的 `bonuses`，逐项保留其名称及到期时间。
+- 可用点数：套餐、有效试用和有效赠送 / 加购的剩余量合计。
+- 超额上限余量：启用超额且 CREDIT 项返回明确点数上限时单独显示，不加进可用点数；不把 `capForWorkloadUsage` 等金额字段换算成点数。
 
-### 响应示例（实测，Free/Pro/Power 的字段结构相同）
+月度重置与试用、赠送的到期时间分别显示。秒与毫秒时间戳均做范围校验。常驻栏显示剩余点数；设置页保留各积分池明细。旧的其他供应商缓存可以继续读取。
 
-```json
-{
-  "usageBreakdownList": [
-    {
-      "resourceType": "CREDIT",
-      "usageLimitWithPrecision": 1000.0,
-      "currentUsageWithPrecision": 95.91,
-      "currentOveragesWithPrecision": 0.0,
-      "nextDateReset": 1796083200
-    }
-  ],
-  "overageConfiguration": {
-    "overageStatus": "ENABLED",
-    "capForWorkloadUsage": 200.0
-  },
-  "subscriptionInfo": {
-    "subscriptionTitle": "KIRO PRO"
-  }
-}
-```
+## 参考
 
-字段解读（均为实测确认）：
+- [Kiro 计费与试用](https://kiro.dev/docs/billing/)
+- [Kiro 加购点数](https://kiro.dev/docs/billing/add-on-credits/)
+- [AWS 官方 GetUsageLimits 响应模型](https://github.com/aws/amazon-q-developer-cli/blob/15cc8f3cd18c4272925ce1c7053268eedff1ea0a/crates/amzn-codewhisperer-client/src/operation/get_usage_limits/_get_usage_limits_output.rs)
+- [AWS 官方用量字段模型](https://github.com/aws/amazon-q-developer-cli/blob/15cc8f3cd18c4272925ce1c7053268eedff1ea0a/crates/amzn-codewhisperer-client/src/types/_usage_breakdown.rs)
 
-| 字段 | 说明 |
-| --- | --- |
-| `usageBreakdownList[].resourceType == "CREDIT"` | 套餐积分行，从列表里筛这一行 |
-| `usageLimitWithPrecision` | 周期总额度（Pro 为 1000 点） |
-| `currentUsageWithPrecision` | 已用量。**注意：开了超额后它是「套餐 + 超额」的总用量**，要用它减去 `currentOveragesWithPrecision` 才是套餐内的真实消耗 |
-| `currentOveragesWithPrecision` | 已用超额点数 |
-| `overageConfiguration.overageStatus` | `"ENABLED"` / `"DISABLED"`，只有 ENABLED 时超额额度才有意义 |
-| `overageCapWithPrecision` | 超额上限；DISABLED 时服务端可能不返回或返回 0 |
-| `nextDateReset` | **Unix 秒时间戳**（不是毫秒、不是字符串），下个重置日 |
-| `subscriptionInfo.subscriptionTitle` | 套餐名（"KIRO PRO" 等），可直接用作显示名 |
-| `usageBreakdownList[].bonuses` | 赠送/加成积分列表，非空时无法与套餐用量精确拆分 |
-
-建议展示两个周期环：
-
-1. **月度额度**：`(limit − planUsed) / limit`，配具体点数 `904.1 / 1000`
-2. **超额额度**（overageStatus 为 ENABLED 且 cap > 0 时）：`(cap − overage) / cap`
-
-## 三、几个容易踩的坑（实测总结）
-
-1. **`currentUsageWithPrecision` 含超额**：超用后若不减去 overage，套餐环会显示成 0% 而实际套餐未耗尽；`bonuses` 非空时套餐与赠送无法拆分，`planUsed` 取 `min(used, limit)` 即可。
-2. **IdC 账号无 `profileArn`**：见上文，空 body 即可，不要报错。
-3. **账号唯一标识不能用 token 哈希**：Kiro 会自动续期令牌，token 每次都变。用 token 哈希做账号槽位会导致每次续期都被误判为「已切换账号」。正确做法是优先 `profileArn`，其次企业 IdC 的 `clientIdHash`，都缺失（少数社交账号）才退回 token 哈希。
-4. **令牌过期提示**：比对 `expiresAt`，过期后提示「请打开 Kiro 重新登录」，岛仔不做刷新（与项目「不自动续期」原则一致）。
-5. `nextDateReset` 是**秒**级时间戳，建议做范围校验（如 1e9..4.1e9）防脏数据。
-
-## 四、参考实现
-
-以下开源项目均已验证这条链路，可作为交叉参考：
-
-- **router-for-me/CLIProxyAPI**（Go）— `internal/auth/kiro/` 完整实现了登录文件解析、区域路由与 GetUsageLimits 调用
-- kiro-cli 的 `/usage` 命令（官方 CLI，同一 API）
-- 本人已在 Windows + KIRO PRO 账号上完成端到端实测：解析出的剩余额度与 Kiro 客户端显示一致（95.91 / 1000，剩余 90.4%，12-01 重置）
-
-## 五、附加建议（可选）
-
-- 展示时用**具体点数**（`904 / 1000 点`）而非百分比，Kiro 的计费单位就是积分，用户对点数更有感知
-- 图标可用 Kiro 官方的紫色圆角方 + 白色幽灵形象（`#8B47F9` 底色）
-
----
-*如果需要，我可以提供一套基于本项目现有 `quota.rs` 架构的 Rust 参考实现（含 `fetch` / `parse` 与单元测试，已在本机跑通）。*
+真实账号还需核对 Kiro 客户端中的点数、用户身份、区域及到期时间。合成测试不代表所有登录形态均已完成真机验收。
