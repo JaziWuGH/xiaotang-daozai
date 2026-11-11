@@ -8,6 +8,35 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn island_meshes_stay_valid_after_long_uptime_and_repeated_hover(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();h.app.page=0;h.power=(Some(100),true);
+    let mut frames=0;
+    for days in [0.0,1.0,3.0,7.0,30.0] {
+        h.t=days*86400.0;
+        for skin in crate::model::Skin::ALL {
+            h.app.settings.skin=skin;
+            for scale in [1.0,1.25,1.5] {
+                h.ctx.set_pixels_per_point(scale);
+                for frame in 0..120 {
+                    let point=if frame%60<30{H::local(200.0,15.0)}else{Pos2::new(900.0,250.0)};
+                    h.cursor=Some(point);h.frame(vec![egui::Event::PointerMoved(point)]);
+                    let meshes=h.ctx.tessellate(h.shapes.clone(),h.ctx.pixels_per_point());
+                    for primitive in meshes {if let egui::epaint::Primitive::Mesh(mesh)=primitive.primitive {
+                        assert!(mesh.is_valid(),"运行 {days} 天后的网格索引必须有效");
+                        assert!(mesh.vertices.iter().all(|v|v.pos.is_finite()&&v.uv.is_finite()),"运行 {days} 天后展开不能出现非有限坐标");
+                        assert!(mesh.vertices.iter().all(|v|v.pos.x.abs()<10000.0&&v.pos.y.abs()<10000.0),"运行 {days} 天后顶点不能拉到窗口远处");
+                    }}
+                    frames+=1;
+                }
+            }
+        }
+    }
+    eprintln!("长运行绘制检查：{frames} 帧；覆盖 0、1、3、7、30 天及全部皮肤、三种缩放。");
+}
+
+
+#[test]
 fn weather_hidden_page_opens_its_settings_without_panicking(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.set_page_visible(8,false);h.app.show_page(8);
