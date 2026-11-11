@@ -25,6 +25,7 @@ pub mod icons;
 pub mod input;
 pub mod lyrics;
 pub mod mail;
+pub mod mail_format;
 mod mail_reader;
 pub mod mail_manage;
 mod mail_manage_ui;
