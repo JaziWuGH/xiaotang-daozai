@@ -23,23 +23,28 @@ try {
         try { Save-Text $name ([IO.File]::ReadAllText($source)) }
         catch { $missing.Add($name + '：无法读取') }
     }
-    $info = [ordered]@{ CollectedAt = (Get-Date).ToString('o'); MissingLogs = $missing }
+    $info = [ordered]@{ CollectedAt = (Get-Date).ToString('o'); MissingLogs = $missing.ToArray() }
     try {
-        $info.System = Get-CimInstance Win32_OperatingSystem | Select-Object Caption, Version, BuildNumber, LastBootUpTime
-        $info.Graphics = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, DriverDate)
+        $os = Get-CimInstance Win32_OperatingSystem -OperationTimeoutSec 10
+        $info.System = [ordered]@{ Name = [string]$os.Caption; Version = [string]$os.Version; Build = [string]$os.BuildNumber; BootedAt = $os.LastBootUpTime.ToString('o') }
+        $info.Graphics = @(Get-CimInstance Win32_VideoController -OperationTimeoutSec 10 | ForEach-Object {
+            [pscustomobject]@{ Name = [string]$_.Name; Driver = [string]$_.DriverVersion; DriverDate = [string]$_.DriverDate }
+        })
     } catch { $info.SystemQuery = '无法读取系统或显卡信息' }
     try {
         Add-Type -AssemblyName System.Windows.Forms
-        $info.Screens = @([System.Windows.Forms.Screen]::AllScreens | Select-Object DeviceName, Primary, Bounds)
+        $info.Screens = @([System.Windows.Forms.Screen]::AllScreens | ForEach-Object {
+            [pscustomobject]@{ Device = $_.DeviceName; Primary = $_.Primary; X = $_.Bounds.X; Y = $_.Bounds.Y; Width = $_.Bounds.Width; Height = $_.Bounds.Height }
+        })
     } catch { $info.ScreensQuery = '无法读取显示器信息' }
     $settingsPath = Join-Path $DataDirectory 'settings.txt'
     if (Test-Path -LiteralPath $settingsPath) {
-        $info.DisplaySettings = @(Get-Content -LiteralPath $settingsPath -Encoding UTF8 | Where-Object { $_ -match '^(skin|island_shape|dock|glass_blur|island_size|island_offset|settings_theme|minimal|pet)=' })
+        $info.DisplaySettings = @([IO.File]::ReadAllLines($settingsPath) | Where-Object { $_ -match '^(skin|island_shape|dock|glass_blur|island_size|island_offset|settings_theme|minimal|pet)=' })
     }
     try {
         Add-Type -TypeDefinition 'public static class DaozaiDiagnosticGui { [System.Runtime.InteropServices.DllImport("user32.dll")] public static extern uint GetGuiResources(System.IntPtr process, uint flags); }'
         $info.Processes = @(Get-Process -Name daozai -ErrorAction SilentlyContinue | ForEach-Object {
-            $processInfo = [ordered]@{ Id = $_.Id; StartedAt = $_.StartTime; Handles = $_.HandleCount; Threads = $_.Threads.Count; PrivateBytes = $_.PrivateMemorySize64; WorkingBytes = $_.WorkingSet64 }
+            $processInfo = [ordered]@{ Id = $_.Id; StartedAt = $_.StartTime.ToString('o'); Handles = $_.HandleCount; Threads = $_.Threads.Count; PrivateBytes = $_.PrivateMemorySize64; WorkingBytes = $_.WorkingSet64 }
             try {
                 $processInfo.GdiObjects = [DaozaiDiagnosticGui]::GetGuiResources($_.Handle, 0)
                 $processInfo.UserObjects = [DaozaiDiagnosticGui]::GetGuiResources($_.Handle, 1)
@@ -50,17 +55,20 @@ try {
         })
     } catch { $info.ProcessQuery = '无法读取进程信息' }
     try {
-        $info.ApplicationFaults = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000, 1001, 1002; StartTime = (Get-Date).AddDays(-7) } -MaxEvents 500 -ErrorAction SilentlyContinue | ForEach-Object {
+        $faultQuery = "*[System[(EventID=1000 or EventID=1001 or EventID=1002) and TimeCreated[timediff(@SystemTime) <= 604800000]] and EventData[Data[@Name='AppName']='daozai.exe' or Data[@Name='P1']='daozai.exe']]"
+        $info.ApplicationFaults = @(Get-WinEvent -LogName Application -FilterXPath $faultQuery -MaxEvents 30 -ErrorAction SilentlyContinue | ForEach-Object {
             $eventData = @{}
             foreach ($node in ([xml]$_.ToXml()).Event.EventData.Data) { if ($node.Name) { $eventData[[string]$node.Name] = $node.InnerText } }
             if ($eventData.AppName -ine 'daozai.exe' -and $eventData.P1 -ine 'daozai.exe') { return }
-            $fault = [ordered]@{ At = $_.TimeCreated; EventId = $_.Id; Provider = $_.ProviderName }
+            $fault = [ordered]@{ At = $_.TimeCreated.ToString('o'); EventId = $_.Id; Provider = $_.ProviderName }
             foreach ($key in @('AppName', 'AppVersion', 'ModuleName', 'ModuleVersion', 'ExceptionCode', 'FaultingOffset', 'EventName', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'P7', 'P8')) {
                 if ($eventData.ContainsKey($key)) { $fault[$key] = $eventData[$key] }
             }
             [pscustomobject]$fault
         })
-        $info.DisplayResets = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 4101; StartTime = (Get-Date).AddDays(-7) } -MaxEvents 20 -ErrorAction SilentlyContinue | Select-Object TimeCreated, ProviderName, Id)
+        $info.DisplayResets = @(Get-WinEvent -FilterHashtable @{ LogName = 'System'; Id = 4101; StartTime = (Get-Date).AddDays(-7) } -MaxEvents 20 -ErrorAction SilentlyContinue | ForEach-Object {
+            [pscustomobject]@{ At = $_.TimeCreated.ToString('o'); Provider = $_.ProviderName; EventId = $_.Id }
+        })
     } catch { $info.EventQuery = '无法读取 Windows 事件记录' }
     Save-Text 'environment.json' ($info | ConvertTo-Json -Depth 7)
     New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
