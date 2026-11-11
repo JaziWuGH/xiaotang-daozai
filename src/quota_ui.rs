@@ -496,8 +496,14 @@ impl App {
                         ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.source).hint_text("https://relay.example（可含部署子路径）"));
                     }else if matches!(provider,Provider::MiniMax|Provider::Glm){
                         if !matches!(self.quota.source.as_str(),"cn"|"global"){self.quota.source="cn".into();}
-                        ui.horizontal(|ui|{ui.label("账号地区");ui.selectable_value(&mut self.quota.source,"cn".into(),"中国区");ui.selectable_value(&mut self.quota.source,"global".into(),"国际区");});
-                        ui.label("查询 Coding Plan，不查询按量 API 余额；不会自动跨区发送密钥。");
+                        ui.horizontal(|ui|{
+                            ui.label("账号地区");ui.selectable_value(&mut self.quota.source,"cn".into(),"中国区");ui.selectable_value(&mut self.quota.source,"global".into(),"国际区");
+                            if provider==Provider::Glm&&ui.small_button("获取密钥").on_hover_text(if self.quota.source=="global"{"打开国际区控制台，选择 Personal Coding Plan"}else{"打开中国区个人编程套餐页，获取套餐 Key"}).clicked(){
+                                let url=if self.quota.source=="global"{"https://z.ai/manage-apikey/apikey-list"}else{"https://bigmodel.cn/coding-plan/personal/overview"};
+                                self.pending.push(Cmd::OpenUrl(url.into()));
+                            }
+                        });
+                        ui.label(if provider==Provider::Glm{"请使用 Coding Plan 套餐 Key，非标准 API Key；本机 ZCode 登录无需填写密钥。"}else{"读取 MiniMax Coding Plan；按量 API 余额暂不包含。"});
                     }else{ui.label("查询 OpenCode Go 套餐使用率，不查询 Zen 按量余额。");}
                     ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.api_key).password(true).hint_text("粘贴 API Key"));
                     if ui.add_enabled(!self.quota.api_key.trim().is_empty()&&(!provider.relay()||!self.quota.source.trim().is_empty()),egui::Button::new("验证并连接")).clicked(){

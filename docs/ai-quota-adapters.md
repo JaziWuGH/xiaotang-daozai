@@ -6,7 +6,7 @@
 
 - OpenCode Go：套餐 API Key，固定官方 usage 地址。显示官方滚动／周／月使用率，不冒充 Zen 按量余额。未证实的周期长度不推断。
 - MiniMax：中国区 / 国际区必须手选，分别使用 `api.minimax.cn` / `api.minimax.io`。查询 Coding Plan，优先官方当前 `general` 额度池，兼容 `MiniMax-M*` 旧池；不会相加共享池。剩余百分比、旧 remaining count 语义、周倍率独立处理。
-- GLM：中国区 `open.bigmodel.cn` / 国际区 `api.z.ai`，查询 Coding Plan，不查询推理 API 钱包。使用官方脚本的原始 Authorization Key 格式。未验证的单位编码和重置时间不转换；工具额度不能单独伪装为主套餐额度。
+- GLM：中国区 `open.bigmodel.cn` / 国际区 `api.z.ai`，查询 Coding Plan，不查询推理 API 钱包。使用官方脚本的原始 Authorization Key 格式。未验证的单位编码和重置时间不转换；工具额度不能单独伪装为主套餐额度。「获取密钥」按地区打开官方套餐入口，提示使用套餐 Key；按 HTTP 和业务错误区分认证、权限、套餐状态及限流，不回显服务端原文，不跨地区重试。
 - New API：选择协议，输入 HTTPS 站点地址 + API Key。`/api/usage/token/` 返回的数值标为「站点配额」，不擅自换算美元。
 - One API：独立读取 `/dashboard/billing/subscription` 和 `/dashboard/billing/usage`。站点可配置展示单位，即使字段名含 USD 也不标美元。官方无限额哨兵与真实数值存在歧义时显示未知，不画假进度。
 - Sub2API：独立 `/v1/usage`，区分 Key 限额、订阅周期和钱包；保留协议声明的 USD、周期和显式重置。到期时间不是重置时间。

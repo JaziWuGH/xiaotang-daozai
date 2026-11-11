@@ -6848,3 +6848,28 @@ fn every_module_settings_tab_maps_to_its_page(){
     }
     pages.sort();assert_eq!(pages,(0..8).collect::<Vec<_>>(),"八个功能页面各有一个设置分页");
 }
+
+#[test]
+fn quota_glm_get_key_link_follows_region_without_submitting_the_key(){
+    fn draw(h:&mut H,events:Vec<egui::Event>)->egui::FullOutput{
+        h.t+=0.2;
+        h.ctx.run(egui::RawInput{time:Some(h.t),screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(780.0,850.0))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));})
+    }
+    fn click(h:&mut H,output:&egui::FullOutput,label:&str)->egui::FullOutput{
+        let pos=output.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap_or_else(||panic!("找不到控件：{label}"));
+        let _=draw(h,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        let _=draw(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+        let _=draw(h,vec![]);draw(h,vec![])
+    }
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for dark in [true,false]{
+        let mut h=H::new();h.ctx.set_visuals(if dark{egui::Visuals::dark()}else{egui::Visuals::light()});
+        h.app.settings_open=true;h.app.quota.provider=crate::quota::Provider::Glm;h.app.quota.connect_open=true;h.app.quota.source="cn".into();h.app.quota.api_key="synthetic-glm-key".into();
+        let _=draw(&mut h,vec![]);let _=draw(&mut h,vec![]);let mut output=draw(&mut h,vec![]);
+        for (region,url) in [("中国区","https://bigmodel.cn/coding-plan/personal/overview"),("国际区","https://z.ai/manage-apikey/apikey-list")]{
+            output=click(&mut h,&output,region);h.app.pending.clear();output=click(&mut h,&output,"获取密钥");
+            assert!(h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::OpenUrl(target)if target==url)));
+            assert_eq!(h.app.quota.api_key,"synthetic-glm-key");assert!(h.app.quota.api_connecting.is_none());assert!(h.app.quota.config.accounts.is_empty());
+        }
+    }
+}
