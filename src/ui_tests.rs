@@ -8,6 +8,37 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn weather_week_shows_all_seven_days(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,
+        days:["今天","明天","周五","周六","周日","周一","周二"].into_iter().map(|label|crate::weather::Day{label:label.into(),high:23.0,low:15.0,..Default::default()}).collect(),
+        at:chrono::Utc::now().timestamp(),..Default::default()});
+    h.app.show_page(8);h.hover(H::local(250.0,65.0),1.0);
+    for label in ["今天","明天","周五","周六","周日","周一","周二"] {
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()==label)),"七天预报缺少 {label}");
+    }
+}
+
+#[test]
+fn weather_today_opens_solar_details_and_returns_to_forecast(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,sunrise:Some("06:52".into()),sunset:Some("17:21".into()),..Default::default()});
+    h.app.show_page(8);h.hover(H::local(250.0,65.0),1.0);h.click(H::local(100.0,75.0));
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains("返回天气"))),"点击当天区域后应进入日出日落视图");
+}
+
+#[test]
+fn weather_side_bar_shows_a_clickable_temperature_on_both_edges(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for dock in [crate::model::Dock::Left,crate::model::Dock::Right] {
+        let mut h=H::new();h.app.settings.dock=dock;
+        h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:-12.0,code:0,day:true,..Default::default()});
+        for _ in 0..60{side_frame(&mut h,Some(Pos2::new(250.0,580.0)));}
+        assert!(h.ctx.read_response(egui::Id::new(("card",true,"weather-side"))).is_some(),"{dock:?} 应提供常驻天气入口");
+    }
+}
+
+#[test]
 fn island_meshes_stay_valid_after_long_uptime_and_repeated_hover(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let mut h=H::new();h.app.page=0;h.power=(Some(100),true);
