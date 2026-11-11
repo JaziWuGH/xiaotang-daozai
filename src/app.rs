@@ -593,9 +593,26 @@ impl CalendarState {
 #[derive(Clone, Copy)]
 struct PositionDrag {
     start: Vec2,
-    offset: i32,
+    /// 本段拖动的起始偏移（未取整，换边后重置），单位与 `island_offset` 相同。
+    offset: f32,
     original: (model::Dock, i32),
 }
+
+// ---------- 拖动位置动效 ----------
+/// 原地按住这么久即「拿起」岛体，不必先移动鼠标。
+const LIFT_HOLD: f64 = 0.12;
+/// 拿起 / 放下：略欠阻尼，提起时轻轻弹一下，放下时回落。
+const LIFT_K: (f32, f32) = (420.0, 0.38);
+/// 拿起后放大：沿停靠边方向 / 离开停靠边方向。
+const LIFT_SCALE: (f32, f32) = (0.08, 0.14);
+/// 窗口跟手：明显拖尾并略微冲过光标；松手后落位回弹一两下。
+const GLIDE_FOLLOW: (f32, f32) = (320.0, 0.72);
+const GLIDE_SETTLE: (f32, f32) = (380.0, 0.38);
+/// 移动越快沿运动方向拉得越长（最多 22%），厚度方向相应收窄。
+const STRETCH_MAX: f32 = 0.22;
+const STRETCH_SPEED: f32 = 1400.0;
+/// 吸附范围（`island_offset` 单位）：居中和拖动前的位置。
+const DRAG_MAGNET: f32 = 5.0;
 
 pub struct App {
     pub opts: Options,
@@ -616,6 +633,13 @@ pub struct App {
     pub hover_lock: bool,
     pub(crate) reveal: f32,
     position_drag: Option<PositionDrag>,
+    /// 拖动中和松手落位期间的窗口位置（未取整），落定后回到 `settings.island_offset`。
+    drag_glide: Option<anim::Spring>,
+    /// 拿起程度 0..1（可略过冲）与速度拉伸量，只影响岛体外形，不影响展开进度。
+    drag_lift: anim::Spring,
+    drag_stretch: anim::Spring,
+    /// 光标停在日期时间拖动区的起始时间：停留越久把手提示越明显，划过不打扰。
+    grip_hover_since: Option<f64>,
 
     // 切页
     pub(crate) page: usize,
@@ -790,6 +814,10 @@ impl App {
             hover_lock: false,
             reveal: 0.0,
             position_drag: None,
+            drag_glide: None,
+            drag_lift: anim::Spring::new(0.0, LIFT_K.0, LIFT_K.1),
+            drag_stretch: anim::Spring::new(0.0, 260.0, 0.6),
+            grip_hover_since: None,
             page: initial_page,
             page_from: initial_page,
             page_dir: 1.0,
@@ -1772,7 +1800,10 @@ impl App {
 
         // ---------- 绘制 ----------
         let p = self.progress();
-        let (w, h) = (self.w.pos, self.h.pos);
+        let (sx, sy) = self.drag_scale();
+        // 拿起放大不能超出透明画布，否则两端会被切掉。
+        let (max_w, max_h) = if side {(crate::side_dock::SIDE_W, crate::side_dock::SIDE_H)} else {(WIN_W, WIN_H)};
+        let (w, h) = ((self.w.pos * sx).min((max_w - 24.0).max(self.w.pos)), (self.h.pos * sy).min((max_h - 24.0).max(self.h.pos)));
         let panel = self.island_rect(win, w, h);
         let messenger_rect=self.messenger_badge_rect(win,panel);
         let appear=self.messenger_appear();
@@ -1800,7 +1831,9 @@ impl App {
         let skin_shadow = if !glass_skin {1.0} else if env.glass_blur {0.75} else {0.7};
         let shadow_k = glass::shadow_alpha(0.0, thick) / 0.12 * skin_shadow;
         let island_shadow=|r:Rect,flare:f32,flare_h:f32,radius:f32,strength:f32| if pill {pill_shadow(&painter,r,radius,strength)} else if side {shape::shadow_docked(&painter,r,dock,flare,flare_h,radius,strength)} else {shape::shadow(&painter,r,flare,flare_h,radius,strength)};
-        island_shadow(body, flare, flare_h, radius, smoothstep(0.1, 0.9, pc) * shadow_k);
+        // 拿起时投影加深，像被从屏幕边缘提起来。
+        let lifted = self.drag_lift.pos.clamp(0.0, 1.2);
+        island_shadow(body, flare, flare_h, radius, (smoothstep(0.1, 0.9, pc) + lifted * 0.9) * shadow_k);
         if let Some(r)=outside_badge{
             let appear=self.messenger_appear();
             painter.rect_filled(r,r.width()/2.0,paint::alpha(self.glass_fill(),appear));
@@ -1822,6 +1855,7 @@ impl App {
             self.fluid.advance(env.t,dt);
         }
         self.paint_body(&painter, body, flare, flare_h, radius, feather);
+        if lifted > 0.01 {self.paint_lift_halo(&painter, body, flare, flare_h, radius, lifted.min(1.0));}
         let content_from=crate::skin_paint::shape_count(&ctx,layer);
 
         // 内容只随形体「揭开」：不缩放，按面板裁剪，到 55% 才开始淡入
@@ -1942,6 +1976,8 @@ impl App {
             let (bw, bh) = self.base_size();
             Rect::from_center_size(Pos2::new(cx, top + (bh * SWELL.1 + 12.0) / 2.0), Vec2::new(bw * SWELL.0 + 24.0, bh * SWELL.1 + 12.0))
         };
+        // 拿起放大、甩动拉伸以及加深的投影都要留在窗口区域内，否则两端会被系统裁掉。
+        if self.drag_lift.pos.abs()>0.005 || self.drag_stretch.pos.abs()>0.001 {region=region.union(panel.expand2(Vec2::new(18.0,22.0)));}
         if let Some(r)=messenger_rect{region=region.union(r.expand(5.0));}
         if let Some(rect)=notice_shape {region=region.union(rect.expand2(Vec2::new(12.0,8.0)));}
         if let Some(rect)=notice_details {region=region.union(rect.expand(12.0));}
@@ -1979,8 +2015,8 @@ impl App {
             shapes.extend(tooltips.iter().map(|r|GlassShape::Round(rel(*r),6.0)));
             shapes
         });
-        self.update_position_drag(&ctx,env);
-        let transitioning = self.position_drag.is_some() || !self.w.settled(PW)
+        self.update_position_drag(&ctx,env,dt);
+        let transitioning = self.position_drag.is_some() || self.drag_glide.is_some() || !self.drag_lift.settled(1.0) || !self.drag_stretch.settled(1.0) || !self.w.settled(PW)
             || !self.h.settled(self.expanded_height())
             || self.page_e() < 0.7
             || self.dots.iter().any(|d| !d.settled(16.0))
@@ -2294,50 +2330,129 @@ impl App {
         }
     }
 
-    fn update_position_drag(&mut self,ctx:&egui::Context,env:&Env) {
-        let Some(mut drag)=self.position_drag else{return;};
-        if let (Some(cursor),Some(screen))=(env.cursor,env.screen) {
-            // 使用屏幕内坐标，窗口移动或横竖画布切换不会累积位移。
-            let cursor=cursor-screen.min;
-            let edges=[(model::Dock::Top,cursor.y.max(0.0)),(model::Dock::Left,cursor.x.max(0.0)),(model::Dock::Right,(screen.width()-cursor.x).max(0.0))];
-            let &(nearest,distance)=edges.iter().min_by(|a,b|a.1.total_cmp(&b.1)).unwrap();
-            let current=edges.iter().find(|(dock,_)|*dock==self.dock()).unwrap().1;
-            // 靠近新边缘才换边；角落保留缓冲，防止横竖形态来回跳变。
-            let switch=nearest!=self.dock() && distance<=64.0 && distance+24.0<current;
-            if switch {self.settings.dock=nearest;}
-            let (position,length,extent,start)=if self.side() {(cursor.y,screen.height(),crate::side_dock::SIDE_HALF_EXTENT,drag.start.y)}
-                else {(cursor.x,screen.width(),crate::display_layout::ISLAND_HALF_EXTENT,drag.start.x)};
-            let travel=(length/2.0-extent).max(0.0);
-            let limit=model::ISLAND_OFFSET_MAX as f32;
-            let offset=if travel<=0.0 {0.0}else if switch {(position-length/2.0)/travel*limit}
-                else {drag.offset as f32+(position-start)/travel*limit};
-            self.settings.island_offset=offset.round().clamp(-limit,limit) as i32;
-            if switch {drag.start=cursor;drag.offset=self.settings.island_offset;}
+    /// 拿起时沿岛体轮廓的一圈柔光：外圈宽而淡，内圈细而亮。
+    fn paint_lift_halo(&self,painter:&egui::Painter,rect:Rect,flare:f32,flare_h:f32,radius:f32,amount:f32) {
+        if rect.width()<10.0 || rect.height()<10.0 {return;}
+        let pill=self.settings.island_shape==model::IslandShape::Pill;
+        let dock=self.dock();
+        for (grow,width,alpha) in [(2.0f32,4.0f32,22.0f32),(0.5,1.2,90.0)] {
+            let stroke=egui::Stroke::new(width,Color32::from_white_alpha((alpha*amount) as u8));
+            let edge=rect.expand(grow);
+            if pill {
+                let r=radius.min(rect.height().min(rect.width())*0.5)+grow;
+                painter.rect_stroke(edge,r,stroke,egui::StrokeKind::Middle);
+            } else if dock.is_side() {
+                painter.add(egui::Shape::line(shape::outline_docked(edge,dock,flare,flare_h,radius+grow),stroke));
+            } else {
+                painter.add(egui::Shape::line(shape::outline(edge,flare,flare_h,radius+grow),stroke));
+            }
         }
-        if !ctx.input(|i|i.pointer.primary_down()) {
-            self.position_drag=None;
-            self.hover_lock=true;
-            if (self.dock(),self.settings.island_offset)!=drag.original {self.settings.save();}
-        }else{
-            self.position_drag=Some(drag);
-            ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+
+    fn update_position_drag(&mut self,ctx:&egui::Context,env:&Env,dt:f32) {
+        let limit=model::ISLAND_OFFSET_MAX as f32;
+        if let Some(mut drag)=self.position_drag {
+            let mut speed=0.0;
+            if let (Some(cursor),Some(screen))=(env.cursor,env.screen) {
+                // 使用屏幕内坐标，窗口移动或横竖画布切换不会累积位移。
+                let cursor=cursor-screen.min;
+                let edges=[(model::Dock::Top,cursor.y.max(0.0)),(model::Dock::Left,cursor.x.max(0.0)),(model::Dock::Right,(screen.width()-cursor.x).max(0.0))];
+                let &(nearest,distance)=edges.iter().min_by(|a,b|a.1.total_cmp(&b.1)).unwrap();
+                let current=edges.iter().find(|(dock,_)|*dock==self.dock()).unwrap().1;
+                // 靠近新边缘才换边；角落保留缓冲，防止横竖形态来回跳变。
+                let mut target=Some(nearest).filter(|dock|*dock!=self.dock() && distance<=64.0 && distance+24.0<current);
+                // 左右对侧：过了中线、明显更靠近另一侧就换过去，不必甩到屏幕尽头；中线附近留缓冲不来回跳。
+                if target.is_none() && self.side() {
+                    let (opposite,far)=if self.dock()==model::Dock::Left {(model::Dock::Right,edges[2].1)}else{(model::Dock::Left,edges[1].1)};
+                    if far+screen.width()*0.07<current {target=Some(opposite);}
+                }
+                let switch=target.is_some();
+                if let Some(dock)=target {self.settings.dock=dock;}
+                let (position,length,extent,start)=if self.side() {(cursor.y,screen.height(),crate::side_dock::SIDE_HALF_EXTENT,drag.start.y)}
+                    else {(cursor.x,screen.width(),crate::display_layout::ISLAND_HALF_EXTENT,drag.start.x)};
+                let travel=(length/2.0-extent).max(0.0);
+                let raw=if travel<=0.0 {0.0}else if switch {(position-length/2.0)/travel*limit}
+                    else {drag.offset+(position-start)/travel*limit};
+                let raw=raw.clamp(-limit,limit);
+                // 居中和拖动前的位置有轻微吸附，窗口弹簧会把这一下「吸过去」。
+                let original=Some(drag.original.1 as f32).filter(|_|self.dock()==drag.original.0);
+                let target=[Some(0.0),original].into_iter().flatten().find(|p|(raw-p).abs()<=DRAG_MAGNET).unwrap_or(raw);
+                self.settings.island_offset=target.round() as i32;
+                let glide=self.drag_glide.get_or_insert_with(||anim::Spring::new(drag.offset,GLIDE_FOLLOW.0,GLIDE_FOLLOW.1));
+                glide.target=target;
+                if switch {
+                    // 换边时画布横竖互换，位置和外形直接到位，避免从旧边缘滑过去。
+                    glide.snap(target);
+                    drag.start=cursor;drag.offset=raw;
+                    let (bw,bh)=self.base_size();
+                    self.w.snap(bw);self.h.snap(bh);
+                    self.drag_stretch.snap(0.0);
+                }
+                if travel>0.0 {speed=self.drag_glide.map_or(0.0,|g|g.vel.abs()/limit*travel);}
+            }
+            self.drag_stretch.target=(speed/STRETCH_SPEED).min(1.0)*STRETCH_MAX;
+            if !ctx.input(|i|i.pointer.primary_down()) {
+                self.position_drag=None;
+                self.hover_lock=true;
+                self.drag_stretch.target=0.0;
+                if let Some(glide)=&mut self.drag_glide {
+                    glide.tune(GLIDE_SETTLE.0,GLIDE_SETTLE.1);
+                    glide.target=self.settings.island_offset as f32;
+                }
+                if (self.dock(),self.settings.island_offset)!=drag.original {self.settings.save();}
+            }else{
+                self.position_drag=Some(drag);
+            }
         }
+        self.drag_lift.target=if self.position_drag.is_some() {1.0}else{0.0};
+        self.drag_lift.step(dt);
+        self.drag_stretch.step(dt);
+        if let Some(glide)=&mut self.drag_glide {
+            glide.step(dt);
+            if self.position_drag.is_none() && glide.settled(limit) {self.drag_glide=None;}
+        }
+    }
+
+    /// 拖动中和落位期间窗口使用的位置（-1 … 1，不取整）；其余时候就是保存的位置。
+    pub fn placement_offset(&self)->f32 {
+        let limit=model::ISLAND_OFFSET_MAX as f32;
+        self.drag_glide.map_or(self.settings.island_offset_ratio(),|g|(g.pos/limit).clamp(-1.0,1.0))
+    }
+
+    /// 拿起与速度拉伸带来的外形缩放：(宽, 高)。
+    fn drag_scale(&self)->(f32,f32) {
+        let lift=self.drag_lift.pos.max(0.0);let stretch=self.drag_stretch.pos.max(0.0);
+        let along=1.0+LIFT_SCALE.0*lift+stretch;
+        let across=1.0+LIFT_SCALE.1*lift-stretch*0.5;
+        if self.side() {(across,along)}else{(along,across)}
+    }
+
+    fn start_position_drag(&mut self,start:Pos2,screen:Rect) {
+        let offset=self.settings.island_offset;
+        self.position_drag=Some(PositionDrag{start:start-screen.min,offset:offset as f32,original:(self.dock(),offset)});
+        let mut glide=anim::Spring::new(offset as f32,GLIDE_FOLLOW.0,GLIDE_FOLLOW.1);
+        if let Some(g)=self.drag_glide {glide.pos=g.pos;glide.vel=g.vel;}
+        self.drag_glide=Some(glide);
+        // 拿起时给一点初速度，按下后立刻有反馈。
+        self.drag_lift.vel=self.drag_lift.vel.max(4.0);
     }
 
     /// 悬停状态机：意图缓冲 → 弹簧展开 → 离开延迟 → 临界阻尼收起；全程可打断。
     fn morph(&mut self, want: bool, inside: bool, t: f64, dt: f32) {
+        let (bw, bh) = self.base_size();
         if self.position_drag.is_some() {
+            // 拿起后面板快速收成常驻形态；放大效果由 `drag_scale` 叠加在外形上。
             self.open=false;
             self.hover_lock=true;
             self.hover_since=None;
             self.leave_since=None;
             self.forced_open_until=0.0;
-            let (bw,bh)=self.base_size();
-            self.w.snap(bw);self.h.snap(bh);
-            return;
-        }
-        let (bw, bh) = self.base_size();
-        if want {
+            self.music_volume_open=false;
+            self.w.tune(CLOSE.0, CLOSE.1);
+            self.h.tune(CLOSE.0, CLOSE.1);
+            self.w.target=bw;
+            self.h.target=bh;
+        } else if want {
             self.leave_since = None;
             let since = *self.hover_since.get_or_insert(t);
             let intent=if self.effective_minimal() {MINIMAL_HOVER_INTENT}else{HOVER_INTENT};
@@ -2488,9 +2603,28 @@ impl App {
                 // 中间的日期时间区不占用两侧的新增、刷新和设置按钮。
                 let left=hd.max(150.0);let right=(hc+clock_w).min(303.0);
                 if right>left {
-                    let response=base.hit_drag(left,4.0,right-left,26.0,"island-position").on_hover_cursor(egui::CursorIcon::Grab).on_hover_text("按住拖动位置");
-                    if response.drag_started_by(egui::PointerButton::Primary) {
-                        if let Some(start)=base.ui.input(|i|i.pointer.press_origin()) {self.position_drag=Some(PositionDrag{start:start-screen.min,offset:self.settings.island_offset,original:(self.dock(),self.settings.island_offset)});}
+                    // Windows 没有「抓手」光标，Grab 会变成四向箭头；保持普通箭头，改用岛体内的把手提示。
+                    let response=base.hit_drag(left,4.0,right-left,26.0,"island-position").on_hover_text("按住拖动位置");
+                    let (_,press)=base.hover_t(&response);
+                    // 停留才显现：划过（< 0.3 s）什么都不出现；先露出把手，再慢慢浮起底色；按下立即到位，移开快速淡出。
+                    let dwell=(if response.hovered() {self.t-*self.grip_hover_since.get_or_insert(self.t)}else{self.grip_hover_since=None;0.0}) as f32;
+                    if response.hovered() && dwell<1.2 {base.ui.ctx().request_repaint();}
+                    let ctx=base.ui.ctx();
+                    let grip_in=ctx.animate_value_with_time(response.id.with("grip"),smoothstep(0.30,0.65,dwell),0.12);
+                    let fill_in=ctx.animate_value_with_time(response.id.with("grip-fill"),smoothstep(0.50,1.00,dwell),0.12);
+                    let (grip_in,fill_in)=(grip_in.max(press),fill_in.max(press));
+                    if grip_in>0.003 {
+                        let pad=6.0;
+                        let (x,w)=(left-pad,right-left+pad*2.0);
+                        if fill_in>0.003 {base.fill(x,5.0,w,26.0,13.0,Color32::from_white_alpha((fill_in*7.0+press*12.0) as u8));}
+                        let grip=lerp(14.0,22.0,press)*lerp(0.5,1.0,grip_in);
+                        base.fill(x+w/2.0-grip/2.0,7.5,grip,2.6,1.3,Color32::from_white_alpha((grip_in*60.0+press*60.0) as u8));
+                    }
+                    // 开始移动立即拿起；原地按住片刻也会拿起，先给反馈再移动。
+                    let held=response.is_pointer_button_down_on() && base.ui.input(|i|i.pointer.primary_down() && i.pointer.press_start_time().is_some_and(|at|i.time-at>=LIFT_HOLD));
+                    if response.is_pointer_button_down_on() {base.ui.ctx().request_repaint();}
+                    if response.drag_started_by(egui::PointerButton::Primary) || held {
+                        if let Some(start)=base.ui.input(|i|i.pointer.press_origin()) {self.start_position_drag(start,screen);}
                     }
                 }
             }

@@ -1351,7 +1351,7 @@ impl App {
                             let offset=self.settings.island_offset;
                             let (less,more)=if side{("偏上","偏下")}else{("偏左","偏右")};
                             let position=match offset {0=>"居中".to_string(),o if o<0=>format!("{less} {}%",-o),o=>format!("{more} {o}%")};
-                            ui.label(egui::RichText::new(format!("当前：{position}。展开面板和通知始终留在屏幕内；换屏或调整大小后保持相对位置。")).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.label(egui::RichText::new(format!("当前：{position}。也可以展开后按住日期时间，拖到屏幕顶部、左侧或右侧；展开面板和通知始终留在屏幕内，换屏或调整大小后保持相对位置。")).size(11.0).color(ui.visuals().weak_text_color()));
                             ui.add_space(4.0);
                             setting_row(ui,"避开顶栏","顶部有菜单栏类软件或任务栏时，岛体放在它下方",&mut self.settings.avoid_top_bar);
                             if self.settings.avoid_top_bar {

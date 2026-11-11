@@ -952,7 +952,7 @@ fn island_drag_frame(h:&mut H,bounds:crate::display_layout::Bounds,ppp:f32,point
     use crate::{display_layout,side_dock};
     let dock=h.app.settings.dock;
     let (width,height)=if dock.is_side(){(side_dock::SIDE_W,side_dock::SIDE_H)}else{(WIN_W,WIN_H)};
-    let offset=h.app.settings.island_offset_ratio();
+    let offset=h.app.placement_offset();
     let (x,y)=if dock.is_side(){display_layout::side_origin(bounds,dock,(width,height),side_dock::SIDE_HALF_EXTENT,ppp,offset)}
         else{display_layout::island_origin_offset(bounds,width,ppp,offset)}.unwrap();
     let screen=Rect::from_min_max(Pos2::new((bounds.left-x) as f32/ppp,(bounds.top-y) as f32/ppp),Pos2::new((bounds.right-x) as f32/ppp,(bounds.bottom-y) as f32/ppp));
@@ -984,14 +984,15 @@ fn island_position_drag_tracks_screen_coordinates_and_saves_on_release(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     let bounds=crate::display_layout::Bounds{left:-2560,top:-400,right:0,bottom:1040};
     for dock in crate::model::Dock::ALL {for ppp in [1.0,1.5] {
-        let mut h=H::new();h.app.settings.dock=dock;h.app.settings.island_offset=-25;h.app.settings.save();
+        let mut h=H::new();h.app.settings.dock=dock;h.app.settings.island_offset=-40;h.app.settings.save();
+        // 起点离居中足够远，90 点位移不会落进居中吸附范围。
         let start=island_drag_header(&mut h,bounds,ppp);
         let before=island_drag_frame(&mut h,bounds,ppp,Some(start),Some(true));
         let delta=if dock.is_side(){Vec2::new(0.0,90.0)}else{Vec2::new(90.0,0.0)};
         let end=start+delta;
         island_drag_frame(&mut h,bounds,ppp,Some(end),None);
-        assert!(h.app.settings.island_offset>-25,"{dock:?} / {ppp}：拖动应同步现有位置参数");
-        assert_eq!(crate::model::Settings::load().island_offset,-25,"拖动途中不能反复写配置");
+        assert!(h.app.settings.island_offset>-40,"{dock:?} / {ppp}：拖动应同步现有位置参数");
+        assert_eq!(crate::model::Settings::load().island_offset,-40,"拖动途中不能反复写配置");
         let offset=h.app.settings.island_offset;
         for _ in 0..30{island_drag_frame(&mut h,bounds,ppp,Some(end),None);}
         let after=island_drag_frame(&mut h,bounds,ppp,Some(end),None);
@@ -1095,7 +1096,8 @@ fn island_position_drag_keeps_the_edge_in_the_middle_and_does_not_flap_at_corner
     let mut h=H::new();let start=island_drag_header(&mut h,bounds,1.0);
     island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
     for (point,dock) in [(Pos2::new(500.0,500.0),Dock::Top),(Pos2::new(0.0,500.0),Dock::Left),
-        (Pos2::new(960.0,540.0),Dock::Left),(Pos2::new(4.0,3.0),Dock::Left),
+        (Pos2::new(960.0,540.0),Dock::Left),(Pos2::new(1250.0,540.0),Dock::Right),(Pos2::new(1000.0,540.0),Dock::Right),
+        (Pos2::new(700.0,540.0),Dock::Left),(Pos2::new(4.0,3.0),Dock::Left),
         (Pos2::new(3.0,4.0),Dock::Left),(Pos2::new(100.0,0.0),Dock::Top),
         (Pos2::new(1920.0,500.0),Dock::Right),(Pos2::new(1918.0,3.0),Dock::Right),
         (Pos2::new(1500.0,0.0),Dock::Top)] {
@@ -1108,6 +1110,40 @@ fn island_position_drag_keeps_the_edge_in_the_middle_and_does_not_flap_at_corner
     let dock=h.app.settings.dock;let offset=h.app.settings.island_offset;
     island_drag_frame(&mut h,bounds,1.0,Some(Pos2::new(0.0,500.0)),None);
     assert_eq!((h.app.settings.dock,h.app.settings.island_offset),(dock,offset),"松手后不能继续拖动");
+}
+
+#[test]
+fn island_position_drag_lifts_on_hold_glides_smoothly_and_snaps_to_center(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let bounds=crate::display_layout::Bounds{left:0,top:0,right:1920,bottom:1080};
+    let mut h=H::new();h.app.settings.island_offset=-30;h.app.settings.save();
+    let start=island_drag_header(&mut h,bounds,1.0);
+    island_drag_frame(&mut h,bounds,1.0,Some(start),Some(true));
+    // 原地按住片刻即拿起：面板开始收起，位置不变。
+    for _ in 0..20{island_drag_frame(&mut h,bounds,1.0,Some(start),None);}
+    assert!(!h.app.open && h.app.progress()<0.5,"按住不动也应拿起岛体");
+    assert_eq!(h.app.settings.island_offset,-30);
+    // 窗口平滑跟随：一帧跳过去的光标，窗口要分几帧追上，且不按整数刻度跳。
+    let travel=1920.0/2.0-crate::display_layout::ISLAND_HALF_EXTENT;
+    let to=|units:f32|Pos2::new(start.x+(units+30.0)/100.0*travel,start.y);
+    island_drag_frame(&mut h,bounds,1.0,Some(to(-10.0)),None);
+    island_drag_frame(&mut h,bounds,1.0,Some(to(-10.0)),None);
+    let mid=h.app.placement_offset();
+    assert!(mid> -0.30 && mid< -0.10,"窗口应在途中，而不是瞬间到位：{mid}");
+    for _ in 0..40{island_drag_frame(&mut h,bounds,1.0,Some(to(-10.0)),None);}
+    assert!((h.app.placement_offset()+0.10).abs()<0.003,"持有后应追上光标");
+    // 居中附近吸附，离开吸附范围后恢复跟随。
+    island_drag_frame(&mut h,bounds,1.0,Some(to(2.0)),None);
+    assert_eq!(h.app.settings.island_offset,0,"靠近居中应吸附");
+    island_drag_frame(&mut h,bounds,1.0,Some(to(7.0)),None);
+    assert_eq!(h.app.settings.island_offset,7);
+    island_drag_frame(&mut h,bounds,1.0,Some(to(-28.5)),None);
+    assert_eq!(h.app.settings.island_offset,-30,"靠近原位置应吸附回去");
+    island_drag_frame(&mut h,bounds,1.0,Some(to(2.0)),None);
+    island_drag_frame(&mut h,bounds,1.0,Some(to(2.0)),Some(false));
+    assert_eq!(crate::model::Settings::load().island_offset,0,"松手保存吸附后的位置");
+    for _ in 0..90{island_drag_frame(&mut h,bounds,1.0,Some(to(2.0)),None);}
+    assert_eq!(h.app.placement_offset(),0.0,"落位后回到保存的位置");
 }
 
 #[test]

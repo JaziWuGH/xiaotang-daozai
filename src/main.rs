@@ -355,15 +355,22 @@ impl eframe::App for Shell {
             self.app.foreground_changed();
         }
         #[cfg(windows)]
-        let placement_key=(self.app.settings.display_id.clone(),self.app.settings.island_offset,self.app.settings.dock,self.app.settings.avoid_top_bar);
+        let offset=self.app.placement_offset();
+        // 拖动时位置不取整，按万分之一比例比较，窗口逐帧平滑跟随。
+        #[cfg(windows)]
+        let placement_key=(self.app.settings.display_id.clone(),(offset*10000.0).round() as i32,self.app.settings.dock,self.app.settings.avoid_top_bar);
         #[cfg(windows)]
         if !self.placed || self.placement_scale!=ctx.pixels_per_point() || self.placement_key!=placement_key || self.placement_at.ready(Duration::from_secs(1)) {
-            self.placement_at=PollClock::now();
+            // 只有位置变化时沿用已知屏幕，避免拖动中每帧枚举显示器。
+            let offset_only=self.placed && self.placement_scale==ctx.pixels_per_point() && !self.placement_at.ready(Duration::from_secs(1))
+                && (&self.placement_key.0,self.placement_key.2,self.placement_key.3)==(&placement_key.0,placement_key.2,placement_key.3);
+            if !offset_only {
+                self.placement_at=PollClock::now();
+                self.app.displays=daozai::display_layout::connected();
+            }
             self.placement_scale=ctx.pixels_per_point();
             self.placement_key=placement_key;
-            self.app.displays=daozai::display_layout::connected();
             let display=daozai::display_layout::selected(&self.app.displays,&self.app.settings.display_id);
-            let offset=self.app.settings.island_offset_ratio();
             if display.is_some_and(|d|self.native.as_ref().is_some_and(|w|w.place_on_display(self.placement_scale,daozai::display_layout::placement_bounds(d,self.app.settings.avoid_top_bar),offset,self.app.settings.dock))) {
                 if !self.placed {diagnostics::startup("目标屏幕物理坐标定位完成，已请求显示");}
                 self.placed=true;
