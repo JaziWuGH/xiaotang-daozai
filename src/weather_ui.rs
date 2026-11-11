@@ -116,11 +116,12 @@ fn weather_now(env:&Env)->i64 {
 fn paint_sun_times(c:&Card,snapshot:&weather::Snapshot,now:i64) {
     let times=snapshot.sun_times.as_ref();
     let progress=times.and_then(|times|times.progress(now));
+    let today=times.filter(|times|(times.day_start..times.day_end).contains(&now));
     let rise=snapshot.sunrise.as_deref().unwrap_or("--:--");
     let set=snapshot.sunset.as_deref().unwrap_or("--:--");
     c.text(390.0,47.0,&c.fit(&snapshot.place,10.5,W::Regular,180.0),10.5,W::Regular,theme::GRAY,H::Right);
     let mut target=None;
-    if let Some(times)=times.filter(|_|progress.is_some()) {
+    if let Some(times)=today {
         if now<times.sunset {
             let (title,event,label,index)=if now<times.sunrise {("距离日出",times.sunrise,rise,0)}else{("距离日落",times.sunset,set,2)};
             let minutes=((event-now).max(0)+59)/60;
@@ -144,35 +145,62 @@ fn paint_sun_times(c:&Card,snapshot:&weather::Snapshot,now:i64) {
         c.text(40.0,178.0,&format!("白昼 {}小时{:02}分",minutes/60,minutes%60),10.0,W::Regular,theme::GRAY,H::Left);
     }
 
-    // 参考 Oyenza Studio prayer::draw_day 的点状弧线与分段时间映射，按 egui 重新绘制。
-    // 来源与 MIT 许可见 THIRD_PARTY_NOTICES.txt。
-    let point=|pos:f32|(198.0+pos*174.0,116.0-46.0*(std::f32::consts::PI*pos).sin());
-    c.text(285.0,60.0,if progress.is_some(){"今日日照"}else{"日照时段"},10.0,W::Regular,theme::GRAY,H::Center);
-    c.seg((198.0,117.0),(372.0,117.0),0.7,Color32::from_white_alpha(16));
-    for index in 0..=36 {
-        let pos=index as f32/36.0;
-        if [0.12f32,0.5,0.88].iter().any(|at|((pos-at)*174.0).abs()<9.0)
-            || progress.is_some_and(|at|((pos-at)*174.0).abs()<12.0){continue;}
-        let (x,y)=point(pos);
-        c.circle(x,y,0.9,if progress.is_some_and(|at|pos<=at){paint::alpha(SUN,0.72)}else{Color32::from_white_alpha(55)});
+    // 连续轨迹只映射白昼，保持日出、白昼中点、日落的相对时间位置。
+    let point=|pos:f32|(180.0+pos*202.0,120.0-32.0*(1.0-(2.0*pos-1.0).powi(2)));
+    let elapsed=today.map(|times|((now-times.sunrise) as f32/(times.sunset-times.sunrise).max(1) as f32).clamp(0.0,1.0));
+    c.text(281.0,64.0,if today.is_some(){"今日日照"}else{"日照时段"},10.0,W::Regular,theme::GRAY,H::Center);
+    let track:Vec<_>=(0..=48).map(|index|point(index as f32/48.0)).collect();
+    let screen:Vec<_>=track.iter().map(|&(x,y)|c.pos(x,y)).collect();
+    c.painter.extend(egui::Shape::dashed_line(&screen,egui::Stroke::new(1.2*c.s,Color32::from_white_alpha(65)),3.0*c.s,3.0*c.s));
+    if let Some(elapsed)=elapsed.filter(|at|*at>0.0) {
+        // 沿用同一条采样轨迹裁出已过时段，保持虚线起点与间隔一致。
+        let mut lit:Vec<_>=track.iter().take_while(|&&(x,_)|x<point(elapsed).0).map(|&(x,y)|c.pos(x,y)).collect();
+        let (x,y)=point(elapsed);lit.push(c.pos(x,y));
+        c.painter.extend(egui::Shape::dashed_line(&lit,egui::Stroke::new(1.4*c.s,paint::alpha(SUN,0.85)),3.0*c.s,3.0*c.s));
     }
+    c.seg((180.0,121.0),(382.0,121.0),0.7,Color32::from_white_alpha(18));
     let midpoint=times.map(|times|times.clock(times.midpoint())).unwrap_or_else(||"--:--".into());
-    for (index,(pos,label,time)) in [(0.12,"日出",rise),(0.5,"白昼中点",midpoint.as_str()),(0.88,"日落",set)].into_iter().enumerate() {
+    for (index,(pos,label,time)) in [(0.0,"日出",rise),(0.5,"白昼中点",midpoint.as_str()),(1.0,"日落",set)].into_iter().enumerate() {
         let (x,y)=point(pos);
         let next=target==Some(index);
-        c.circle(x,y,2.8,if next{SUN}else if progress.is_some_and(|at|pos<=at){theme::GRAY}else{Color32::from_gray(86)});
-        if next {c.arc(x,y,6.5,0.0,std::f32::consts::TAU,1.1,paint::alpha(SUN,0.8));}
+        if index!=1 {c.circle(x,y,2.2,if next{SUN}else{theme::GRAY});}
         c.text(x,144.0,label,9.5,W::Regular,if next{SUN}else{theme::GRAY},H::Center);
         c.text(x,160.0,time,11.0,W::Semibold,theme::WHITE,H::Center);
     }
-    if let (Some(progress),Some(times))=(progress,times) {
+    if let Some(progress)=progress {
         let (x,y)=point(progress);
-        let day=(times.sunrise..times.sunset).contains(&now);
-        c.glow(x,y,12.0,paint::alpha(if day{SUN}else{RAIN},0.2));
-        if day {c.circle(x,y,4.5,SUN);c.circle(x-1.0,y-1.0,1.2,Color32::from_white_alpha(210));}
-        else {moon(c,x,y,7.0);}
+        c.glow(x,y,16.0,paint::alpha(SUN,0.18));
+        sun(c,x,y,6.0);
+    }else if today.is_some() {
+        c.glow(281.0,107.0,13.0,paint::alpha(RAIN,0.10));
+        moon(c,281.0,107.0,8.0);
     }
-    crate::quota_ui::bar_tooltip(c.hit(188.0,63.0,192.0,111.0,"weather-solar-arc"),"按当地日出日落时间计算的日照进度，弧线不代表太阳真实高度".into());
+}
+
+fn paint_forecast(c:&Card,snapshot:&weather::Snapshot) {
+    // 上方实况；整块内容区支持轻点切换。
+    icon(c,52.0,65.0,34.0,weather::kind(snapshot.code,snapshot.day));
+    c.text(84.0,73.0,&pill_temp_text(snapshot),30.0,W::Bold,theme::WHITE,H::Left);
+    c.text(84.0,89.0,weather::describe(snapshot.code),11.5,W::Semibold,theme::WHITE,H::Left);
+    c.text(84.0,103.0,&c.fit(&snapshot.place,10.5,W::Regular,118.0),10.5,W::Regular,theme::GRAY,H::Left);
+    c.text(84.0,117.0,"轻点切换日照",9.5,W::Regular,theme::DIM,H::Left);
+    if let Some(feels)=snapshot.feels {c.text(236.0,54.0,&format!("体感 {feels:.0}°"),11.0,W::Regular,theme::GRAY,H::Left);}
+    if let Some(humidity)=snapshot.humidity {c.text(236.0,75.0,&format!("湿度 {humidity}%"),11.0,W::Regular,theme::GRAY,H::Left);}
+    if let Some(wind)=snapshot.wind {c.text(236.0,96.0,&format!("风 {wind:.0} km/h"),11.0,W::Regular,theme::GRAY,H::Left);}
+
+    // 下方七日预报，旧缓存中缺少的日期保持空位，刷新后补齐。
+    c.seg((24.0,123.0),(395.0,123.0),0.8,Color32::from_white_alpha(16));
+    let span=371.0/weather::FORECAST_DAYS as f32;
+    for index in 0..weather::FORECAST_DAYS {
+        let x=24.0+span*(index as f32+0.5);
+        if index==0 {c.fill(x-23.0,126.0,46.0,76.0,7.0,Color32::from_white_alpha(8));}
+        let Some(day)=snapshot.days.get(index) else {c.text(x,165.0,"—",12.0,W::Regular,theme::DIM,H::Center);continue;};
+        c.text(x,138.0,&day.label,9.5,W::Regular,if index==0{theme::WHITE}else{theme::GRAY},H::Center);
+        icon(c,x,153.0,18.0,weather::kind(day.code,true));
+        c.text(x,175.0,&format!("{:.0}°",day.high),11.5,W::Semibold,theme::WHITE,H::Center);
+        c.text(x,189.0,&format!("{:.0}°",day.low),10.0,W::Regular,theme::GRAY,H::Center);
+        if day.rain>=20 {c.text(x,200.0,&format!("{}%",day.rain),8.5,W::Regular,RAIN,H::Center);}
+    }
 }
 
 impl App {
@@ -285,40 +313,17 @@ impl App {
             if offline { "，当前显示的是缓存" } else { "" }
         ));
 
-        if self.weather.solar_open {
-            let back=c.hit(38.0,34.0,94.0,22.0,"weather-solar-back").on_hover_cursor(egui::CursorIcon::PointingHand);
-            if back.clicked(){self.weather.solar_open=false;}
-        }else if c.hit(35.0,36.0,170.0,84.0,"weather-today").on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){
-            self.weather.solar_open=true;
+        let response=c.hit(36.0,34.0,347.0,168.0,"weather-view").on_hover_cursor(egui::CursorIcon::PointingHand);
+        if response.clicked(){self.weather.solar_open=!self.weather.solar_open;}
+        let mix=c.ui.ctx().animate_bool_with_time(egui::Id::new(("weather-view-blend",c.live)),self.weather.solar_open,0.18);
+        if mix<1.0 {
+            let forecast=c.faded(1.0-mix).shifted(-6.0*mix,0.0).ghost();
+            paint_forecast(&forecast,&snapshot);
         }
-        if self.weather.solar_open {
-            c.text(40.0,48.0,"‹ 返回天气",10.5,W::Regular,theme::GRAY,H::Left);
-            paint_sun_times(c,&snapshot,weather_now(env));
-            return;
-        }
-
-        // 上方实况；当天区域可进入日照时段。
-        icon(c,52.0,65.0,34.0,weather::kind(snapshot.code,snapshot.day));
-        c.text(84.0,73.0,&pill_temp_text(&snapshot),30.0,W::Bold,theme::WHITE,H::Left);
-        c.text(84.0,89.0,weather::describe(snapshot.code),11.5,W::Semibold,theme::WHITE,H::Left);
-        c.text(84.0,103.0,&c.fit(&snapshot.place,10.5,W::Regular,118.0),10.5,W::Regular,theme::GRAY,H::Left);
-        c.text(84.0,117.0,"日出日落 ›",9.5,W::Regular,SUN,H::Left);
-        if let Some(feels)=snapshot.feels {c.text(236.0,54.0,&format!("体感 {feels:.0}°"),11.0,W::Regular,theme::GRAY,H::Left);}
-        if let Some(humidity)=snapshot.humidity {c.text(236.0,75.0,&format!("湿度 {humidity}%"),11.0,W::Regular,theme::GRAY,H::Left);}
-        if let Some(wind)=snapshot.wind {c.text(236.0,96.0,&format!("风 {wind:.0} km/h"),11.0,W::Regular,theme::GRAY,H::Left);}
-
-        // 下方七日预报，旧缓存中缺少的日期保持空位，刷新后补齐。
-        c.seg((24.0,123.0),(395.0,123.0),0.8,Color32::from_white_alpha(16));
-        let span=371.0/weather::FORECAST_DAYS as f32;
-        for index in 0..weather::FORECAST_DAYS {
-            let x=24.0+span*(index as f32+0.5);
-            if index==0 {c.fill(x-23.0,126.0,46.0,76.0,7.0,Color32::from_white_alpha(8));}
-            let Some(day)=snapshot.days.get(index) else {c.text(x,165.0,"—",12.0,W::Regular,theme::DIM,H::Center);continue;};
-            c.text(x,138.0,&day.label,9.5,W::Regular,if index==0{theme::WHITE}else{theme::GRAY},H::Center);
-            icon(c,x,153.0,18.0,weather::kind(day.code,true));
-            c.text(x,175.0,&format!("{:.0}°",day.high),11.5,W::Semibold,theme::WHITE,H::Center);
-            c.text(x,189.0,&format!("{:.0}°",day.low),10.0,W::Regular,theme::GRAY,H::Center);
-            if day.rain>=20 {c.text(x,200.0,&format!("{}%",day.rain),8.5,W::Regular,RAIN,H::Center);}
+        if mix>0.0 {
+            let solar=c.faded(mix).shifted(6.0*(1.0-mix),0.0).ghost();
+            solar.text(40.0,48.0,"轻点返回天气",10.5,W::Regular,theme::GRAY,H::Left);
+            paint_sun_times(&solar,&snapshot,weather_now(env));
         }
     }
 

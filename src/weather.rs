@@ -89,15 +89,10 @@ impl SunTimes {
         }).unwrap_or_else(||"--:--".into())
     }
 
-    /// 以当地午夜、日出、白昼中点、日落和次日午夜映射日照进度。
+    /// 日出到日落之间的时间进度；夜间不在日照轨迹上绘制当前位置。
     pub fn progress(&self, now: i64) -> Option<f32> {
-        if !(self.day_start..self.day_end).contains(&now) {return None;}
-        let marks=[(self.day_start,0.0),(self.sunrise,0.12),(self.midpoint(),0.5),(self.sunset,0.88),(self.day_end,1.0)];
-        for pair in marks.windows(2) {
-            let ((from,start),(to,end))=(pair[0],pair[1]);
-            if now<=to {return Some(start+(end-start)*((now-from)as f32/(to-from).max(1)as f32).clamp(0.0,1.0));}
-        }
-        Some(1.0)
+        if !(self.sunrise..=self.sunset).contains(&now) {return None;}
+        Some((now-self.sunrise) as f32/(self.sunset-self.sunrise).max(1) as f32)
     }
 }
 
@@ -479,9 +474,11 @@ mod tests {
         assert_eq!(times.sunrise,chrono::Utc.with_ymd_and_hms(2026,11,8,22,52,0).unwrap().timestamp());
         assert_eq!(times.clock(times.midpoint()),"12:06");
         assert_eq!(times.sunset-times.sunrise,10*3600+29*60);
-        for (at,expected) in [(times.day_start,0.0),(times.sunrise,0.12),(times.midpoint(),0.5),(times.sunset,0.88)] {
+        for (at,expected) in [(times.sunrise,0.0),(times.midpoint(),0.5),(times.sunset,1.0)] {
             assert!((times.progress(at).unwrap()-expected).abs()<0.0001);
         }
+        assert!(times.progress(times.sunrise-1).is_none());
+        assert!(times.progress(times.sunset+1).is_none());
         assert!(times.progress(times.day_start-1).is_none());
         assert!(times.progress(times.day_end).is_none());
         payload["timezone"]=json!("America/New_York");

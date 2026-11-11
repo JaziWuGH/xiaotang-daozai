@@ -8,6 +8,37 @@ use std::sync::Mutex;
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn weather_content_tap_switches_both_ways_with_a_short_transition(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (x,y) in [(100.0,75.0),(270.0,82.0),(314.0,178.0)] {
+        let mut h=H::new();h.app.settings.pet=false;
+        h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,sunrise:Some("06:52".into()),sunset:Some("17:21".into()),..Default::default()});
+        h.app.show_page(8);let p=H::local(x,y);h.hover(p,1.0);h.click(p);
+        assert!(h.app.weather.solar_open,"天气内容区 ({x},{y}) 应可以轻点切换");
+        h.hover(p,0.05);
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains("返回天气")&&t.fallback_color.a()>0&&t.fallback_color.a()<255)),"切换时应有短暂淡入动效");
+        h.hover(p,0.3);h.click(p);assert!(!h.app.weather.solar_open,"日照内容区也可以轻点返回");
+        h.hover(p,0.3);
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="19°"&&t.fallback_color.a()==255)),"动效完成后应恢复清晰的天气概览");
+    }
+}
+
+#[test]
+fn weather_content_tap_keeps_other_controls_independent(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for (x,y,target) in [(375.0,209.0,8),(394.0,18.0,8),(367.0,18.0,0),(398.0,88.0,0),(20.0,88.0,7)] {
+        let mut h=H::new();h.app.settings.pet=false;
+        h.media=crate::smtc::NowPlaying{source:"cloudmusic.exe".into(),title:"歌曲".into(),artist:"歌手".into(),playing:true,..Default::default()};
+        h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,..Default::default()});
+        h.app.show_page(8);h.hover(H::local(250.0,65.0),1.0);h.click(H::local(x,y));
+        assert!(!h.app.weather.solar_open,"操作 ({x},{y}) 不应触发日照切换");
+        assert_eq!(h.app.page(),target,"操作 ({x},{y}) 的页面跳转应保持不变");
+        if y>200.0 {assert!(h.cmds.contains(&crate::app::Cmd::OpenUrl("https://open-meteo.com/".into())));}
+        if x==394.0 {assert!(h.app.settings_open);}
+    }
+}
+
+#[test]
 fn weather_week_shows_all_seven_days(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,
@@ -23,7 +54,7 @@ fn weather_week_shows_all_seven_days(){
 fn weather_today_opens_solar_details_and_returns_to_forecast(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.weather.snapshot=Some(crate::weather::Snapshot{place:"杭州".into(),temp:19.0,sunrise:Some("06:52".into()),sunset:Some("17:21".into()),sun_times:None,..Default::default()});
-    h.app.show_page(8);h.hover(H::local(250.0,65.0),1.0);h.click(H::local(100.0,75.0));
+    h.app.show_page(8);h.hover(H::local(250.0,65.0),1.0);h.click(H::local(100.0,75.0));h.hover(H::local(100.0,75.0),0.3);
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains("返回天气"))),"点击当天区域后应进入日出日落视图");
     for phrase in ["日出","日落","06:52","17:21","日照进度待更新"] {
         assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"旧缓存日照视图缺少 {phrase}");
@@ -31,7 +62,8 @@ fn weather_today_opens_solar_details_and_returns_to_forecast(){
     assert!(!h.app.weather.loading,"浏览日照视图不应额外发起网络请求");
     h.click(H::local(80.0,44.0));
     assert!(!h.app.weather.solar_open);
-    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="日出日落 ›")));
+    h.hover(H::local(80.0,44.0),0.3);
+    assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="轻点切换日照")));
 }
 
 #[test]
@@ -93,6 +125,7 @@ fn weather_foundation_preview(){
         ("weather-sun-cream",Dock::Top,true,"14:08:00",Skin::Cream),
         ("weather-week-glass",Dock::Top,false,"14:08:00",Skin::GlassDark),
         ("weather-sun-glass",Dock::Top,true,"14:08:00",Skin::GlassDark),
+        ("weather-motion",Dock::Top,false,"14:08:00",Skin::Classic),
     ] {
         let mut h=H::new();h.app.settings.dock=dock;h.app.settings.skin=skin;h.app.settings.pet=false;
         let mut snapshot=crate::weather::parse("杭州",&serde_json::json!({"timezone":"Asia/Shanghai",
@@ -105,15 +138,21 @@ fn weather_foundation_preview(){
         if dock==Dock::Top {h.app.weather.solar_open=solar;h.app.show_page(8);}
         let (w,hgt)=if dock==Dock::Top {(crate::app::CANVAS_W,WIN_H)}else{(crate::side_dock::SIDE_W,crate::side_dock::SIDE_H)};
         let mut raster=feature_raster_sized(w,hgt);
-        for frame in 0..90 {
+        let motion=name=="weather-motion";
+        let frames=if motion{150}else{90};
+        for frame in 0..frames {
             h.t+=1.0/60.0;
-            let cursor=Some(if dock==Dock::Top{H::local(180.0,185.0)}else{Pos2::new(250.0,580.0)});
+            let cursor=Some(if motion{H::local(270.0,82.0)}else if dock==Dock::Top{H::local(180.0,185.0)}else{Pos2::new(250.0,580.0)});
             let env=Env{t:h.t,clock:clock.into(),today:"2026-11-11".into(),date:"11月11日 周三".into(),cursor,battery:Some(76),bt_ready:true,..Default::default()};
+            let mut events=vec![egui::Event::PointerMoved(cursor.unwrap())];
+            if motion && [45,46,105,106].contains(&frame) {
+                events.push(egui::Event::PointerButton{pos:cursor.unwrap(),button:egui::PointerButton::Primary,pressed:frame==45||frame==105,modifiers:Default::default()});
+            }
             let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt))),time:Some(h.t),focused:true,
-                events:vec![egui::Event::PointerMoved(cursor.unwrap())],viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+                events,viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
             let output=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(if dock==Dock::Top{WIN_W}else{w},hgt)),&env);});});
             raster.update_textures(&output.textures_delta);
-            if frame==89 {
+            if frame==frames-1 || motion && frame%2==0 {
                 raster.buf.fill([0.20,0.24,0.32,1.0]);raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
                 let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
                 let image=image::RgbaImage::from_raw((w*2.0)as u32,(hgt*2.0)as u32,rgba).unwrap();
@@ -121,7 +160,8 @@ fn weather_foundation_preview(){
                     let rect=h.app.island_rect(Rect::from_min_size(Pos2::ZERO,Vec2::new(w,hgt)),h.app.w.pos,h.app.h.pos);
                     (if dock==Dock::Left{0}else{880},((rect.top()-12.0)*2.0)as u32,120,((rect.height()+24.0)*2.0)as u32)
                 };
-                image::imageops::crop_imm(&image,x,y,crop_w,crop_h).to_image().save(dest.join(format!("{name}.png"))).unwrap();
+                let file=if motion{format!("motion-{:03}.png",frame/2)}else{format!("{name}.png")};
+                image::imageops::crop_imm(&image,x,y,crop_w,crop_h).to_image().save(dest.join(file)).unwrap();
             }
             raster.free_textures(&output.textures_delta);
         }
@@ -7059,7 +7099,7 @@ fn weather_page_shows_the_local_snapshot_and_forecast(){
         ],at:chrono::Utc::now().timestamp()});
     h.app.show_page(8);h.hover(H::local(300.0,60.0),1.0);
     assert_eq!(h.app.page,8,"天气应是第九个页面");
-    for phrase in ["9°","毛毛雨","杭州","今天","明天","周三","周四","60%","体感 6°","湿度 58%","日出日落 ›"]{
+    for phrase in ["9°","毛毛雨","杭州","今天","明天","周三","周四","60%","体感 6°","湿度 58%","轻点切换日照"]{
         assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"天气页缺少：{phrase}");
     }
     for s in &h.shapes{if let egui::Shape::Text(t)=&s.shape{assert!(s.clip_rect.contains_rect(t.visual_bounding_rect()),"天气页文字被裁切：{}",t.galley.text());}}
