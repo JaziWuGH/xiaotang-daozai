@@ -65,6 +65,8 @@ pub fn describe(code: u8) -> &'static str {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Day {
     pub label: String,
+    #[serde(default)]
+    pub date: String,
     pub high: f32,
     pub low: f32,
     pub code: u8,
@@ -223,6 +225,7 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
         let pick = |list: Option<&Vec<Value>>| list.and_then(|items| items.get(index)).and_then(Value::as_f64);
         days.push(Day {
             label: day_label(index, date),
+            date: date.to_string(),
             high: pick(highs).unwrap_or_default() as f32,
             low: pick(lows).unwrap_or_default() as f32,
             code: codes.and_then(|items| items.get(index)).and_then(Value::as_u64).unwrap_or(2) as u8,
@@ -267,6 +270,7 @@ pub struct State {
     pub last_start: f64,
     /// 城市输入草稿，确认后才写入设置并发起查询。
     pub city_input: String,
+    pub manual_city: bool,
     pub solar_open: bool,
     /// 上一次请求使用的城市。
     last_city: Option<String>,
@@ -276,7 +280,7 @@ pub struct State {
 
 impl State {
     pub fn load(city: &str) -> Self {
-        let mut state=Self {city_input:city.to_string(),..Default::default()};
+        let mut state=Self {city_input:city.to_string(),manual_city:!city.trim().is_empty(),..Default::default()};
         if cfg!(test) { return state; }
         let path = crate::model::config_dir().join("weather.json");
         state.snapshot=std::fs::read(&path).ok().and_then(|raw|serde_json::from_slice::<Snapshot>(&raw).ok());
@@ -286,6 +290,10 @@ impl State {
 
     /// 设置里的城市是否和上次请求不一致（首次启动也算）。
     pub fn city_changed(&self, city: &str) -> bool { self.last_city.as_deref() != Some(city.trim()) }
+
+    pub fn draft_city(&self) -> Option<&str> {
+        if !self.manual_city {Some("")}else{let city=self.city_input.trim();(!city.is_empty()).then_some(city)}
+    }
 
     pub fn can_refresh(&self, city: &str, t: f64) -> bool {
         !self.loading && (self.city_changed(city) || t-self.last_start>=if self.error.is_some(){120.0}else{30.0})
@@ -350,6 +358,18 @@ impl State {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn weather_location_mode_keeps_blank_manual_input_separate_from_auto(){
+        let mut state=State::load("杭州");
+        assert!(state.manual_city);assert_eq!(state.draft_city(),Some("杭州"));
+        state.city_input="  ".into();assert_eq!(state.draft_city(),None);
+        state.manual_city=false;assert_eq!(state.draft_city(),Some(""));
+        let mut old=serde_json::to_value(parse("杭州",&sample()).unwrap()).unwrap();
+        for day in old["days"].as_array_mut().unwrap(){day.as_object_mut().unwrap().remove("date");}
+        let cached:Snapshot=serde_json::from_value(old).unwrap();
+        assert!(cached.days.iter().all(|day|day.date.is_empty()),"旧缓存缺少日期时不能猜测日期");
+    }
 
     #[test]
     fn weather_manual_refresh_respects_success_and_failure_cooldowns(){
