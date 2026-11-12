@@ -18,7 +18,7 @@ struct Shell {
     #[cfg(windows)]
     frame_at: Instant,
     media: smtc::Shared,
-    seek_rx: Option<(bool,std::sync::mpsc::Receiver<bool>)>,
+    seek_rx: Option<(&'static str,std::sync::mpsc::Receiver<bool>)>,
     media_control:Option<smtc::ControlWorker>,
     music_volume_rx:Option<(String,std::sync::mpsc::Receiver<bool>)>,
     _resource_monitor:Option<daozai::resources::Monitor>,
@@ -498,9 +498,9 @@ impl eframe::App for Shell {
                 }
             }
         }
-        if let Some((netease,rx))=&self.seek_rx {
+        if let Some((message,rx))=&self.seek_rx {
             if let Some(success)=match rx.try_recv(){Ok(success)=>Some(success),Err(std::sync::mpsc::TryRecvError::Disconnected)=>Some(false),Err(_)=>None}{
-                let message=if *netease{"网易云暂未适配进度跳转，请在客户端调整"}else{"播放器未完成跳转，请打开客户端后重试"};
+                let message=*message;
                 self.seek_rx=None;
                 if !success{self.app.say(message);}
             }
@@ -570,10 +570,13 @@ impl eframe::App for Shell {
                 Cmd::Media(t) => {
                     self.media_fast_until=Some(Instant::now()+Duration::from_secs(3));self.media_enabled.set_interval(smtc::POLL_FAST);
                     let source=self.media.lock().map(|media|media.source.clone()).unwrap_or_default();
-                    let netease=source.eq_ignore_ascii_case("cloudmusic.exe");
+                    let message=if source.eq_ignore_ascii_case("cloudmusic.exe"){"网易云暂未适配进度跳转，请在客户端调整"}
+                        else if source.eq_ignore_ascii_case("bodian_pc.exe"){"波点音乐暂未适配进度跳转，请在客户端调整"}
+                        else if source.eq_ignore_ascii_case("kwmusic.exe"){"酷我音乐暂未适配进度跳转，请在客户端调整"}
+                        else{"播放器未完成跳转，请打开客户端后重试"};
                     if self.media_control.is_none(){self.media_control=smtc::ControlWorker::start(ctx.clone());}
                     match self.media_control.as_ref().ok_or(()).and_then(|worker|worker.submit(t,source)){
-                        Ok(Some(rx))=>self.seek_rx=Some((netease,rx)),Ok(None)=>{},Err(())=>self.app.say("播放器正在响应，请稍后重试"),
+                        Ok(Some(rx))=>self.seek_rx=Some((message,rx)),Ok(None)=>{},Err(())=>self.app.say("播放器正在响应，请稍后重试"),
                     }
                 }
                 Cmd::MusicVolume(command,source)=>{

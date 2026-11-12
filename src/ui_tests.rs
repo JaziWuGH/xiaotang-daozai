@@ -3765,9 +3765,9 @@ fn fluid_music_seek_draws_solid_played_segment(){
 #[test]
 fn music_seek_drag_previews_and_commits_on_release(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for lyrics in [false,true] {
+    for (source,lyrics) in [("",false),("",true),("cloudmusic.exe",false),("cloudmusic.exe",true),("bodian_pc.exe",false),("bodian_pc.exe",true),("kwmusic.exe",false),("kwmusic.exe",true)] {
         let mut h=H::new();h.app.show_lyrics=lyrics;
-        h.media=crate::smtc::NowPlaying{title:"Track".into(),artist:"Artist".into(),position:12.0,duration:120.0,..Default::default()};
+        h.media=crate::smtc::NowPlaying{source:source.into(),title:"Track".into(),artist:"Artist".into(),position:12.0,duration:120.0,..Default::default()};
         h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
         let (x,w,y)=if lyrics{(44.0,176.0,82.0)}else{(96.0,221.0,92.6)};
         let press=H::local(x+w*0.1,y);h.cursor=Some(press);

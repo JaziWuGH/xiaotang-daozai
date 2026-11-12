@@ -111,7 +111,7 @@ impl Playback {
 }
 
 #[derive(Default)]
-struct CoverCache {
+pub(super) struct CoverCache {
     url:String,image:Option<Arc<eframe::egui::ColorImage>>,
     pending:Option<mpsc::Receiver<Option<Arc<eframe::egui::ColorImage>>>>,
     retry_at:Option<Instant>,
@@ -121,7 +121,7 @@ impl CoverCache {
     fn get(&mut self,url:&str)->Option<Arc<eframe::egui::ColorImage>>{
         self.get_with(url,fetch_cover)
     }
-    fn get_with(&mut self,url:&str,load:impl FnOnce(&str)->Option<Arc<eframe::egui::ColorImage>>+Send+'static)->Option<Arc<eframe::egui::ColorImage>>{
+    pub(super) fn get_with(&mut self,url:&str,load:impl FnOnce(&str)->Option<Arc<eframe::egui::ColorImage>>+Send+'static)->Option<Arc<eframe::egui::ColorImage>>{
         // 切歌时丢弃旧请求的接收端，迟到的封面不能覆盖新歌。
         if self.url!=url{*self=Self{url:url.into(),worker:self.worker.take(),..Default::default()};}
         if self.url.is_empty(){return None;}

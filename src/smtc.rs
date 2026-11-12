@@ -1,12 +1,20 @@
 //! 系统媒体会话（SMTC）读取：Windows 10/11 的“正在播放”。
 //! 与原工具使用同一套 API（GlobalSystemMediaTransportControlsSessionManager）。
 
+#[path="apple_music.rs"]
+mod apple_music;
 #[cfg(windows)]
 #[path="netease_timeline.rs"]
 mod netease_timeline;
 #[cfg(windows)]
 #[path="netease_playback.rs"]
 mod netease_playback;
+#[cfg(windows)]
+#[path="bodian.rs"]
+pub(crate) mod bodian;
+#[cfg(windows)]
+#[path="kuwo.rs"]
+pub(crate) mod kuwo;
 #[cfg(windows)]
 #[path="kugou_metadata.rs"]
 mod kugou_metadata;
@@ -61,7 +69,7 @@ impl NowPlaying {
             return MediaKind::Video;
         }
         let source=self.source.to_lowercase();
-        if matches!(source.as_str(),"kugou"|"kugou.exe"|"qqmusic"|"qqmusic.exe"|"cloudmusic.exe"|"汽水音乐"|"sodamusic.exe"|"spotify"|"spotify.exe"|"kwmusic.exe") && self.playback_type==MediaKind::Music{return MediaKind::Music;}
+        if (matches!(source.as_str(),"kugou"|"kugou.exe"|"qqmusic"|"qqmusic.exe"|"cloudmusic.exe"|"汽水音乐"|"sodamusic.exe"|"spotify"|"spotify.exe"|"kwmusic.exe"|"bodian_pc.exe") || apple_music::is_source(&source)) && self.playback_type==MediaKind::Music{return MediaKind::Music;}
         if ["chrome","msedge","firefox","brave","opera"].iter().any(|name|source.contains(name)) {
             let album=self.album.trim().to_lowercase();
             if ["youtube","bilibili","抖音","哔哩哔哩"].contains(&album.as_str()){return MediaKind::Video;}
@@ -235,7 +243,7 @@ pub fn shared() -> Shared {
 
 fn choose_media(system:Option<NowPlaying>,native:Option<NowPlaying>)->Option<NowPlaying>{
     if let (Some(system),Some(native))=(&system,&native){
-        if system.source.eq_ignore_ascii_case("cloudmusic.exe"){
+        if system.source.eq_ignore_ascii_case("cloudmusic.exe") && native.source.eq_ignore_ascii_case("cloudmusic.exe"){
             // SMTC 与网易云日志的歌手分隔符、合唱署名写法不同；按规范化后的歌名与歌手集合判断，避免同一首歌丢失 song_id。
             let same=crate::lyrics::same_song(&system.title,&system.artist,&native.title,&native.artist);
             let newer=match (native.event_time_ms,system.event_time_ms){(Some(n),Some(s))=>Some(n>s),_=>None};
@@ -374,7 +382,10 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
             position=current;sampled_at=Some(std::time::Instant::now());has_position=true;
         }
     }
-    let album=media_text(props.AlbumTitle())?;
+    let mut album=media_text(props.AlbumTitle())?;
+    if apple_music::is_source(&source){
+        (artist,album)=apple_music::metadata(artist,album);
+    }
     if !has_position{sampled_at=None;}
     let playback_type=match playback_type.map(|kind|kind.0){Some(1)=>MediaKind::Music,Some(2)=>MediaKind::Video,_=>MediaKind::Unknown};
     Some(NowPlaying { title, artist, album, source, song_id:None, playing, position, sampled_at, event_time_ms, duration, artwork:None, playback_type, volume:None })
@@ -441,6 +452,8 @@ pub fn control(cmd: Transport,source:&str) {
     if let Transport::SetVolume(percent)=cmd {crate::music_volume::set_volume(source,percent);return;}
     if let Transport::SetMute(muted)=cmd {crate::music_volume::set_mute(source,muted);return;}
     if let Transport::Seek(seconds)=cmd {let _=seek(seconds,source);return;}
+    if source.eq_ignore_ascii_case("bodian_pc.exe"){let _=bodian::control(cmd);return;}
+    if source.eq_ignore_ascii_case("kwmusic.exe"){let _=kuwo::control(cmd);return;}
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
     let _apartment=init_winrt();
     let session=media_result(GlobalSystemMediaTransportControlsSessionManager::RequestAsync)
@@ -467,11 +480,13 @@ pub fn seek(seconds:f64,source:&str)->bool {
     if !seconds.is_finite() || seconds<0.0{return false;}
     static LOCK:Mutex<()>=Mutex::new(());
     let Ok(_lock)=LOCK.lock()else{return false;};
+    if source.eq_ignore_ascii_case("kwmusic.exe"){return kuwo::seek(seconds);}
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") && kugou_control::seek(seconds){return true;}
     let _apartment=init_winrt();
     use windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager as Manager;
     let session=media_result(Manager::RequestAsync).and_then(|mgr|mgr.GetSessions().ok())
         .and_then(|sessions|sessions.into_iter().find(|s|s.SourceAppUserModelId().ok().is_some_and(|id|id.to_string().eq_ignore_ascii_case(source))));
+    if apple_music::is_source(source){return session.as_ref().is_some_and(|session|seek_apple(session,source,seconds));}
     let native=source.eq_ignore_ascii_case("qqmusic.exe");
     let timeline=||->Option<(f64,f64)>{
         let tl=session.as_ref()?.GetTimelineProperties().ok()?;
@@ -509,6 +524,51 @@ pub fn seek(seconds:f64,source:&str)->bool {
         }
     }
     false
+}
+
+#[cfg(windows)]
+fn seek_apple(session:&windows::Media::Control::GlobalSystemMediaTransportControlsSession,source:&str,seconds:f64)->bool{
+    use windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status;
+    let status=||session.GetPlaybackInfo().ok()?.PlaybackStatus().ok();
+    let Some(before)=status()else{return false;};let paused=before!=Status::Playing;
+    let Some(duration)=session.GetTimelineProperties().ok().and_then(|tl|tl.EndTime().ok()).map(|time|time.Duration as f64/10_000_000.0)else{return false;};
+    if duration<=0.0{return false;}let target=seconds.min(duration);
+    let wait=|timeout:Duration,ready:&dyn Fn()->bool|{
+        let start=std::time::Instant::now();
+        loop{if ready(){return true;}if start.elapsed()>=timeout{return false;}std::thread::sleep(Duration::from_millis(100));}
+    };
+    let success=(||{
+        // Apple Music 暂停时忽略滑块设置；跳转完成后恢复原来的暂停状态。
+        if paused && (media_result(||session.TryPlayAsync())!=Some(true) || !wait(Duration::from_secs(2),&||status()==Some(Status::Playing))){return false;}
+        for attempt in 0..2 {
+            if !player_seek::seek(source,target,duration){return false;}
+            let start=std::time::Instant::now();
+            let timeout=if attempt==0{Duration::from_millis(500)}else{Duration::from_secs(2)};
+            if wait(timeout,&||session.GetTimelineProperties().ok().is_some_and(|tl|{
+                tl.EndTime().ok().is_some_and(|total|(total.Duration as f64/10_000_000.0-duration).abs()<1.5)
+                    && tl.Position().ok().is_some_and(|position|seek_arrived(position.Duration as f64/10_000_000.0,target,start.elapsed().as_secs_f64()))
+            })){return true;}
+        }
+        false
+    })();
+    if paused {
+        let mut accepted=media_result(||session.TryPauseAsync())==Some(true);
+        let start=std::time::Instant::now();let mut paused_at=None;let mut seen_pause=false;let mut retried=false;
+        // 原生滑块可能稍后再次续播，连续确认暂停后才结束；只补发一次暂停。
+        while start.elapsed()<Duration::from_secs(3){
+            let current=status();
+            if current==Some(Status::Paused){
+                seen_pause=true;let since=paused_at.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed()>=Duration::from_millis(500){return success && accepted;}
+            }else{
+                paused_at=None;
+                if current==Some(Status::Playing) && seen_pause && !retried{accepted&=media_result(||session.TryPauseAsync())==Some(true);retried=true;}
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        return false;
+    }
+    success
 }
 
 #[cfg(not(windows))]
@@ -702,17 +762,21 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
         let mut volume=crate::music_volume::Reader::default();
         #[cfg(windows)]
         let mut netease=netease_playback::Reader::default();
+        #[cfg(windows)]
+        let mut bodian=bodian::Reader::default();
+        #[cfg(windows)]
+        let mut kuwo=kuwo::Reader::default();
         loop {
             if stopped.load(std::sync::atomic::Ordering::Acquire) || Arc::strong_count(&state)==1{break;}
             if !active.load(std::sync::atomic::Ordering::Relaxed){
                 artwork.clear(false);playback_clock=PlaybackClock::default();memory=MediaMemory::default();selected_source.clear();
-                #[cfg(windows)] {netease=netease_playback::Reader::default();}
+                #[cfg(windows)] {netease=netease_playback::Reader::default();bodian=bodian::Reader::default();kuwo=kuwo::Reader::default();}
                 if let Ok(mut current)=state.lock(){if !current.title.is_empty(){*current=NowPlaying::default();ctx.request_repaint();}}
                 std::thread::park_timeout(Duration::from_millis(250));continue;
             }
             let system=query(&mut artwork);
             #[cfg(windows)]
-            let native=netease.poll();
+            let native=netease.poll().into_iter().chain(bodian.poll()).chain(kuwo.poll()).min_by_key(media_rank);
             #[cfg(windows)]
             let native_pending=netease.pending();
             #[cfg(not(windows))]
@@ -1011,6 +1075,16 @@ mod tests {
         assert!(choose_media(None,None).is_none(),"播放器全部退出后不能残留歌曲");
     }
 
+    #[test]
+    fn bodian_native_metadata_is_not_merged_into_a_netease_session(){
+        let system=NowPlaying{source:"cloudmusic.exe".into(),title:"同名歌曲".into(),artist:"歌手".into(),playing:true,..Default::default()};
+        let native=NowPlaying{source:"bodian_pc.exe".into(),song_id:Some(123),duration:240.0,..system.clone()};
+        let chosen=choose_media(Some(system.clone()),Some(native.clone())).unwrap();
+        assert_eq!(chosen.source,"cloudmusic.exe");assert_eq!(chosen.song_id,None);assert_eq!(chosen.duration,0.0);
+        let mut paused=system;paused.playing=false;
+        assert_eq!(choose_media(Some(paused),Some(native)).unwrap().source,"bodian_pc.exe");
+    }
+
     fn cover_bytes(color:eframe::egui::Color32)->Vec<u8> {
         let image=image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(2,2,image::Rgba(color.to_array())));
         let mut bytes=std::io::Cursor::new(Vec::new());
@@ -1020,7 +1094,7 @@ mod tests {
 
     #[test]
     fn known_music_clients_accept_missing_artist_but_not_video(){
-        for source in ["kugou","QQMusic.exe","cloudmusic.exe","汽水音乐","SodaMusic.exe","Spotify.exe","kwmusic.exe"] {
+        for source in ["kugou","QQMusic.exe","cloudmusic.exe","汽水音乐","SodaMusic.exe","Spotify.exe","kwmusic.exe","bodian_pc.exe","AppleMusic.exe","AppleInc.AppleMusicWin_nzyj5cx40ttqa!App"] {
             let mut media=NowPlaying{source:source.into(),title:"歌曲".into(),playback_type:MediaKind::Music,..Default::default()};
             assert!(media.is_music(),"{source} 缺少歌手时仍应显示歌曲");
             media.playback_type=MediaKind::Video;assert!(!media.is_music());

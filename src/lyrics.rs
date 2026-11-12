@@ -203,6 +203,16 @@ pub fn fetch_for_display_with(source:&str,track:&str,artist:&str,duration:f64,so
             trace(||"酷狗本地:无".into());
             return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
         }
+        #[cfg(windows)]
+        if source.eq_ignore_ascii_case("bodian_pc.exe") {
+            if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok((lyrics,false));}
+            return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
+        }
+        #[cfg(windows)]
+        if source.eq_ignore_ascii_case("kwmusic.exe") {
+            if let Some(lyrics)=crate::smtc::kuwo::read_lyrics(track,artist){trace(||"酷我本地:命中".into());return Ok((lyrics,false));}
+            return cached.map(Ok).unwrap_or_else(||fetch(track,artist,duration)).map(|lyrics|(lyrics,true));
+        }
         fetch_for_source(source,track,artist,duration,song_id).map(|lyrics|(lyrics,false))
     })();
     let summary=outcome(&result.as_ref().map(|(lyrics,_)|lyrics.clone()).map_err(Clone::clone));
@@ -217,6 +227,14 @@ pub fn fetch_for_display_with(source:&str,track:&str,artist:&str,duration:f64,so
 
 /// 原生缓存优先；未缓存的新歌仍可使用已有在线来源。
 pub fn fetch_for_source(source:&str,track:&str,artist:&str,duration:f64,song_id:Option<u64>)->Result<Lyrics,FetchError> {
+    #[cfg(windows)]
+    if source.eq_ignore_ascii_case("kwmusic.exe") {
+        if let Some(lyrics)=crate::smtc::kuwo::read_lyrics(track,artist){trace(||"酷我本地:命中".into());return Ok(lyrics);}
+    }
+    #[cfg(windows)]
+    if source.eq_ignore_ascii_case("bodian_pc.exe") {
+        if let Some(lyrics)=song_id.and_then(crate::smtc::bodian::read_lyrics){trace(||"波点本地:命中".into());return Ok(lyrics);}
+    }
     if source.to_ascii_lowercase().contains("qqmusic") {
         let common=cache_path(track,artist,duration);
         let path=common.parent().unwrap().join("qqmusic").join(common.file_name().unwrap());
