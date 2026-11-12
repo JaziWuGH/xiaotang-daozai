@@ -1,5 +1,7 @@
 //! 无窗口交互测试：直接向 egui 注入输入事件，验证悬停展开、切页、按钮。
 use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
+#[path="doubao_ui_tests.rs"]
+mod doubao;
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
