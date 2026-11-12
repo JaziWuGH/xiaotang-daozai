@@ -1,4 +1,4 @@
-//! Kiro 额度：只读登录缓存与 GetUsageLimits，不回写、不续期。
+//! Kiro 额度：只读登录缓存与 GetUsageLimits，不回写、不续期；令牌是否失效以服务端 401/403 为准（本地 expiresAt 只是客户端的续期计划时间）。
 use super::{Account, Amount, Config, Provider, Snapshot, Window};
 use serde_json::{json, Value};
 use std::{io::Read, path::{Path, PathBuf}, sync::mpsc};
@@ -32,9 +32,6 @@ fn login(root:&Value)->Result<Login,String>{
     }
     Ok(Login{access_token:token,profile_arn,region})
 }
-fn expired(root:&Value)->bool{
-    root["expiresAt"].as_str().and_then(|s|chrono::DateTime::parse_from_rfc3339(s).ok()).is_some_and(|d|d.timestamp()<=chrono::Utc::now().timestamp())
-}
 fn body(profile_arn:Option<&str>)->Value{
     match profile_arn.filter(|arn|!arn.trim().is_empty()){Some(arn)=>json!({"profileArn":arn}),None=>json!({})}
 }
@@ -57,7 +54,6 @@ pub struct Details {pub owner:String,pub pools:Vec<Pool>}
 
 pub(crate) fn add(config:&mut Config,path:&Path,alias:&str)->Result<(),String>{
     let root=super::login_json(path)?;login(&root)?;
-    if expired(&root){return Err("Kiro 登录已过期，请打开 Kiro 重新登录".into());}
     let path=std::fs::canonicalize(path).map_err(|_|"无法读取 Kiro 登录文件")?;
     if config.accounts.iter().any(|a|a.provider==Provider::Kiro&&a.source==path){return Err("这个 Kiro 登录文件已经添加，请使用重新连接".into());}
     let next=config.accounts.iter().filter(|a|a.provider==Provider::Kiro).count()+1;
@@ -69,7 +65,7 @@ pub(crate) fn add(config:&mut Config,path:&Path,alias:&str)->Result<(),String>{
 }
 fn response_error(error:ureq::Error)->(String,u64){
     match error{
-        ureq::Error::Status(401|403,_) =>("Kiro 授权被拒绝，请在 Kiro 中重新登录后重试".into(),0),
+        ureq::Error::Status(401|403,_) =>("Kiro 登录已过期，请打开 Kiro 重新登录后刷新额度".into(),0),
         ureq::Error::Status(429,r) =>("Kiro 请求过于频繁，稍后自动重试".into(),r.header("Retry-After").and_then(|s|s.parse::<u64>().ok()).unwrap_or(180).clamp(30,3600)),
         ureq::Error::Status(code,_) =>(format!("Kiro 额度服务返回 {code}"),60),
         _ =>("无法连接 Kiro 额度服务，请检查网络或代理".into(),30),
@@ -91,7 +87,8 @@ fn query(agent:&ureq::Agent,path:&Path)->Result<Snapshot,(String,u64)>{
 }
 fn query_with(path:&Path,request:impl FnOnce(&Login)->Result<Snapshot,(String,u64)>)->Result<Snapshot,(String,u64)>{
     let root=super::login_json(path).map_err(|e|(e,0))?;let l=login(&root).map_err(|e|(e,0))?;
-    if expired(&root){return Err(("Kiro 登录已过期，请打开 Kiro 重新登录后刷新额度".into(),0));}
+    // expiresAt 只是 Kiro 客户端的续期计划时间，客户端懒续期，过了这个点令牌在服务端通常仍然有效；
+    // 直接带令牌请求，由服务端 401/403 判定失效。Kiro 续期后改写缓存文件，每次查询都重新读取，能自动恢复。
     let snapshot=request(&l)?;
     let current=super::login_json(path).and_then(|root|login(&root)).map_err(|e|(e,0))?;
     if current.access_token!=l.access_token||current.profile_arn!=l.profile_arn||current.region!=l.region{return Err(("Kiro 登录信息已变化，请重新刷新额度".into(),0));}
@@ -232,11 +229,6 @@ mod tests{
         assert_eq!(s.windows.len(),1);assert_eq!(s.windows[0].remaining,0.0);
         assert!(parse(&json!({"userInfo":{"userId":"test-user"},"usageBreakdownList":[]})).is_err());
         assert!(parse(&json!({})).is_err());
-    }
-    #[test]fn token_expiry_is_detected(){
-        assert!(expired(&json!({"accessToken":"a","expiresAt":"2001-01-01T00:00:00Z"})));
-        assert!(!expired(&json!({"accessToken":"a","expiresAt":"2099-01-01T00:00:00Z"})));
-        assert!(!expired(&json!({"accessToken":"a"})));
     }
     #[test]fn endpoint_follows_the_profile_region(){
         assert_eq!(endpoint("us-east-1").unwrap(),"https://codewhisperer.us-east-1.amazonaws.com/");
