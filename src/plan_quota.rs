@@ -99,7 +99,7 @@ fn millis(v: &Value) -> Option<i64> {
 }
 fn iso(v: &Value) -> Option<i64> { chrono::DateTime::parse_from_rfc3339(v.as_str()?).ok().map(|d| d.timestamp()) }
 fn window(label: &str, seconds: Option<i64>, remaining: f32, reset: Option<i64>) -> Window {
-    Window { label: label.into(), seconds, remaining, reset }
+    Window { label: label.into(), seconds, remaining, reset ,amount:None}
 }
 pub fn parse(provider: PlanProvider, v: &Value) -> Result<Snapshot, String> {
     let mut snapshot = Snapshot { at: chrono::Utc::now().timestamp(), ..Default::default() };

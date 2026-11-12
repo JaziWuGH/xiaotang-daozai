@@ -107,7 +107,7 @@ fn snapshot(kind:Kind,amounts:Vec<Amount>,expires_at:Option<i64>,windows:Vec<Win
     Snapshot { plan:kind.name().into(), relay:Some(Quota{source:kind.name().into(),amounts,expires_at}), windows, at:chrono::Utc::now().timestamp(), ..Default::default() }
 }
 fn window(label:&str,limit:f64,remaining:f64,seconds:Option<i64>,reset:Option<i64>)->Option<Window> {
-    (limit>0.0).then(||Window{label:label.into(),seconds,remaining:((remaining/limit).clamp(0.0,1.0)*100.0) as f32,reset})
+    (limit>0.0).then(||Window{label:label.into(),seconds,remaining:((remaining/limit).clamp(0.0,1.0)*100.0) as f32,reset,amount:None})
 }
 fn amount(label:&str,unit:&str,remaining:Option<f64>,limit:Option<f64>,used:Option<f64>,unlimited:bool,scope:Scope)->Amount {
     Amount{scope,label:label.into(),unit:unit.into(),remaining,limit,used,unlimited}
