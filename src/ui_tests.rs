@@ -8115,9 +8115,9 @@ fn quota_acceptance_period_colors_match_the_drawn_rings() {
     let outer=egui::Color32::from_rgb(255,43,132);let inner=crate::paint::mix(outer,egui::Color32::WHITE,0.16);
     for seconds in [[None,None],[Some(18000),Some(604800)]] {
         h.app.quota.rows.insert(id.into(),Ok(Snapshot{windows:vec![
-            Window{label:"当前周期".into(),seconds:seconds[0],remaining:62.0,reset:None},
-            Window{label:"本周".into(),seconds:seconds[1],remaining:35.0,reset:None},
-        ],extra:vec![Window{label:"工具".into(),seconds:None,remaining:80.0,reset:None}],..Default::default()}));
+            Window{label:"当前周期".into(),seconds:seconds[0],remaining:62.0,reset:None,amount:None},
+            Window{label:"本周".into(),seconds:seconds[1],remaining:35.0,reset:None,amount:None},
+        ],extra:vec![Window{label:"工具".into(),seconds:None,remaining:80.0,reset:None,amount:None}],..Default::default()}));
         let output=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(400.0,200.0))),..Default::default()},|ctx|{
             egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
                 let c=crate::paint::Card::new(ui,Pos2::ZERO,ui.max_rect());h.app.page_quota(&c);
