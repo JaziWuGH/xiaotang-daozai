@@ -159,11 +159,23 @@ fn weather_side_bar_shows_a_clickable_temperature_on_both_edges(){
 #[test]
 fn weather_solar_view_preserves_readable_times_across_skins_and_scales(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    use chrono::TimeZone;
+    let now=chrono_tz::Asia::Shanghai.with_ymd_and_hms(2026,10,28,9,41,0).single().unwrap().with_timezone(&chrono::Local);
     for skin in crate::model::Skin::ALL {for scale in [1.0,1.25,1.5] {
         let mut h=H::new();h.app.settings.skin=skin;h.ctx.set_pixels_per_point(scale);
         h.app.weather.snapshot=Some(crate::weather::parse("杭州",&serde_json::json!({"timezone":"Asia/Shanghai","current":{"temperature_2m":19},
             "daily":{"time":["2026-10-28"],"sunrise":["2026-10-28T06:52"],"sunset":["2026-10-28T17:21"]}})).unwrap());
-        h.app.weather.solar_open=true;h.app.show_page(8);h.hover(H::local(180.0,185.0),1.0);
+        h.app.weather.solar_open=true;h.app.show_page(8);
+        for _ in 0..60 {
+            h.t+=1.0/60.0;
+            let cursor=H::local(180.0,185.0);
+            let env=Env{t:h.t,clock:now.format("%H:%M:%S").to_string(),today:now.format("%Y-%m-%d").to_string(),date:now.format("%m月%d日").to_string(),cursor:Some(cursor),bt_ready:true,..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(crate::app::CANVAS_W,WIN_H))),time:Some(h.t),focused:true,
+                events:vec![egui::Event::PointerMoved(cursor)],..Default::default()};
+            h.shapes=h.ctx.run(raw,|ctx|{egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
+                h.app.frame(ui,Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H)),&env);
+            });}).shapes;
+        }
         for phrase in ["返回天气","距离日落","07:40","白昼中点","12:06","06:52","17:21","白昼 10小时29分"] {
             assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text().contains(phrase))),"{skin:?} / {scale} 日照视图缺少 {phrase}");
         }
