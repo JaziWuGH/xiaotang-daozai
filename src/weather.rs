@@ -9,6 +9,12 @@ use std::time::Duration;
 
 /// 自动刷新的间隔（秒）：Open-Meteo 的实况本身每 15 分钟更新一次。
 pub const INTERVAL: i64 = 900;
+/// 自动定位结果的复用时长（秒）。
+const LOCATE_TTL: i64 = 3 * 3600;
+/// 最多保存的城市数（不含自动定位）。
+pub const MAX_CITIES: usize = 5;
+/// 多城市缓存的条数上限：自动定位 + 已保存城市，再留一条余量给刚删除的城市。
+const CACHE_LIMIT: usize = MAX_CITIES + 2;
 pub const FORECAST_DAYS: usize = 7;
 
 /// 天气现象；决定画太阳、云、雨还是雪。
@@ -27,7 +33,7 @@ pub fn kind(code: u8, day: bool) -> Kind {
         71 | 73 | 75 | 77 => Kind::Snow,
         80 | 81 | 82 => Kind::Shower,
         85 | 86 => Kind::Snow,
-        95 | 96 | 99 => Kind::Thunder,
+        95 | 96 | 97 | 99 => Kind::Thunder,
         _ => Kind::Cloud,
     }
 }
@@ -41,8 +47,8 @@ pub fn describe(code: u8) -> &'static str {
         3 => "阴",
         45 | 48 => "雾",
         51 => "毛毛雨",
-        53 => "小雨",
-        55 => "细雨",
+        53 => "毛毛雨",
+        55 => "强毛毛雨",
         56 | 57 | 66 | 67 => "冻雨",
         61 => "小雨",
         63 => "中雨",
@@ -57,6 +63,7 @@ pub fn describe(code: u8) -> &'static str {
         85 => "阵雪",
         86 => "强阵雪",
         95 => "雷阵雨",
+        97 => "强雷阵雨",
         96 | 99 => "雷暴伴冰雹",
         _ => "多云",
     }
@@ -115,6 +122,11 @@ fn parse_sun_times(value:&Value)->Option<SunTimes> {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub place: String,
+    #[serde(default)]
+    pub position: Option<Position>,
+    /// 来自自动定位；多城市缓存据此区分「自动定位」与同名的指定城市。
+    #[serde(default)]
+    pub auto: bool,
     pub temp: f32,
     pub feels: Option<f32>,
     pub humidity: Option<u32>,
@@ -135,8 +147,19 @@ pub struct Snapshot {
     pub at: i64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct Position { pub lat: f64, pub lon: f64, pub label: String }
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Position {
+    pub lat: f64, pub lon: f64, pub label: String,
+    #[serde(default)]
+    pub region: String,
+}
+
+impl Position {
+    pub fn valid(&self) -> bool {
+        !self.label.trim().is_empty() && self.lat.is_finite() && self.lon.is_finite()
+            && (-90.0..=90.0).contains(&self.lat) && (-180.0..=180.0).contains(&self.lon)
+    }
+}
 
 fn json(response: ureq::Response) -> Result<Value, String> {
     serde_json::from_reader(response.into_reader().take(1024 * 1024)).map_err(|_| "天气响应格式无效".to_string())
@@ -167,25 +190,139 @@ pub fn locate(agent: &ureq::Agent) -> Result<Position, String> {
         .or_else(|| value["region"].as_str().filter(|s| !s.trim().is_empty()))
         .or_else(|| value["country"].as_str().filter(|s| !s.trim().is_empty()))
         .unwrap_or("当地").trim().to_string();
-    Ok(Position { lat, lon, label })
+    let region=value["region"].as_str().unwrap_or_default().to_string();
+    let position=Position { lat, lon, label, region };
+    if !position.valid() {return Err("定位结果坐标无效".into());}
+    Ok(position)
 }
 
-/// 城市名 → 坐标（Open-Meteo 的地理编码，支持中英文）。
+/// 中文行政区后缀：输入「广州市」时还要查「广州」，地理库里很多城市只收录了不带后缀的名字。
+const ADMIN_SUFFIXES: [char; 4] = ['市', '县', '区', '省'];
+
+fn is_cjk(name: &str) -> bool { name.chars().all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)) }
+
+/// 去掉行政区后缀后的基础名；去掉后不足两个字（如「津市」）时保留原名。
+fn base_name(name: &str) -> &str {
+    match name.strip_suffix(ADMIN_SUFFIXES) {
+        Some(base) if is_cjk(name) && base.chars().count() >= 2 => base,
+        _ => name,
+    }
+}
+
+/// 省级行政区 → 省会（首府）。地理库只收录城市，搜「新疆」「内蒙古」这类地区名查不到，
+/// 改为同时搜它的省会，用户能直接选到该地区的代表城市。
+const PROVINCE_CAPITALS: [(&str, &str); 34] = [
+    ("北京","北京"),("天津","天津"),("上海","上海"),("重庆","重庆"),("河北","石家庄"),("山西","太原"),
+    ("辽宁","沈阳"),("吉林","长春"),("黑龙江","哈尔滨"),("江苏","南京"),("浙江","杭州"),("安徽","合肥"),
+    ("福建","福州"),("江西","南昌"),("山东","济南"),("河南","郑州"),("湖北","武汉"),("湖南","长沙"),
+    ("广东","广州"),("海南","海口"),("四川","成都"),("贵州","贵阳"),("云南","昆明"),("陕西","西安"),
+    ("甘肃","兰州"),("青海","西宁"),("台湾","台北"),("内蒙古","呼和浩特"),("广西","南宁"),("西藏","拉萨"),
+    ("宁夏","银川"),("新疆","乌鲁木齐"),("香港","香港"),("澳门","澳门"),
+];
+
+/// 输入若是省级地区（含「新疆维吾尔自治区」「广东省」等全称），返回它的省会。
+fn province_capital(name: &str) -> Option<&'static str> {
+    let short=["维吾尔自治区","壮族自治区","回族自治区","自治区","特别行政区","省","市"].iter()
+        .find_map(|suffix|name.strip_suffix(suffix)).unwrap_or(name);
+    PROVINCE_CAPITALS.iter().find(|(province,_)|*province==short).map(|(_,capital)|*capital)
+}
+
+fn city_queries(name: &str) -> Vec<String> {
+    let mut queries=vec![name.to_string()];
+    if name.chars().count()<2 || !is_cjk(name) {return queries;}
+    if let Some(capital)=province_capital(name).filter(|capital|*capital!=base_name(name)) {
+        // 「新疆」→ 也查「乌鲁木齐」。直辖市本身就是城市，不额外查。
+        queries.push(capital.to_string());
+    }
+    let base=base_name(name);
+    if base!=name {
+        // 「广州市」→ 也查「广州」。
+        queries.push(base.to_string());
+    } else if !name.ends_with('州') {
+        // 两字简称只匹配同名乡镇时，也查完整市名，不能直接采用第一个同名地点。
+        queries.insert(0,format!("{name}市"));
+    }
+    queries
+}
+
+/// 地理库里的非居住地（机场、车站等）不作为天气地点。
+fn skip_feature(code: &str) -> bool {
+    ["AIR", "RSTN", "BUS", "PRT", "HTL", "SCH", "HSP"].iter().any(|prefix| code.starts_with(prefix))
+}
+
+fn city_candidates(value: &Value) -> Vec<(Position, u64)> {
+    value["results"].as_array().into_iter().flatten().filter_map(|item|{
+        if skip_feature(item["feature_code"].as_str().unwrap_or_default()) {return None;}
+        let label=item["name"].as_str()?.trim().to_string();
+        let mut areas=Vec::new();
+        for key in ["admin2","admin1","country"] {
+            if let Some(area)=item[key].as_str().filter(|s|!s.is_empty() && *s!=label) {
+                if !areas.contains(&area) {areas.push(area);}
+            }
+        }
+        let position=Position{lat:item["latitude"].as_f64()?,lon:item["longitude"].as_f64()?,label,region:areas.join(" · ")};
+        position.valid().then_some((position,item["population"].as_u64().unwrap_or(0)))
+    }).collect()
+}
+
+/// 排序：名字与输入（或去掉后缀的基础名）完全一致的排前面，其次按人口从多到少；
+/// 坐标几乎重合的同名地点只留一个。
+fn rank_cities(name: &str, mut found: Vec<(Position, u64)>) -> Vec<Position> {
+    let base=base_name(name);
+    let exact=|p:&Position|p.label==name || p.label==base || base_name(&p.label)==base;
+    found.sort_by(|(a,pa),(b,pb)|exact(b).cmp(&exact(a)).then(pb.cmp(pa)));
+    let mut ranked:Vec<Position>=Vec::new();
+    for (position,_) in found {
+        let duplicate=ranked.iter().any(|p|p.label==position.label && (p.lat-position.lat).abs()<0.05 && (p.lon-position.lon).abs()<0.05);
+        if !duplicate {ranked.push(position);}
+    }
+    ranked
+}
+
+/// 搜索多个同名地点，保留行政区供用户确认。
+pub fn search_cities(agent: &ureq::Agent, name: &str) -> Result<Vec<Position>, String> {
+    let name=name.trim();
+    let mut found=Vec::new();
+    let mut error=None;
+    for query in city_queries(name) {
+        let mut url=url::Url::parse("https://geocoding-api.open-meteo.com/v1/search").map_err(|_|"定位服务地址无效")?;
+        url.query_pairs_mut().append_pair("name",&query).append_pair("count","10").append_pair("language","zh").append_pair("format","json");
+        match get(agent,&url) {
+            Ok(value)=>found.extend(city_candidates(&value)),
+            Err(message)=>error=Some(message),
+        }
+    }
+    if found.is_empty() {if let Some(error)=error{return Err(error);}}
+    Ok(rank_cities(name,found))
+}
+
+fn unique_city(mut candidates: Vec<Position>, name: &str) -> Result<Position, String> {
+    match candidates.len() {
+        0=>Err(format!("没找到「{name}」，请试试完整市名或英文名")),
+        1=>Ok(candidates.remove(0)),
+        _=>Err(format!("「{name}」有多个同名地点，请在设置的下拉列表中选择具体地区")),
+    }
+}
+
 pub fn geocode(agent: &ureq::Agent, name: &str) -> Result<Position, String> {
-    let mut url = url::Url::parse("https://geocoding-api.open-meteo.com/v1/search").map_err(|_| "定位服务地址无效")?;
-    url.query_pairs_mut().append_pair("name", name).append_pair("count", "1").append_pair("language", "zh").append_pair("format", "json");
-    let value = get(agent, &url)?;
-    let first = value["results"].get(0).ok_or_else(|| format!("没找到「{name}」这个城市"))?;
-    let lat = first["latitude"].as_f64().ok_or("定位结果缺少坐标")?;
-    let lon = first["longitude"].as_f64().ok_or("定位结果缺少坐标")?;
-    let label = first["name"].as_str().filter(|s| !s.trim().is_empty()).unwrap_or(name).to_string();
-    Ok(Position { lat, lon, label })
+    unique_city(search_cities(agent,name)?,name)
 }
 
 /// 拉一次天气：先定位，再取实况与七日预报。
 pub fn fetch(agent: &ureq::Agent, city: &str) -> Result<Snapshot, String> {
+    fetch_at(agent,city,None)
+}
+
+fn fetch_at(agent: &ureq::Agent, city: &str, selected: Option<&Position>) -> Result<Snapshot, String> {
     let city = city.trim();
-    let position = if city.is_empty() { locate(agent)? } else { geocode(agent, city)? };
+    let position = if city.is_empty() { locate(agent)? }
+        else if let Some(position)=selected.filter(|p|p.valid() && p.label==city) {position.clone()}
+        else { geocode(agent, city)? };
+    fetch_forecast(agent, position)
+}
+
+/// 已知坐标时只请求一次预报接口。
+fn fetch_forecast(agent: &ureq::Agent, position: Position) -> Result<Snapshot, String> {
     let mut url = url::Url::parse("https://api.open-meteo.com/v1/forecast").map_err(|_| "天气服务地址无效")?;
     {
         let mut query = url.query_pairs_mut();
@@ -196,7 +333,9 @@ pub fn fetch(agent: &ureq::Agent, city: &str) -> Result<Snapshot, String> {
         query.append_pair("timezone", "auto");
         query.append_pair("forecast_days", &FORECAST_DAYS.to_string());
     }
-    parse(&position.label, &get(agent, &url)?)
+    let mut snapshot=parse(&position.label, &get(agent, &url)?)?;
+    snapshot.position=Some(position);
+    Ok(snapshot)
 }
 
 fn day_label(index: usize, date: &str) -> String {
@@ -238,6 +377,8 @@ pub fn parse(place: &str, value: &Value) -> Result<Snapshot, String> {
         .and_then(|s| s.get(11..16)).map(str::to_string);
     Ok(Snapshot {
         place: place.to_string(),
+        position: None,
+        auto: false,
         temp,
         feels: current["apparent_temperature"].as_f64().map(|n| n as f32),
         humidity: current["relative_humidity_2m"].as_u64().map(|n| n as u32),
@@ -261,6 +402,48 @@ pub fn clock(at: i64) -> String {
         .unwrap_or_else(|| "--:--".into())
 }
 
+/// 输入停顿后再搜索，最多一个在途请求；旧关键词的结果不覆盖新输入。
+#[derive(Default)]
+pub struct CitySearch {
+    pub results: Vec<Position>,
+    pub error: Option<String>,
+    query: String,
+    changed_at: f64,
+    requested: Option<String>,
+    rx: Option<Receiver<(String,Result<Vec<Position>,String>)>>,
+}
+
+impl CitySearch {
+    pub fn pending(&self) -> bool {self.error.is_none() && (self.rx.is_some() || self.requested.as_deref()!=Some(self.query.as_str()))}
+
+    #[cfg(test)]
+    pub(crate) fn seed(&mut self, query: &str, results: Vec<Position>) {self.query=query.into();self.requested=Some(query.into());self.results=results;}
+
+    pub fn retry(&mut self) {self.requested=None;self.error=None;}
+
+    pub fn update(&mut self, query: &str, t: f64) {
+        let query=query.trim();
+        if query!=self.query {
+            self.query=query.to_string();self.changed_at=t;self.requested=None;self.results.clear();self.error=None;
+        }
+        if let Some(rx)=&self.rx {
+            match rx.try_recv() {
+                Ok((query,result))=>{
+                    self.rx=None;
+                    if query==self.query {self.requested=Some(query);match result {Ok(results)=>{self.results=results;self.error=None;},Err(error)=>self.error=Some(error)}}
+                }
+                Err(TryRecvError::Disconnected)=>{self.rx=None;if self.requested.as_deref()==Some(self.query.as_str()){self.error=Some("城市搜索没有响应，请重试".into());}}
+                Err(TryRecvError::Empty)=>{}
+            }
+        }
+        if !cfg!(test) && self.rx.is_none() && self.requested.as_deref()!=Some(query) && query.chars().count()>=2 && t-self.changed_at>=0.45 {
+            let query=query.to_string();self.requested=Some(query.clone());
+            let (tx,rx)=mpsc::channel();self.rx=Some(rx);
+            std::thread::spawn(move||{let result=search_cities(&http_agent(),&query);let _=tx.send((query,result));});
+        }
+    }
+}
+
 /// 页面与设置页共享的天气状态；拉取在后台线程，UI 只轮询结果。
 #[derive(Default)]
 pub struct State {
@@ -271,50 +454,145 @@ pub struct State {
     /// 城市输入草稿，确认后才写入设置并发起查询。
     pub city_input: String,
     pub manual_city: bool,
+    pub selected_city: Option<Position>,
+    pub cities: CitySearch,
+    pub active_position: Option<Position>,
     pub solar_open: bool,
+    /// 最近一次切换视图的时间（秒），驱动太阳滑入与月亮升起。
+    pub solar_at: f64,
+    /// 点击涟漪：页面局部坐标与触发时间。
+    pub tap: Option<(f32, f32, f64)>,
+    /// 连续失败次数：自动刷新按 2、4、8、16、30 分钟退避，成功后清零。
+    pub failures: u32,
+    /// 自动定位结果与取得时间；3 小时内复用，不必每次刷新都查网络出口。
+    located: Option<(Position, i64)>,
     /// 上一次请求使用的城市。
     last_city: Option<String>,
+    last_position: Option<Position>,
     rx: Option<Receiver<Result<Snapshot, String>>>,
     cache: Option<PathBuf>,
+    /// 各城市最近一次的天气；切换城市时先显示这里的数据，不等网络。
+    cached: Vec<Snapshot>,
+    /// 岛上城市下拉框是否展开。
+    pub picker_open: bool,
 }
 
 impl State {
-    pub fn load(city: &str) -> Self {
-        let mut state=Self {city_input:city.to_string(),manual_city:!city.trim().is_empty(),..Default::default()};
+    pub fn load(city: &str, position: Option<&Position>) -> Self {
+        let position=position.filter(|p|p.valid() && p.label==city.trim()).cloned();
+        let mut state=Self {city_input:city.to_string(),manual_city:!city.trim().is_empty(),selected_city:position.clone(),active_position:position,..Default::default()};
         if cfg!(test) { return state; }
-        let path = crate::model::config_dir().join("weather.json");
-        state.snapshot=std::fs::read(&path).ok().and_then(|raw|serde_json::from_slice::<Snapshot>(&raw).ok());
+        let dir = crate::model::config_dir();
+        let path = dir.join("weather-cities.json");
+        state.cached=std::fs::read(&path).ok().and_then(|raw|serde_json::from_slice::<Vec<Snapshot>>(&raw).ok()).unwrap_or_else(||{
+            // 旧版只缓存当前城市一份；当时若是自动定位，迁移时补上标记。
+            std::fs::read(dir.join("weather.json")).ok().and_then(|raw|serde_json::from_slice::<Snapshot>(&raw).ok())
+                .map(|mut snapshot|{snapshot.auto=snapshot.auto||city.trim().is_empty();vec![snapshot]}).unwrap_or_default()
+        });
+        state.cached.truncate(CACHE_LIMIT);
+        state.snapshot=state.cached_for(city,state.active_position.as_ref()).cloned();
+        // 自动定位模式下，缓存里的坐标也可复用，启动时省一次出口定位。
+        if city.trim().is_empty() {
+            state.located=state.snapshot.as_ref().and_then(|s|s.position.clone().map(|p|(p,s.at)));
+        }
         state.cache=Some(path);
         state
     }
 
+    /// 某个城市（空串为自动定位）最近一次的天气缓存。
+    pub fn cached_for(&self, city: &str, position: Option<&Position>) -> Option<&Snapshot> {
+        self.cached.iter().find(|snapshot|cache_matches(snapshot,city,position))
+    }
+
+    /// 切换到另一个城市：丢弃在途请求，立即换上该城市的缓存；缓存仍新鲜就不再联网，
+    /// 否则交给下一次 `should_refresh`（城市变化会立刻触发，不受退避限制）。
+    pub fn switch(&mut self, city: &str, position: Option<Position>, now: i64) {
+        let city=city.trim().to_string();
+        self.rx=None;self.loading=false;self.error=None;self.failures=0;
+        self.picker_open=false;self.solar_open=false;
+        // 设置页的搜索框是「添加城市」用的草稿，切换城市不改动它。
+        self.manual_city=position.is_some();self.active_position=position.clone();
+        self.snapshot=self.cached_for(&city,position.as_ref()).cloned();
+        if self.snapshot.as_ref().is_some_and(|s|(0..INTERVAL).contains(&(now-s.at))) {
+            self.last_city=Some(city);self.last_position=position;
+        } else if self.last_city.as_deref()==Some(city.as_str()) && self.last_position==position {
+            // 切回刚才请求过的城市：清掉记录，让城市变化重新触发刷新。
+            self.last_city=None;
+        }
+    }
+
+    /// 删除城市时一并清掉它的缓存。
+    pub fn forget_city(&mut self, position: &Position) {
+        self.cached.retain(|s|s.auto || s.position.as_ref()!=Some(position));
+        self.persist();
+    }
+
+    fn persist(&self) {
+        if let Some(path)=&self.cache {
+            if let Ok(raw)=serde_json::to_vec(&self.cached) {let _=crate::model::atomic_write(path,&raw);}
+        }
+    }
+
+    /// 设置页搜索框里已确认的地区（输入框文字与所选地区一致）。
+    pub fn picked_city(&self) -> Option<&Position> {
+        self.selected_city.as_ref().filter(|p|p.valid() && p.label==self.city_input.trim())
+    }
+
+    /// 自动刷新的退避间隔（秒）：断网时不再每两分钟起一次请求。
+    pub fn backoff(&self) -> f64 {
+        if self.failures==0 {0.0} else {(120.0*2f64.powi(self.failures.min(5) as i32-1)).min(1800.0)}
+    }
+
+    /// 改为自动定位时调用：下次刷新重新识别网络出口。
+    pub fn forget_location(&mut self) {self.located=None;}
+
     /// 设置里的城市是否和上次请求不一致（首次启动也算）。
-    pub fn city_changed(&self, city: &str) -> bool { self.last_city.as_deref() != Some(city.trim()) }
+    pub fn city_changed(&self, city: &str) -> bool {
+        self.last_city.as_deref()!=Some(city.trim()) || self.last_position.as_ref()!=self.position_for(city)
+    }
+
+    fn position_for(&self, city: &str) -> Option<&Position> {self.active_position.as_ref().filter(|p|!city.trim().is_empty() && p.label==city.trim())}
 
     pub fn draft_city(&self) -> Option<&str> {
-        if !self.manual_city {Some("")}else{let city=self.city_input.trim();(!city.is_empty()).then_some(city)}
+        if !self.manual_city {Some("")}else{self.selected_city.as_ref().filter(|p|p.valid() && p.label==self.city_input.trim()).map(|p|p.label.as_str())}
     }
+
+    pub fn can_apply(&self, t: f64) -> bool {
+        self.draft_city().is_some_and(|city|!self.loading &&
+            (self.active_position.as_ref()!=self.draft_position() || self.can_refresh(city,t)))
+    }
+
+    pub fn draft_position(&self) -> Option<&Position> {self.selected_city.as_ref().filter(|_|self.manual_city && self.draft_city().is_some())}
 
     pub fn can_refresh(&self, city: &str, t: f64) -> bool {
         !self.loading && (self.city_changed(city) || t-self.last_start>=if self.error.is_some(){120.0}else{30.0})
     }
 
     pub fn should_refresh(&self, city: &str, t: f64, now: i64, enabled: bool) -> bool {
-        enabled && (self.city_changed(city) || self.stale(now)) && self.can_refresh(city,t)
+        enabled && (self.city_changed(city) || (self.stale(now) && t-self.last_start>=self.backoff())) && self.can_refresh(city,t)
     }
 
     pub fn refresh(&mut self, city: &str, t: f64) -> bool {
         if !self.can_refresh(city,t) { return false; }
         let city = city.trim().to_string();
-        if self.last_city.is_some() && self.city_changed(&city) {self.snapshot=None;self.error=None;}
+        let position=self.position_for(&city).cloned();
+        if self.last_city.is_some() && self.city_changed(&city) {
+            self.snapshot=self.cached_for(&city,position.as_ref()).cloned();self.error=None;self.failures=0;
+        }
         self.last_city = Some(city.clone());
+        self.last_position=position.clone();
+        let now=chrono::Utc::now().timestamp();
+        let located=self.located.as_ref().filter(|(p,at)|city.is_empty() && p.valid() && (0..LOCATE_TTL).contains(&(now-at))).map(|(p,_)|p.clone());
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.loading = true;
         self.last_start = t;
         std::thread::spawn(move || {
             let agent = http_agent();
-            let _ = tx.send(fetch(&agent, &city));
+            let _ = tx.send(match located {
+                Some(located) => fetch_forecast(&agent, located),
+                None => fetch_at(&agent, &city, position.as_ref()),
+            });
         });
         true
     }
@@ -329,14 +607,24 @@ impl State {
                 // 关闭模块或确认了别的城市后，旧请求不再更新界面和缓存。
                 if !enabled || self.city_changed(city) { return true; }
                 match result {
-                    Ok(snapshot) => {
-                        if let Some(path) = &self.cache {
-                            if let Ok(raw) = serde_json::to_vec(&snapshot) { let _ = crate::model::atomic_write(path, &raw); }
+                    Ok(mut snapshot) => {
+                        snapshot.auto=city.trim().is_empty();
+                        // 同一城市只留最新一份，新数据放最前；超出上限时丢掉最旧的。
+                        let key=snapshot.clone();
+                        self.cached.retain(|s|!(s.auto==key.auto && (key.auto || s.position==key.position)));
+                        self.cached.insert(0,snapshot.clone());self.cached.truncate(CACHE_LIMIT);
+                        self.persist();
+                        if city.trim().is_empty() {
+                            if let Some(position)=&snapshot.position {
+                                // 复用的定位不延长有效期，保证每 3 小时至少重新识别一次。
+                                if self.located.as_ref().map(|(p,_)|p)!=Some(position) {self.located=Some((position.clone(),snapshot.at));}
+                            }
                         }
                         self.snapshot = Some(snapshot);
                         self.error = None;
+                        self.failures = 0;
                     }
-                    Err(error) => self.error = Some(error),
+                    Err(error) => {self.error = Some(error);self.failures=self.failures.saturating_add(1);}
                 }
                 true
             }
@@ -344,7 +632,7 @@ impl State {
             Err(TryRecvError::Disconnected) => {
                 self.rx = None;
                 self.loading = false;
-                if enabled && !self.city_changed(city) {self.error=Some("天气服务没有响应".into());}
+                if enabled && !self.city_changed(city) {self.error=Some("天气服务没有响应".into());self.failures=self.failures.saturating_add(1);}
                 true
             }
         }
@@ -354,14 +642,46 @@ impl State {
     pub fn stale(&self, now: i64) -> bool { self.snapshot.as_ref().map_or(true, |s| now - s.at >= INTERVAL) }
 }
 
+fn cache_matches(snapshot: &Snapshot, city: &str, position: Option<&Position>) -> bool {
+    if city.trim().is_empty() {return snapshot.auto;}
+    !snapshot.auto && position.is_some_and(|p|p.valid() && p.label==city.trim() && snapshot.position.as_ref()==Some(p))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
 
     #[test]
+    fn weather_offline_auto_refresh_backs_off_and_recovers(){
+        let mut state=State{last_city:Some(String::new()),last_start:0.0,..Default::default()};
+        let now=10_000;
+        assert!(state.should_refresh("",200.0,now,true),"无数据时照常刷新");
+        for (failures,wait) in [(1,120.0),(2,240.0),(3,480.0),(4,960.0),(5,1800.0),(9,1800.0)] {
+            state.failures=failures;state.error=Some("网络不可用".into());
+            assert_eq!(state.backoff(),wait);
+            assert!(!state.should_refresh("",wait-1.0,now,true),"第 {failures} 次失败后 {wait} 秒内不应自动重试");
+            assert!(state.should_refresh("",wait,now,true));
+        }
+        assert!(state.can_refresh("",120.0),"手动刷新不受自动退避限制");
+        let (tx,rx)=mpsc::channel();state.rx=Some(rx);state.loading=true;
+        tx.send(Ok(Snapshot{position:Some(Position{lat:30.0,lon:120.0,label:"杭州".into(),region:String::new()}),at:now,..Default::default()})).unwrap();
+        assert!(state.poll("",true));assert_eq!(state.failures,0);assert_eq!(state.backoff(),0.0);
+        assert!(state.located.as_ref().is_some_and(|(p,at)|p.label=="杭州"&&*at==now),"自动定位结果应缓存复用");
+        state.forget_location();assert!(state.located.is_none());
+    }
+
+    #[test]
+    fn weather_manual_city_requires_a_confirmed_region(){
+        let mut state=State::load("杭州",None);
+        state.city_input="佛山".into();
+        assert_eq!(state.draft_city(),None,"同名地点未确认前不能直接应用搜索文字");
+    }
+
+    #[test]
     fn weather_location_mode_keeps_blank_manual_input_separate_from_auto(){
-        let mut state=State::load("杭州");
+        let position=Position{lat:30.27,lon:120.15,label:"杭州".into(),region:"浙江 · 中国".into()};
+        let mut state=State::load("杭州",Some(&position));
         assert!(state.manual_city);assert_eq!(state.draft_city(),Some("杭州"));
         state.city_input="  ".into();assert_eq!(state.draft_city(),None);
         state.manual_city=false;assert_eq!(state.draft_city(),Some(""));
@@ -369,6 +689,71 @@ mod tests {
         for day in old["days"].as_array_mut().unwrap(){day.as_object_mut().unwrap().remove("date");}
         let cached:Snapshot=serde_json::from_value(old).unwrap();
         assert!(cached.days.iter().all(|day|day.date.is_empty()),"旧缓存缺少日期时不能猜测日期");
+    }
+
+    #[test]
+    fn weather_foshan_candidates_include_the_full_city_name_and_require_selection(){
+        assert_eq!(city_queries("佛山"),vec!["佛山市","佛山"]);
+        assert_eq!(city_queries("佛山市"),vec!["佛山市","佛山"]);
+        assert_eq!(city_queries("广州市"),vec!["广州市","广州"],"带「市」也要能搜到只收录简称的城市");
+        assert_eq!(city_queries("杭州"),vec!["杭州"]);
+        assert_eq!(city_queries("新疆"),vec!["新疆市","新疆","乌鲁木齐"],"地区名查不到时用省会代替");
+        assert!(city_queries("新疆维吾尔自治区").contains(&"乌鲁木齐".to_string()));
+        assert!(city_queries("广东省").contains(&"广州".to_string()));
+        assert_eq!(city_queries("北京"),vec!["北京市","北京"],"直辖市不重复查");assert_eq!(city_queries("津市"),vec!["津市市","津市"]);
+        assert_eq!(city_queries("London"),vec!["London"]);
+        let candidates:Vec<Position>=city_candidates(&json!({"results":[
+            {"name":"佛山","latitude":28.73401,"longitude":98.80612,"admin1":"云南","admin2":"迪庆藏族自治州","country":"中国"},
+            {"name":"佛山市","latitude":23.02677,"longitude":113.13148,"admin1":"广东","admin2":"佛山市","country":"中国"},
+            {"name":"坏坐标","latitude":999,"longitude":113},
+            {"name":"缺坐标"},
+            {"name":"佛山沙堤机场","latitude":23.08,"longitude":113.07,"feature_code":"AIRP"}
+        ]})).into_iter().map(|(p,_)|p).collect();
+        assert_eq!(candidates.len(),2);
+        assert_eq!(candidates[0].region,"迪庆藏族自治州 · 云南 · 中国");
+        assert_eq!(candidates[1].region,"广东 · 中国");
+        assert!(unique_city(candidates.clone(),"佛山").unwrap_err().contains("同名"));
+        assert_eq!(unique_city(vec![candidates[1].clone()],"佛山市").unwrap().lat,23.02677);
+        assert!(unique_city(vec![],"未知城市").is_err());
+        // 完全同名的排前面，其次人口多的；坐标重合的同名地点只留一个。
+        let town=Position{lat:28.7,lon:98.8,label:"广州镇".into(),region:"云南".into()};
+        let city=Position{lat:23.13,lon:113.26,label:"广州".into(),region:"广东".into()};
+        let ranked=rank_cities("广州市",vec![(town.clone(),900_000),(city.clone(),13_000_000),(city.clone(),13_000_000)]);
+        assert_eq!(ranked,vec![city,town]);
+    }
+
+    #[test]
+    fn weather_confirmed_coordinates_survive_restart_and_reject_the_wrong_cache(){
+        let selected=Position{lat:23.02677,lon:113.13148,label:"佛山市".into(),region:"广东 · 中国".into()};
+        let saved:Position=serde_json::from_str(&serde_json::to_string(&selected).unwrap()).unwrap();
+        let state=State::load("佛山市",Some(&saved));
+        assert_eq!(state.draft_city(),Some("佛山市"));assert_eq!(state.active_position.as_ref(),Some(&selected));
+        let mut old=Snapshot{place:"佛山".into(),code:73,temp:-8.7,..Default::default()};
+        assert!(!cache_matches(&old,"佛山市",Some(&selected)),"无坐标的旧中雪缓存不能冒充佛山市天气");
+        old.position=Some(Position{lat:28.73401,lon:98.80612,label:"佛山市".into(),region:"云南".into()});
+        assert!(!cache_matches(&old,"佛山市",Some(&selected)));
+        old.position=Some(selected.clone());assert!(cache_matches(&old,"佛山市",Some(&selected)));
+        assert!(!cache_matches(&old,"佛山",None));
+    }
+
+    #[test]
+    fn weather_same_named_regions_trigger_a_refresh_and_discard_the_previous_response(){
+        let first=Position{lat:28.73401,lon:98.80612,label:"佛山".into(),region:"云南".into()};
+        let second=Position{lat:30.04572,lon:106.41138,label:"佛山".into(),region:"重庆".into()};
+        let (tx,rx)=mpsc::channel();
+        let mut state=State{last_city:Some("佛山".into()),last_position:Some(first.clone()),active_position:Some(first),selected_city:Some(second.clone()),city_input:"佛山".into(),manual_city:true,last_start:100.0,rx:Some(rx),..Default::default()};
+        assert!(state.can_apply(101.0),"同名但不同地区的选择可以立即应用");
+        state.active_position=Some(second);assert!(state.city_changed("佛山"));
+        tx.send(Ok(Snapshot{code:73,..Default::default()})).unwrap();assert!(state.poll("佛山",true));assert!(state.snapshot.is_none());
+    }
+
+    #[test]
+    fn weather_search_ignores_results_for_the_previous_input(){
+        let (tx,rx)=mpsc::channel();
+        let mut search=CitySearch{query:"佛山".into(),requested:Some("佛山".into()),rx:Some(rx),..Default::default()};
+        tx.send(("佛山".into(),Ok(vec![Position{lat:23.0,lon:113.0,label:"佛山市".into(),region:"广东".into()}]))).unwrap();
+        search.update("杭州",1.0);assert!(search.results.is_empty());assert!(search.error.is_none());assert_eq!(search.changed_at,1.0);
+        search.update(" 杭州 ",1.1);assert_eq!(search.changed_at,1.0,"首尾空格不重置输入防抖");
     }
 
     #[test]
@@ -533,8 +918,13 @@ mod tests {
         assert_eq!(kind(2, false), Kind::PartlyNight);
         assert_eq!(kind(95, true), Kind::Thunder);
         assert_eq!(kind(75, true), Kind::Snow);
+        assert_eq!(kind(73, true), Kind::Snow);
+        assert_eq!(kind(97, true), Kind::Thunder);
         assert_eq!(describe(0), "晴");
         assert_eq!(describe(63), "中雨");
+        assert_eq!(describe(73), "中雪");
+        assert_eq!(describe(53), "毛毛雨");
+        assert_eq!(describe(97), "强雷阵雨");
         assert_eq!(describe(200), "多云", "未知代码退回多云");
     }
 
@@ -568,6 +958,17 @@ mod tests {
             auto.days.iter().map(|d| (&d.label, d.high, d.low, d.rain)).collect::<Vec<_>>());
         let named = fetch(&agent, "杭州").expect("按城市查询失败");
         println!("named_place={} temp={:.1}", named.place, named.temp);
+    }
+
+    #[test]
+    #[ignore="按需联网核验佛山的同名候选与确认坐标后的实际天气"]
+    fn weather_foshan_live_probe(){
+        let agent=http_agent();let candidates=search_cities(&agent,"佛山").expect("搜索失败");
+        assert!(unique_city(candidates.clone(),"佛山").is_err());
+        let city=candidates.iter().find(|p|p.label=="佛山市" && p.region.contains("广东")).expect("缺少广东佛山市候选");
+        let snapshot=fetch_at(&agent,&city.label,Some(city)).expect("天气查询失败");
+        assert_eq!(snapshot.position.as_ref(),Some(city));
+        println!("city={} region={} lat={} lon={} temp={} code={} text={} days={}",city.label,city.region,city.lat,city.lon,snapshot.temp,snapshot.code,describe(snapshot.code),snapshot.days.len());
     }
 
     #[test]

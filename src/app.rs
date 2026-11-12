@@ -798,7 +798,7 @@ impl App {
         let focus_seconds=settings.focus_minutes as f32*60.0;
         let initial_lyrics=settings.lyrics_enabled;
         let initial_page=settings.page_order.iter().copied().find(|page|settings.visible_pages[*page]).unwrap_or(0);
-        let weather=crate::weather::State::load(&settings.weather_city);
+        let weather=crate::weather::State::load(&settings.weather_city,settings.weather_position.as_ref());
         Self {
             opts,
             render_compat_running: settings.render_compat,
