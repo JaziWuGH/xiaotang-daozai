@@ -14,6 +14,8 @@ pub(crate) mod workbuddy;
 pub(crate) mod deepseek;
 #[path="zcode_quota.rs"]
 pub(crate) mod zcode;
+#[path="kiro_quota.rs"]
+pub(crate) mod kiro;
 #[path="native_auth.rs"]
 mod native_auth;
 
@@ -26,10 +28,10 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, Kiro }
 impl Provider {
-    pub const ALL: [Self; 8] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek"} }
+    pub const ALL: [Self; 9] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::Kiro];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::Kiro=>"Kiro"} }
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)}
     fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
@@ -60,12 +62,15 @@ impl Config {
         Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
     }
     fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
-    pub fn save(&self) {
-        let dir=crate::model::config_dir();let _=fs::create_dir_all(&dir);
-        if let Ok(raw)=serde_json::to_vec_pretty(&self.json()){let _=crate::model::atomic_write(&dir.join("ai-quota.json"),&raw);}
+    pub fn save(&self) {let _=self.save_checked();}
+    pub(crate) fn save_checked(&self)->Result<(),String>{
+        let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
+        let raw=serde_json::to_vec_pretty(&self.json()).map_err(|_|"无法生成额度配置")?;
+        crate::model::atomic_write(&dir.join("ai-quota.json"),&raw).map_err(|_|"无法保存额度配置，原账号未变更".into())
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
         if provider==Provider::ZCode{return zcode::add(self,&source,&alias);}
+        if provider==Provider::Kiro{return kiro::add(self,&source,&alias);}
         if provider==Provider::WorkBuddy{return Err("请使用浏览器连接 WorkBuddy".into());}
         if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
         if provider==Provider::Gemini{return Err("请使用浏览器或 Cookie 连接 Gemini 网页账号".into());}
@@ -137,7 +142,7 @@ impl Config {
     }
     pub fn discover(&mut self)->Discovery {
         let home=std::env::var_os("USERPROFILE").or_else(||std::env::var_os("HOME")).map(PathBuf::from).unwrap_or_default();
-        let mut candidates=vec![(Provider::Codex,home.join(".codex/auth.json")),(Provider::Claude,claude::code_path()),(Provider::Kimi,home.join(".kimi/credentials/kimi-code.json")),(Provider::Kimi,home.join(".kimi-code/credentials/kimi-code.json"))];
+        let mut candidates=vec![(Provider::Codex,home.join(".codex/auth.json")),(Provider::Claude,claude::code_path()),(Provider::Kimi,home.join(".kimi/credentials/kimi-code.json")),(Provider::Kimi,home.join(".kimi-code/credentials/kimi-code.json")),(Provider::Kiro,home.join(".aws/sso/cache/kiro-auth-token.json"))];
         if let Some(dir)=std::env::var_os("CODEX_HOME").filter(|s|!s.is_empty()){candidates.push((Provider::Codex,PathBuf::from(dir).join("auth.json")));}
         candidates.extend(self.accounts.iter().filter(|a|matches!(a.provider,Provider::Codex|Provider::Kimi)||(a.provider==Provider::Claude&&a.slot.is_none())).map(|a|(a.provider,a.source.clone())));
         let before=self.accounts.len();
@@ -155,6 +160,11 @@ impl Config {
         let mut notes=Vec::new();
         for (provider,path) in candidates.iter().filter(|(_,p)|p.is_file()){
             if *provider==Provider::Claude{if let Err(error)=self.import_claude(path,""){notes.push(error);}continue;}
+            if *provider==Provider::Kiro{
+                let source=fs::canonicalize(path).unwrap_or_else(|_|path.clone());
+                if !self.accounts.iter().any(|a|a.provider==Provider::Kiro&&a.source==source){if let Err(e)=kiro::add(self,path,""){notes.push(e);}}
+                continue;
+            }
             let auth=match credentials(*provider,path){Ok(auth)=>auth,Err(error)=>{notes.push(format!("{}：{error}",provider.name()));continue;}};
             if let Some(existing)=self.accounts.iter_mut().filter(|a|a.provider==*provider).find(|a|account_credentials(a).is_ok_and(|old|same_login(&old,&auth))){
                 if auth.stamp>fs::metadata(&existing.source).and_then(|m|m.modified()).ok(){existing.source=fs::canonicalize(path).unwrap_or_else(|_|path.clone());}
@@ -185,10 +195,30 @@ impl Config {
 }
 #[derive(Clone, Debug, PartialEq)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>}
+pub struct Window {pub label:String,pub seconds:Option<i64>,pub remaining:f32,pub reset:Option<i64>,
+    /// 积分型额度的具体数值（例如 Kiro 的点数）；有值时界面显示数值而不是百分比。
+    #[serde(default)]pub amount:Option<Amount>}
+/// 周期额度的绝对数值：剩余量与总额。百分比仍然用于绘制进度，数值用于文字。
+#[derive(Clone, Debug, PartialEq)]
+#[derive(serde::Serialize,serde::Deserialize)]
+pub struct Amount {pub remaining:f64,pub limit:f64}
+impl Amount {
+    pub fn new(remaining:f64,limit:f64)->Self{let limit=limit.max(0.0);Self{remaining:remaining.clamp(0.0,limit),limit}}
+    /// 常驻栏剩余点数：三位数以上取整。
+    pub fn short(&self)->String{if self.remaining>=100.0{format!("{:.0}",self.remaining)}else{number_text(self.remaining)}}
+    /// 列表与提示里的完整写法：剩余 / 总额。
+    pub fn full(&self)->String{format!("{} / {}",number_text(self.remaining),number_text(self.limit))}
+}
+fn number_text(v:f64)->String{let digits=if v<1.0{2}else{1};let factor=10f64.powi(digits);let rounded=(v*factor).round()/factor;if rounded>=1000.0||rounded.fract()==0.0{format!("{rounded:.0}")}else{format!("{rounded:.digits$}",digits=digits as usize)}}
+impl Window {
+    /// 剩余量的书面写法：数值型额度给出“剩余 / 总额”，其余给出百分比。
+    pub fn value_text(&self)->String{self.amount.as_ref().map(Amount::full).unwrap_or_else(||format!("{:.0}%",self.remaining))}
+    /// 一句话额度摘要，用于小岛提示与设置页。
+    pub fn summary(&self)->String{format!("{}剩余 {}",self.label,self.value_text())}
+}
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>}
+pub struct Snapshot {pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)]pub kiro:Option<kiro::Details>}
 impl Account {
     pub(crate) fn cache_identity_marker(&self)->Value {
         if claude::is_desktop(&self.source){json!(2)}else{json!(true)}
@@ -198,6 +228,7 @@ impl Account {
         if entry["provider"].as_str()!=Some(self.provider.name()) || entry["slot"].as_str()!=self.slot.as_deref(){return None;}
         if self.provider==Provider::Claude && (entry["source"].as_str()!=self.source.to_str() || entry["local_identity_checked"]!=self.cache_identity_marker()){return None;}
         let snapshot:Snapshot=serde_json::from_value(entry["snapshot"].clone()).ok()?;
+        if self.provider==Provider::Kiro && (self.slot.is_none()||entry["source"].as_str()!=self.source.to_str()||kiro::check_owner(self,&snapshot).is_err()){return None;}
         (snapshot.at>0 && !snapshot.wallet.as_ref().is_some_and(|w|w.balances.is_empty())).then_some(snapshot)
     }
 }
@@ -209,13 +240,14 @@ fn reset(v:&Value)->Option<i64>{v.as_i64().filter(|n|*n>0).or_else(||chrono::Dat
 fn cadence(seconds:Option<i64>)->String{match seconds{Some(18000)=>"5 小时".into(),Some(604800)=>"本周".into(),Some(86400)=>"今日".into(),Some(s)if s>0 && s%86400==0=>format!("{} 天",s/86400),Some(s)if s>0 && s%3600==0=>format!("{} 小时",s/3600),Some(s)if s>0=>format!("{} 分钟",s/60),_=>"额度周期".into()}}
 fn codex_window(v:&Value)->Option<Window>{
     let used=number(&v["used_percent"])?;let seconds=v["limit_window_seconds"].as_i64().filter(|s|*s>0);
-    Some(Window{label:cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v["reset_at"])})
+    Some(Window{label:cadence(seconds),seconds,remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v["reset_at"]),amount:None})
 }
 pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     if provider==Provider::WorkBuddy{return workbuddy::parse(v);}
     if provider==Provider::DeepSeek{return deepseek::parse(v);}
     if provider==Provider::GrokBot{return grok::parse(v);}
     if provider==Provider::Gemini{return gemini::parse(v);}
+    if provider==Provider::Kiro{return kiro::parse(v);}
     let mut s=Snapshot{plan:v["plan_type"].as_str().unwrap_or_default().into(),at:chrono::Utc::now().timestamp(),..Default::default()};
     match provider {
         Provider::Codex=>{
@@ -226,23 +258,23 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
             }
         }
         Provider::Claude=>{
-            for(key,seconds)in [("five_hour",18000),("seven_day",604800)]{if let Some(used)=number(&v[key]["utilization"]){s.windows.push(Window{label:cadence(Some(seconds)),seconds:Some(seconds),remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v[key]["resets_at"])});}}
+            for(key,seconds)in [("five_hour",18000),("seven_day",604800)]{if let Some(used)=number(&v[key]["utilization"]){s.windows.push(Window{label:cadence(Some(seconds)),seconds:Some(seconds),remaining:(100.0-used).clamp(0.0,100.0) as f32,reset:reset(&v[key]["resets_at"]),amount:None});}}
         }
         Provider::Kimi=>{
             if let Some(usages)=v["usages"].as_object(){
                 for (key,label,seconds) in [("limit_5h","5 小时",Some(18000)),("limit_7d","本周",Some(604800)),("limit_month_total","本月总额度",None),("limit_month_code","本月编程",None)]{
                     let Some(entry)=usages.get(key) else{continue;};
                     let Some(used)=number(&entry["used_ratio"]).filter(|n|(0.0..=1.0).contains(n)) else{continue;};
-                    s.windows.push(Window{label:label.into(),seconds,remaining:((1.0-used)*100.0) as f32,reset:reset(&entry["reset_time"])});
+                    s.windows.push(Window{label:label.into(),seconds,remaining:((1.0-used)*100.0) as f32,reset:reset(&entry["reset_time"]),amount:None});
                 }
                 if !s.windows.is_empty(){return Ok(s);}
             }
             if v.as_object().is_some_and(|o|o.is_empty()){return Err("Kimi 已登录，官网暂未返回周期额度".into());}
-            let section=|v:&Value,seconds:Option<i64>|->Option<Window>{let limit=number(&v["limit"])?;if limit<=0.0{return None;}let remaining=number(&v["remaining"]).or_else(||Some(limit-number(&v["used"])?))?;Some(Window{label:cadence(seconds),seconds,remaining:(remaining/limit*100.0).clamp(0.0,100.0) as f32,reset:reset(&v["resetTime"])})};
+            let section=|v:&Value,seconds:Option<i64>|->Option<Window>{let limit=number(&v["limit"])?;if limit<=0.0{return None;}let remaining=number(&v["remaining"]).or_else(||Some(limit-number(&v["used"])?))?;Some(Window{label:cadence(seconds),seconds,remaining:(remaining/limit*100.0).clamp(0.0,100.0) as f32,reset:reset(&v["resetTime"]),amount:None})};
             if let Some(w)=section(&v["usage"],Some(604800)){s.windows.push(w);}
             for limit in v["limits"].as_array().into_iter().flatten(){let duration=limit["window"]["duration"].as_i64();let unit=limit["window"]["timeUnit"].as_str().unwrap_or_default();let factor=match unit{"TIME_UNIT_MINUTE"=>Some(60),"TIME_UNIT_HOUR"=>Some(3600),"TIME_UNIT_DAY"=>Some(86400),"TIME_UNIT_SECOND"=>Some(1),_=>None};let seconds=duration.zip(factor).and_then(|(d,f)|d.checked_mul(f));if let Some(w)=section(&limit["detail"],seconds){if !s.windows.iter().any(|old|old.seconds==w.seconds){s.windows.push(w);}}}
         }
-        Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!(),
+        Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek|Provider::Kiro=>unreachable!(),
     }
     if s.windows.is_empty(){return Err("服务未提供周期额度，暂不绘制进度".into());}
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
@@ -261,12 +293,13 @@ fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
     if provider==Provider::Claude{return Err("Claude 仅使用本地用量记录，不读取登录令牌".into());}
     let root=login_json(path)?;
     let v=if provider==Provider::Codex{root.get("auth_json").unwrap_or(&root)}else{&root};
-    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Kimi=>v.get("access_token"),Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
+    let token=match provider{Provider::Codex=>v.pointer("/tokens/access_token").or_else(||v.get("access_token")),Provider::Kimi=>v.get("access_token"),Provider::Kiro=>v.get("accessToken"),Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>None}.and_then(Value::as_str).filter(|s|!s.trim().is_empty()).ok_or("未找到订阅账号的登录凭据，请选择对应工具的登录文件")?.to_owned();
     let claims=token.split('.').nth(1).and_then(|b|base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(b).ok()).and_then(|b|serde_json::from_slice::<Value>(&b).ok()).unwrap_or(Value::Null);
     let account_id=v.pointer("/tokens/account_id").or_else(||v.get("account_id")).and_then(Value::as_str).or_else(||claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id").and_then(Value::as_str)).filter(|s|!s.is_empty()).map(str::to_owned);
     let identity=match provider{
         Provider::Codex=>account_id.as_ref().zip(claims.pointer("/https:~1~1api.openai.com~1auth/chatgpt_user_id").or_else(||claims.get("sub")).and_then(Value::as_str).filter(|s|!s.is_empty())).map(|(account,user)|format!("{account}:{user}")),
         Provider::Kimi=>claims.get("user_id").or_else(||claims.get("sub")).and_then(Value::as_str).filter(|s|!s.is_empty()).map(str::to_owned),
+        Provider::Kiro=>v.get("profileArn").and_then(Value::as_str).filter(|s|!s.is_empty()).map(str::to_owned),
         _=>None,
     };
     Ok(Credential{token,account_id,identity,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
@@ -284,13 +317,13 @@ impl Service {
             let mut cooldowns:HashMap<_,(Instant,String)>=HashMap::new();
             while let Ok(accounts)=requests.recv(){
                 let agent=http_agent();
-                let mut groups=[Vec::new(),Vec::new(),Vec::new()];
+                let mut groups=[Vec::new(),Vec::new(),Vec::new(),Vec::new()];
                 for a in accounts.into_iter().filter(|a|a.enabled){
                     let key=(a.id.clone(),a.slot.clone(),a.source.clone());
                     if let Some((until,message))=cooldowns.get(&key){
                         if *until>Instant::now(){let _=results.send((a,Err(message.clone())));continue;}
                     }
-                    let group=match a.provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,_=>0};
+                    let group=match a.provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::Kiro=>3,_=>0};
                     groups[group].push((key,a));
                 }
                 cooldowns.retain(|_,(until,_)|*until>Instant::now());
@@ -350,8 +383,9 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
+    if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     let auth=account_credentials(account).map_err(|e|(e,0))?;
-    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek=>unreachable!()};
+    let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",Provider::Claude|Provider::ZCode|Provider::GrokBot|Provider::Gemini|Provider::WorkBuddy|Provider::DeepSeek|Provider::Kiro=>unreachable!()};
     let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
     let response=req.call().map_err(|e|match e{ureq::Error::Status(401|403,_)=>("登录已失效或权限不足，请在对应工具中重新登录".into(),0),ureq::Error::Status(429,r)=>("请求过于频繁，稍后自动重试".into(),r.header("Retry-After").and_then(|s|s.parse().ok()).unwrap_or(180).clamp(30,3600)),ureq::Error::Status(n,_)=>(format!("额度服务暂不可用（{n}）"),60),_=>("无法连接额度服务，请检查网络或代理".into(),30)})?;
