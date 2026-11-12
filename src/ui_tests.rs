@@ -10,6 +10,52 @@ use std::sync::Mutex;
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn gemini_connect_form_opens_default_browser_without_claiming_connection(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for dark in [true,false]{
+        let mut h=H::new();h.ctx.set_visuals(if dark{egui::Visuals::dark()}else{egui::Visuals::light()});
+        h.app.settings_open=true;h.app.quota.provider=crate::quota::Provider::Gemini;h.app.quota.connect_open=true;
+        let mut raster=crate::preview_raster::Raster::new(640,760);
+        for _ in 0..4{
+            let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(640.0,760.0))),..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));});
+            raster.update_textures(&out.textures_delta);h.shapes=out.shapes;
+        }
+        let texts=h.shapes.iter().filter_map(|s|if let egui::Shape::Text(t)=&s.shape{Some(t.galley.text())}else{None}).collect::<Vec<_>>();
+        assert!(texts.contains(&"打开默认浏览器登录"),"Gemini 应在系统默认浏览器中登录");
+        assert!(texts.contains(&"连接已登录的 Chrome"),"Gemini 应支持本人授权连接现有 Chrome 会话");
+        assert!(texts.iter().any(|s|s.contains("chrome://inspect/#remote-debugging")),"首次连接应提供 Chrome 原生设置入口");
+        assert!(!texts.iter().any(|s|s.contains("自动连接")),"打开官网不能表示岛仔已获得登录会话");
+        assert!(!texts.iter().any(|s|s.contains("Kimi 浏览器扩展")),"Gemini 连接不应要求额外安装扩展");
+        assert!(texts.contains(&"Google 邮箱"));
+        let original=h.app.quota.config.clone();
+        let point=h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()=="打开默认浏览器登录"=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap();
+        for pressed in [true,false]{
+            let _=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(640.0,760.0))),events:vec![egui::Event::PointerMoved(point),egui::Event::PointerButton{pos:point,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()}],..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));});
+        }
+        assert!(h.app.pending.contains(&crate::app::Cmd::OpenUrl("https://gemini.google.com/usage".into())));
+        assert!(h.app.quota.gemini_connecting.is_none());assert_eq!(h.app.quota.config,original);
+        if let Some(dest)=std::env::var_os("DAOZAI_GEMINI_PREVIEW_DIR"){
+            let dest=std::path::PathBuf::from(dest);std::fs::create_dir_all(&dest).unwrap();
+            raster.buf.fill([0.08,0.09,0.12,1.0]);raster.draw(&h.ctx.tessellate(h.shapes.clone(),1.0),1.0);let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+            image::save_buffer(dest.join(if dark{"dark.png"}else{"light.png"}),&rgba,640,760,image::ColorType::Rgba8).unwrap();
+        }
+    }
+}
+
+#[test]
+fn gemini_closed_dialogs_discard_completed_logins_without_saving(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for close_settings in [false,true]{
+        let mut h=H::new();let original=h.app.quota.config.clone();h.app.settings_open=true;h.app.quota.connect_open=true;
+        let (connect,tx)=crate::quota::gemini::Connect::pending();h.app.quota.gemini_connecting=Some(connect);
+        tx.send(Ok(crate::quota::gemini::simulated_connected())).unwrap();
+        if close_settings{h.app.settings_open=false;}else{h.app.quota_close_connection();}
+        h.app.quota_tick();assert!(h.app.quota.gemini_connecting.is_none());assert_eq!(h.app.quota.config,original);
+        assert!(h.app.quota.rows.is_empty());assert!(!crate::model::config_dir().join("credentials").exists(),"关闭后不能保存晚到的会话");
+    }
+}
+
+#[test]
 fn weather_content_tap_switches_both_ways_with_a_short_transition(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
     for (x,y) in [(100.0,75.0),(270.0,82.0),(314.0,178.0)] {
