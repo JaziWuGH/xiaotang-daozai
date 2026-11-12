@@ -11,6 +11,7 @@
 - One API：独立读取 `/dashboard/billing/subscription` 和 `/dashboard/billing/usage`。兼容计费接口不能证明数据属于账户还是 Key，当前显示「余额暂不可查询」，不冒充账户余额；保留原单位及无限额哨兵校验。
 - Sub2API：独立 `/v1/usage`，钱包显示余额，订阅周期显示剩余百分比；只提供 Key 限额时显示「余额暂不可查询」。Key 限额不进入主卡片、收起状态或设置明细。到期时间不是重置时间。
 - Kimi：保留既有 Kimi Code 行为，没有扩大范围。
+- 豆包：读取网页会员的非官方 `subscription/quota/summary` 接口，支持 5 小时、每周及活动额度，不查询火山方舟 API 余额。浏览器登录优先识别 Windows 默认的 Chrome／Edge，再查找本机已安装的 Chrome／Edge，使用独立临时目录及随机本地调试端口，不依赖浏览器扩展；仅采集适用于豆包额度接口的会话，结束或取消后关闭本次启动的浏览器进程并清理临时目录。也可只读导入本机豆包客户端当前配置的登录，数据库占用或加密格式未知时引导官网登录；不读取常用 Chrome／Edge 的账号目录。登录使用当前 Windows 用户的 DPAPI 加密，配置和缓存仅保存随机引用及额度快照。取消或关闭连接窗口不保存登录，重新连接保留账号名称、排序、常驻与配色。缺失、无效及零总额度不推断为剩余 100%；活动及其他权益池保留在完整明细中。
 
 中转地址要求站点根地址，原样保留反向代理部署前缀（包括路径中的 `/v1`），不会猜测或删除 API 后缀。拒绝 HTTP（含 localhost）、用户名/密码、查询参数和 fragment。自动识别仅尝试当前站点的已知额度接口，不向其他站点、厂商或地区发送 Key。
 
@@ -71,6 +72,7 @@ Windows 验收另用临时 `DAOZAI_DATA_DIR`；不运行 ignore 的私人账号�
 
 ## 协议来源
 
+- 豆包网页会员：[0011-joe 的 PR #42](https://github.com/Renly1994/xiaotang-daozai/pull/42)，保留原作者提交，针对当前额度页修正和适配。
 - OpenCode Go: https://github.com/anomalyco/opencode/blob/d21b0790a6c146815f28fea604e41e922f009590/packages/console/app/src/routes/zen/go/v1/usage.ts
 - MiniMax 官方 CLI: https://github.com/MiniMax-AI/cli/blob/38aba5f26173dd1065b115b221d79c9ddd87c6bb/src/client/endpoints.ts （同提交 schema、types、quota 工具）
 - GLM 官方插件: https://github.com/zai-org/zai-coding-plugins/blob/main/plugins/glm-plan-usage/skills/usage-query-skill/scripts/query-usage.mjs

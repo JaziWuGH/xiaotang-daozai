@@ -1,3 +1,8 @@
+豆包品牌标识
+assets/ai-icons/doubao.png 使用豆包官方头像标识，保留原始配色与透明底。
+产品官网：https://www.doubao.com/chat/
+官方素材：https://lf-flow-web-cdn.doubao.com/obj/flow-doubao/doubao/web/doubao_avatar_new.png
+
 fly-island
 https://github.com/flyl1u/fly-island
 微信任务栏提醒与 QQ Windows 通知接入参考其实现。

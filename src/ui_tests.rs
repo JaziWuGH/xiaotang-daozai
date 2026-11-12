@@ -4,6 +4,8 @@ use crate::app::{App, Env, Options, PH, PW, WIN_H, WIN_W};
 mod enterprise_messenger;
 #[path="calendar/ui_compatibility_tests.rs"]
 mod calendar_compatibility;
+#[path="doubao_ui_tests.rs"]
+mod doubao;
 use eframe::egui::{self, Pos2, Rect, Vec2};
 use std::sync::Mutex;
 
