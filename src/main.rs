@@ -141,7 +141,7 @@ impl Shell {
         #[cfg(windows)]
         let autostart = daozai::tray::autostart_enabled();
         #[cfg(windows)]
-        let tray = daozai::tray::Tray::start(daozai::tray::State {
+        let tray = app.start_tray(daozai::tray::State {
             pet: app.settings.pet,
             minimal: app.settings.minimal,
             autostart,
@@ -290,6 +290,10 @@ impl Shell {
             idle_seconds: {
                 #[cfg(windows)] {Some(daozai::system::idle_seconds())}
                 #[cfg(not(windows))] {None}
+            },
+            screen_locked: {
+                #[cfg(windows)] {daozai::system::screen_locked()}
+                #[cfg(not(windows))] {false}
             },
             browser_at_top: {
                 #[cfg(windows)] {if self.app.settings.browser_minimal {self.native.as_mut().and_then(|native|native.browser_at_top(&self.app.settings))}else{None}}
@@ -605,6 +609,7 @@ impl eframe::App for Shell {
                 Cmd::RestartApp=>{
                     // 先拉起新进程（它会等本进程退出），再像托盘「退出」一样摘图标后结束。
                     if diagnostics::spawn_replacement(){
+                        self.app.save_window_before_exit();
                         #[cfg(windows)] if let Some(tray)=&self.tray {tray.exit_process();}
                         std::process::exit(0);
                     }else{self.app.say("无法重新启动岛仔，请从托盘退出后手动打开");}

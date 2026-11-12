@@ -131,7 +131,7 @@ pub(crate) fn decode(text: &str) -> String {
     while let Some(index) = rest.find('&') {
         out.push_str(&rest[..index]);
         let tail = &rest[index..];
-        let end = tail.find(';').filter(|end| *end <= 10);
+        let end = tail.as_bytes().iter().take(11).position(|&byte| byte == b';');
         let Some(end) = end else {
             out.push('&');
             rest = &tail[1..];
@@ -372,6 +372,15 @@ fn from_html(html: &str) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoding_many_unterminated_entities_is_bounded(){
+        let text=format!("{}中文&#x10ffff;&amp;", "&".repeat(250_000));
+        let start=std::time::Instant::now();
+        let decoded=decode(&text);
+        assert!(start.elapsed()<std::time::Duration::from_secs(2));
+        assert_eq!(decoded,format!("{}中文{}&","&".repeat(250_000),'\u{10ffff}'));
+    }
 
     #[test]
     fn nested_hidden_blocks_never_leak_into_the_body() {

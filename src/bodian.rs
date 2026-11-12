@@ -46,11 +46,10 @@ impl Process {
             1=>Some(self.string(pointer)?.into()),
             3=>Some((pointer!=0).into()),
             4=>Some((pointer as u64).into()),
-            format @ (7|8)=>{
+            8=>{
                 let count=u32::from_le_bytes(self.read(pointer)?) as usize;
                 if count>64{return None;}
                 let values=self.pointer(pointer+8)?;
-                if format==7 {return (0..count).map(|i|self.node(values+i*16,depth+1)).collect::<Option<Vec<_>>>().map(Into::into);}
                 let keys=self.pointer(pointer+16)?;let mut map=serde_json::Map::new();
                 for i in 0..count {
                     let key=self.string(self.pointer(keys+i*8)?)?;
@@ -61,6 +60,23 @@ impl Process {
             }
             _=>None,
         }
+    }
+
+    fn current_track(&self,address:usize,cursor:&mut usize)->Option<serde_json::Value>{
+        let node=self.read::<16>(address)?;
+        if u32::from_le_bytes(node[8..12].try_into().ok()?)!=7{return None;}
+        let list=u64::from_le_bytes(node[..8].try_into().ok()?) as usize;
+        let count=usize::try_from(i32::from_le_bytes(self.read(list)?)).ok()?;
+        if count==0{return None;}
+        let entries=self.pointer(list.checked_add(8)?)?;
+        *cursor%=count;
+        // 每轮最多读取 128 项；命中后从当前曲目开始下一轮，避免长队列反复全表扫描。
+        for _ in 0..count.min(128){
+            let entry=self.node(entries.checked_add(*cursor*16)?,0)?;
+            if entry["current"].as_bool()==Some(true){return Some(entry);}
+            *cursor=(*cursor+1)%count;
+        }
+        None
     }
 }
 
@@ -90,14 +106,15 @@ fn snapshot(values:&serde_json::Value)->Option<(String,u64,f64,f64,bool)>{
     let position=values["time-pos"].as_f64()?;let duration=values["duration"].as_f64()?;
     if !position.is_finite() || !duration.is_finite() || !(0.0..86400.0).contains(&position)
         || !(0.0..86400.0).contains(&duration) || duration<=0.0 || position>duration+0.5{return None;}
-    let current=values["playlist"].as_array()?.iter().find(|entry|entry["current"].as_bool()==Some(true))?;
+    let current=&values["playlist"];
+    if current["current"].as_bool()!=Some(true){return None;}
     let title=current["title"].as_str()?.trim();
     if title.is_empty() || title.len()>4096{return None;}
     let playing=!values["pause"].as_bool()? && !values["core-idle"].as_bool()? && !values["idle-active"].as_bool()?;
     Some((title.into(),current["id"].as_u64()?,position.min(duration),duration,playing))
 }
 
-fn playback(process:&Process,target:Target)->Option<(String,u64,f64,f64,bool)>{
+fn playback(process:&Process,target:Target,cursor:&mut usize)->Option<(String,u64,f64,f64,bool)>{
     // 已验证版本的事件注册表持有 mpv 客户端；仅遍历这张小表，不扫描进程内存。
     let head=process.pointer(target.events+0xa1d8)?;let mut node=process.pointer(head)?;
     for _ in 0..8 {
@@ -116,7 +133,7 @@ fn playback(process:&Process,target:Target)->Option<(String,u64,f64,f64,bool)>{
                 if bytes[80]!=1{return None;}
                 let format=u32::from_le_bytes(bytes[40..44].try_into().ok()?);
                 let value=match (name.as_str(),format) {
-                    ("playlist",6)=>{playlist=Some((property,process.pointer(property+88)?));process.node(property+88,0)?},
+                    ("playlist",6)=>{playlist=Some((property,process.pointer(property+88)?));process.current_track(property+88,cursor)?},
                     ("time-pos"|"duration",5)=>serde_json::Value::from(f64::from_le_bytes(bytes[88..96].try_into().ok()?)),
                     ("pause"|"core-idle"|"idle-active",3)=>serde_json::Value::from(u32::from_le_bytes(bytes[88..92].try_into().ok()?)!=0),
                     _=>return None,
@@ -192,7 +209,7 @@ fn fetch_cover(url:&str)->Option<Arc<eframe::egui::ColorImage>>{
 #[derive(Default)]
 pub(super) struct Reader {
     target:Option<Target>,discovered:Option<Instant>,key:Option<(String,u64)>,metadata:Option<(NowPlaying,String)>,
-    lookup:Option<Instant>,cover:super::netease_playback::CoverCache,
+    playlist_cursor:usize,lookup:Option<Instant>,cover:super::netease_playback::CoverCache,
 }
 impl Reader {
     pub fn poll(&mut self)->Option<NowPlaying>{
@@ -202,7 +219,7 @@ impl Reader {
         let target=self.target?;
         let process=Process::open(target.pid).filter(|process|target.verified(process));
         let Some(process)=process else{self.target=None;self.key=None;self.metadata=None;return None;};
-        let (title,id,position,duration,playing)=playback(&process,target)?;let sampled_at=Instant::now();
+        let (title,id,position,duration,playing)=playback(&process,target,&mut self.playlist_cursor)?;let sampled_at=Instant::now();
         let key=(title.clone(),id);
         if self.key.as_ref()!=Some(&key){self.key=Some(key);self.metadata=None;self.lookup=None;}
         if self.metadata.is_none() && self.lookup.is_none_or(|at|at.elapsed()>=Duration::from_secs(1)) {
@@ -266,11 +283,32 @@ mod tests {
     #[test]
     fn real_playback_requires_current_track_and_valid_timeline(){
         let mut value=serde_json::json!({"time-pos":12.5,"duration":256.7,"pause":false,"core-idle":false,"idle-active":false,
-            "playlist":[{"title":"预加载歌曲","id":2},{"title":"说好的幸福呢","id":1,"current":true}]});
+            "playlist":{"title":"说好的幸福呢","id":1,"current":true}});
         let track=snapshot(&value).unwrap();assert_eq!(track.0,"说好的幸福呢");assert!(track.4);
         value["pause"]=true.into();assert!(!snapshot(&value).unwrap().4);
         value["time-pos"]=999.into();assert!(snapshot(&value).is_none());
-        value["time-pos"]=0.into();value["playlist"][1]["current"]=false.into();assert!(snapshot(&value).is_none());
+        value["time-pos"]=0.into();value["playlist"]["current"]=false.into();assert!(snapshot(&value).is_none());
+    }
+    #[test]
+    fn long_native_playlist_finds_current_track_after_the_first_64(){
+        let current_key=*b"current\0........";
+        let keys=[current_key.as_ptr() as usize];
+        let flag=[1u64,3];
+        let empty_map=[0usize,flag.as_ptr() as usize,keys.as_ptr() as usize];
+        let map=[1usize,flag.as_ptr() as usize,keys.as_ptr() as usize];
+        let mut entries=vec![[empty_map.as_ptr() as u64,8];201];
+        entries[200][0]=map.as_ptr() as u64;
+        let list=[entries.len(),entries.as_ptr() as usize,0];
+        let root=[list.as_ptr() as u64,7];
+        let process=Process(unsafe{OpenProcess(0x410,0,std::process::id())});
+        assert!(!process.0.is_null());
+        let mut cursor=0;
+        assert!(process.current_track(root.as_ptr() as usize,&mut cursor).is_none());
+        assert_eq!(cursor,128);
+        for _ in 0..2{
+            assert_eq!(process.current_track(root.as_ptr() as usize,&mut cursor).unwrap()["current"],true);
+            assert_eq!(cursor,200);
+        }
     }
     #[test]
     fn history_is_matched_to_the_engine_and_cover_hosts_are_checked(){

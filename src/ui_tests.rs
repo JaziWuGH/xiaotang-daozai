@@ -979,6 +979,7 @@ struct H {
     power: (Option<u8>, bool),
     network: Option<bool>,
     system_idle: Option<f64>,
+    screen_locked: bool,
     browser_at_top: Option<bool>,
     file_drop_zone:Option<Rect>,
     hovered_files:Vec<egui::HoveredFile>,
@@ -991,7 +992,7 @@ impl H {
         std::env::set_var("DAOZAI_DATA_DIR", &dir);
         let ctx = egui::Context::default();
         let app = App::new(&ctx, Options { fetch_lyrics: false, pet_idle: 1e9 });
-        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
+        Self { ctx, app, t: 0.0, cursor: None,cmds:vec![],region:Rect::NOTHING,hit:Rect::NOTHING,animating:false,shapes:Vec::new(), bt:Vec::new(),media:Default::default(),power:(None,false),network:None,system_idle:None,screen_locked:false,browser_at_top:None,file_drop_zone:None,hovered_files:vec![],dropped_files:vec![] }
     }
     fn frame(&mut self, events: Vec<egui::Event>) {
         self.t += 1.0 / 60.0;
@@ -1018,6 +1019,7 @@ impl H {
             charging:self.power.1,
             network:self.network,
             idle_seconds:self.system_idle,
+            screen_locked:self.screen_locked,
             browser_at_top:self.browser_at_top,
             ..Default::default()
         };
@@ -3355,7 +3357,7 @@ fn shelf_drop_distinguishes_new_duplicate_and_missing_files() {
 fn reminders_are_visible_while_collapsed_and_can_be_disabled(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
     h.t+=2701.0;h.frame(vec![]);assert!(h.app.notice.is_some());assert!(h.cmds.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,_)if t.contains("喝水"))));
-    h.app.water.remind=false;h.app.notice=None;h.cmds.clear();h.t+=2800.0;h.frame(vec![]);assert!(h.app.notice.is_none());
+    h.app.water.remind=false;h.app.settings.sit_remind=false;h.app.notice=None;h.cmds.clear();h.t+=2800.0;h.frame(vec![]);assert!(h.app.notice.is_none());
 }
 #[test]
 fn water_serving_and_undo_are_consistent(){
@@ -3757,7 +3759,86 @@ fn minimal_takes_precedence_over_mascot(){
 fn water_settings_are_in_the_island_and_editable(){
     let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
     h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);h.click(H::local(145.0,110.0));assert_eq!(h.app.page,2);assert_eq!(h.app.subpage,Some(2));assert_eq!(h.app.settings_category,1);
-    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(193.0,62.0));assert_eq!(h.app.settings.serving_ml,300);
+    h.hover(H::local(300.0,60.0),0.8);h.click(H::local(357.0,69.0));assert_eq!(h.app.settings.serving_ml,300);
+    // 标题旁的切换在设置子页同样可用：切到久坐后第一行就是久坐时长，最后一行时段两边共用。
+    h.click(H::local(136.0,19.0));assert!(h.app.sit_mode);for _ in 0..40{h.frame(vec![]);}
+    h.hover(H::local(300.0,60.0),0.3);h.click(H::local(357.0,47.0));assert_eq!(h.app.settings.sit_minutes,65);
+    h.hover(H::local(300.0,60.0),0.3);h.click(H::local(357.0,113.0));assert!(h.app.health_time,"最后一行进入提醒时段二级页");
+    let end=h.app.settings.water_end;h.hover(H::local(300.0,60.0),0.3);h.click(H::local(357.0,47.0));assert_eq!(h.app.settings.water_end,(end+1)%24);
+}
+#[test]
+fn lunch_break_silences_water_and_sit_reminders(){
+    use crate::app::SIT_TITLE;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.system_idle=Some(0.0);h.frame(vec![]);
+    // 测试时钟固定在 09:41，把午休设成 09:30–10:00。
+    h.app.settings.lunch_rest=true;h.app.settings.lunch_start=9*60+30;h.app.settings.lunch_end=10*60;
+    h.app.water.remind=true;h.app.last_reminder=h.app.t-2.0*3600.0;h.app.sit_start=h.app.t-2.0*3600.0;
+    h.frame(vec![]);assert!(h.app.notice.is_none(),"午休中不应弹喝水或久坐提醒");
+    h.app.settings.lunch_rest=false;h.frame(vec![]);
+    assert!(h.app.notice.is_some(),"关闭午休后应恢复提醒");
+    h.app.notice=None;h.app.alerts.clear();h.app.water.remind=false;h.app.sit_alerted=f64::NEG_INFINITY;
+    h.app.settings.lunch_rest=true;h.app.settings.lunch_start=10*60;h.app.settings.lunch_end=13*60;
+    h.frame(vec![]);assert!(h.app.notice.as_ref().is_some_and(|a|a.title==SIT_TITLE),"午休以外照常提醒");
+}
+#[test]
+fn health_time_subpage_edits_lunch_and_backs_out_one_level(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);
+    h.app.open_settings_category(1);for _ in 0..30{h.frame(vec![]);}
+    h.hover(H::local(300.0,60.0),0.3);h.click(H::local(200.0,113.0));assert!(h.app.health_time,"点提醒时段行进入二级页");
+    let start=h.app.settings.lunch_start;h.hover(H::local(300.0,60.0),0.3);h.click(H::local(225.0,91.0));assert_eq!(h.app.settings.lunch_start,start+15);
+    h.hover(H::local(300.0,60.0),0.3);h.click(H::local(353.0,69.0));assert!(!h.app.settings.lunch_rest,"午休开关可关闭");
+    h.hover(H::local(300.0,60.0),0.3);h.click(H::local(20.0,18.0));assert!(!h.app.health_time);assert_eq!(h.app.subpage,Some(2),"返回先回到健康提醒设置");
+}
+#[test]
+fn sit_reminder_fires_after_continuous_use_snoozes_and_resets_when_away(){
+    use crate::app::SIT_TITLE;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.system_idle=Some(0.0);h.frame(vec![]);h.app.water.remind=false;
+    h.t+=59.0*60.0;h.frame(vec![]);assert!(h.app.notice.is_none(),"未满 60 分钟不提醒: {:?}",h.app.notice.as_ref().map(|a|(a.title.clone(),a.body.clone())));
+    h.t+=61.0;h.frame(vec![]);
+    assert!(h.app.notice.as_ref().is_some_and(|a|a.title==SIT_TITLE));
+    assert!(h.cmds.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,_)if t==SIT_TITLE)));
+    // 稍后：10 分钟内不再提醒
+    h.app.notice=None;h.app.snooze_sit();h.t+=9.0*60.0;h.frame(vec![]);assert!(h.app.notice.is_none());
+    h.t+=61.0;h.frame(vec![]);assert!(h.app.notice.as_ref().is_some_and(|a|a.title==SIT_TITLE));
+    // 不理会：从上次提醒再满一个周期才再次提醒
+    h.app.notice=None;h.t+=30.0*60.0;h.frame(vec![]);assert!(h.app.notice.is_none());
+    // 只看屏幕不碰键鼠：照样算久坐，不归零
+    h.system_idle=Some(40.0*60.0);h.t+=10.0*60.0;h.frame(vec![]);assert!(h.app.sat_minutes()>=100,"键鼠闲置不应清零久坐计时");
+    // 锁屏：计时归零，解锁后从头算
+    h.app.notice=None;h.screen_locked=true;h.t+=60.0;h.frame(vec![]);assert_eq!(h.app.sat_minutes(),0);
+    h.screen_locked=false;h.system_idle=Some(0.0);h.t+=45.0*60.0;h.frame(vec![]);assert!(h.app.notice.is_none());assert_eq!(h.app.sat_minutes(),45);
+}
+#[test]
+fn sit_reminder_waits_for_focus_and_stops_with_module_or_switch(){
+    use crate::app::{Phase,SIT_TITLE,WATER_PAGE};
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.system_idle=Some(0.0);h.frame(vec![]);h.app.water.remind=false;
+    h.app.pomo.phase=Phase::Focus;h.app.pomo.remaining=1e7;h.app.pomo.running=true;
+    h.t+=61.0*60.0;h.frame(vec![]);assert!(h.app.notice.is_none(),"专注中不打扰: {:?}",h.app.notice.as_ref().map(|a|(a.title.clone(),a.body.clone())));
+    h.app.pomo.running=false;h.frame(vec![]);assert!(h.app.notice.as_ref().is_some_and(|a|a.title==SIT_TITLE),"专注结束后补上提醒");
+    h.app.notice=None;h.app.settings.sit_remind=false;h.t+=2.0*3600.0;h.frame(vec![]);assert!(h.app.notice.is_none());
+    h.app.settings.sit_remind=true;h.app.set_page_visible(WATER_PAGE,false);h.t+=2.0*3600.0;h.frame(vec![]);assert!(h.app.notice.is_none(),"模块关闭即不再提醒");
+}
+#[test]
+fn sit_notice_and_page_buttons_reset_the_timer(){
+    use crate::app::SIT_TITLE;
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.system_idle=Some(0.0);h.frame(vec![]);
+    h.app.sit_start=h.t-70.0*60.0;h.app.alert(SIT_TITLE,"已连续坐了 70 分钟",2,false);for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("稍后");assert!(h.app.notice.is_none());assert!((h.app.sit_due()-h.t-600.0).abs()<5.0);assert_eq!(h.app.water.drunk_ml,0);
+    h.app.alert(SIT_TITLE,"已连续坐了 70 分钟",2,false);for _ in 0..60 {h.frame(vec![]);}
+    h.click_text("起身了");assert!(h.app.notice.is_none());assert_eq!(h.app.sat_minutes(),0);assert_eq!(h.app.water.drunk_ml,0);
+    // 健康页：点「久坐」分段切换，同一位置的主按钮变成「起身了」、开关管久坐；点「喝水」切回
+    h.app.sit_start=h.t-30.0*60.0;
+    h.hover(Pos2::new(WIN_W/2.0,12.0),1.0);h.app.go(2,1.0);h.hover(H::local(300.0,60.0),0.8);
+    h.click(H::local(124.0,22.0));assert!(h.app.sit_mode);h.hover(H::local(300.0,90.0),0.8);
+    h.click(H::local(70.0,110.0));assert_eq!(h.app.sat_minutes(),0);assert_eq!(h.app.water.drunk_ml,0);
+    let water_remind=h.app.water.remind;
+    h.click(H::local(179.0,46.0));assert!(!h.app.settings.sit_remind);assert_eq!(h.app.water.remind,water_remind,"久坐模式的开关只管久坐");
+    assert!(!crate::model::Settings::load().sit_remind,"重新加载后应保留久坐开关");
+    h.click(H::local(97.0,22.0));assert!(!h.app.sit_mode);h.hover(H::local(300.0,90.0),0.8);
+    h.click(H::local(70.0,110.0));assert_eq!(h.app.water.drunk_ml,250,"回到喝水后按钮可用");
 }
 #[test]
 fn water_notice_buttons_work_without_opening_panel(){
@@ -4038,7 +4119,7 @@ fn music_seek_drag_previews_and_commits_on_release(){
         h.frame(vec![egui::Event::PointerButton{pos:press,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
         let to=H::local(x+w*0.75,y);h.cursor=Some(to);
         h.frame(vec![egui::Event::PointerMoved(to)]);
-        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="01:30")),"拖动中应显示目标时间");
+        assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.text()=="01:30")),"{source} 拖动中应显示目标时间");
         assert!(!h.cmds.iter().any(|c|matches!(c,crate::app::Cmd::Media(crate::smtc::Transport::Seek(_)))),"拖动中不应反复发送跳转");
         h.frame(vec![egui::Event::PointerButton{pos:to,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
         assert!(h.cmds.iter().any(|c|matches!(c,crate::app::Cmd::Media(crate::smtc::Transport::Seek(t)) if (*t-90.0).abs()<0.1)),"释放应提交目标进度");
@@ -5611,7 +5692,7 @@ fn page_order_drag_applies_on_release_and_saves() {
     for _ in 0..3 {draw(&mut h,vec![]);}
     let point=|h:&H,label:&str|h.shapes.iter().find_map(|s|match &s.shape {egui::Shape::Text(t) if t.galley.text()==label=>Some(t.visual_bounding_rect().left_center()),_=>None}).unwrap();
     let from=point(&h,"播放控制与同步歌词")+egui::vec2(-18.0,-6.0);
-    let to=point(&h,"饮水记录与提醒");
+    let to=point(&h,"喝水与久坐提醒");
     let button=|pos,pressed|egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed,modifiers:Default::default()};
     draw(&mut h,vec![egui::Event::PointerMoved(from),button(from,true)]);
     draw(&mut h,vec![egui::Event::PointerMoved(from+egui::vec2(0.0,10.0))]);
@@ -8055,6 +8136,31 @@ fn quota_acceptance_grouped_connections_preserve_saved_sources() {
 }
 
 #[test]
+fn quota_glm_get_key_link_follows_region_without_submitting_the_key(){
+    fn draw(h:&mut H,events:Vec<egui::Event>)->egui::FullOutput{
+        h.t+=0.2;
+        h.ctx.run(egui::RawInput{time:Some(h.t),screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(780.0,850.0))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));})
+    }
+    fn click(h:&mut H,output:&egui::FullOutput,label:&str)->egui::FullOutput{
+        let pos=output.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap_or_else(||panic!("找不到控件：{label}"));
+        let _=draw(h,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
+        let _=draw(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
+        let _=draw(h,vec![]);draw(h,vec![])
+    }
+    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    for dark in [true,false]{
+        let mut h=H::new();h.ctx.set_visuals(if dark{egui::Visuals::dark()}else{egui::Visuals::light()});
+        h.app.settings_open=true;h.app.quota.provider=crate::quota::Provider::Glm;h.app.quota.connect_open=true;h.app.quota.source="cn".into();h.app.quota.api_key="synthetic-glm-key".into();
+        let _=draw(&mut h,vec![]);let _=draw(&mut h,vec![]);let mut output=draw(&mut h,vec![]);
+        for (region,url) in [("中国区","https://bigmodel.cn/coding-plan/personal/overview"),("国际区","https://z.ai/manage-apikey/apikey-list")]{
+            output=click(&mut h,&output,region);h.app.pending.clear();output=click(&mut h,&output,"获取密钥");
+            assert!(h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::OpenUrl(target)if target==url)));
+            assert_eq!(h.app.quota.api_key,"synthetic-glm-key");assert!(h.app.quota.api_connecting.is_none());assert!(h.app.quota.config.accounts.is_empty());
+        }
+    }
+}
+
+#[test]
 fn quota_relay_automatic_is_the_default_and_manual_types_are_hidden() {
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
     h.app.settings_open=true;h.app.quota.provider=crate::quota::Provider::NewApi;h.app.quota.connect_open=true;
@@ -8255,35 +8361,10 @@ fn background_services_follow_the_module_switch(){
 
 #[test]
 fn every_module_settings_tab_maps_to_its_page(){
-    let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气"];
+    let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气"];
     let mut pages:Vec<_>=(0..titles.len()).filter_map(crate::extras::settings_tab_module).collect();
     for tab in 0..titles.len() {
         if let Some(page)=crate::extras::settings_tab_module(tab) {assert!(crate::app::PAGE_NAMES[page].chars().next()==titles[tab].chars().next(),"{} ↔ {}",titles[tab],crate::app::PAGE_NAMES[page]);}
     }
     pages.sort();assert_eq!(pages,(0..crate::app::PAGE_NAMES.len()).collect::<Vec<_>>(),"每个功能页面各有一个设置分页");
-}
-
-#[test]
-fn quota_glm_get_key_link_follows_region_without_submitting_the_key(){
-    fn draw(h:&mut H,events:Vec<egui::Event>)->egui::FullOutput{
-        h.t+=0.2;
-        h.ctx.run(egui::RawInput{time:Some(h.t),screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(780.0,850.0))),events,..Default::default()},|ctx|{egui::CentralPanel::default().show(ctx,|ui|h.app.quota_settings(ui));})
-    }
-    fn click(h:&mut H,output:&egui::FullOutput,label:&str)->egui::FullOutput{
-        let pos=output.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text()==label=>Some(t.visual_bounding_rect().center()),_=>None}).unwrap_or_else(||panic!("找不到控件：{label}"));
-        let _=draw(h,vec![egui::Event::PointerMoved(pos),egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:true,modifiers:Default::default()}]);
-        let _=draw(h,vec![egui::Event::PointerButton{pos,button:egui::PointerButton::Primary,pressed:false,modifiers:Default::default()}]);
-        let _=draw(h,vec![]);draw(h,vec![])
-    }
-    let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
-    for dark in [true,false]{
-        let mut h=H::new();h.ctx.set_visuals(if dark{egui::Visuals::dark()}else{egui::Visuals::light()});
-        h.app.settings_open=true;h.app.quota.provider=crate::quota::Provider::Glm;h.app.quota.connect_open=true;h.app.quota.source="cn".into();h.app.quota.api_key="synthetic-glm-key".into();
-        let _=draw(&mut h,vec![]);let _=draw(&mut h,vec![]);let mut output=draw(&mut h,vec![]);
-        for (region,url) in [("中国区","https://bigmodel.cn/coding-plan/personal/overview"),("国际区","https://z.ai/manage-apikey/apikey-list")]{
-            output=click(&mut h,&output,region);h.app.pending.clear();output=click(&mut h,&output,"获取密钥");
-            assert!(h.app.pending.iter().any(|cmd|matches!(cmd,crate::app::Cmd::OpenUrl(target)if target==url)));
-            assert_eq!(h.app.quota.api_key,"synthetic-glm-key");assert!(h.app.quota.api_connecting.is_none());assert!(h.app.quota.config.accounts.is_empty());
-        }
-    }
 }

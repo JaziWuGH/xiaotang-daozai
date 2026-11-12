@@ -164,6 +164,35 @@ pub fn toggle_mute() -> Option<bool> {
     }
 }
 
+/// 当前会话是否锁屏。查询走 WTS（一次本机 RPC），按 2 秒缓存，避免每帧都查。
+pub fn screen_locked() -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    use windows::Win32::System::RemoteDesktop::{
+        WTSFreeMemory, WTSQuerySessionInformationW, WTSSessionInfoEx, WTSINFOEXW, WTS_CURRENT_SERVER_HANDLE,
+        WTS_CURRENT_SESSION, WTS_SESSIONSTATE_LOCK,
+    };
+    static CACHE: Mutex<Option<(Instant, bool)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((at, locked)) = *cache {
+        if at.elapsed() < Duration::from_secs(2) { return locked; }
+    }
+    let locked = unsafe {
+        let mut buf = windows::core::PWSTR::null();
+        let mut len = 0u32;
+        if WTSQuerySessionInformationW(WTS_CURRENT_SERVER_HANDLE, WTS_CURRENT_SESSION, WTSSessionInfoEx, &mut buf, &mut len).is_ok() && !buf.is_null() {
+            let info = &*(buf.0 as *const WTSINFOEXW);
+            let locked = info.Level == 1 && info.Data.WTSInfoExLevel1.SessionFlags == WTS_SESSIONSTATE_LOCK as i32;
+            WTSFreeMemory(buf.0 as *mut core::ffi::c_void);
+            locked
+        } else {
+            false
+        }
+    };
+    *cache = Some((Instant::now(), locked));
+    locked
+}
+
 pub fn idle_seconds() -> f64 {
     unsafe {
         let mut info = LASTINPUTINFO {

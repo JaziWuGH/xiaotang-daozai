@@ -964,15 +964,24 @@ fn parse_events_in_range(xml:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::Da
         }else{overrides.insert((field(body,"UID").unwrap_or_default(),at.unwrap()));}
     }}
     let mut events=Vec::new();
-    for body in blocks{
-        if events.len()>=5000{report.limited=true;break;}
+    let mut seen=std::collections::HashSet::new();
+    let mut add_event=|event:crate::mail::Meeting,report:&mut ReadReport|{
+        if event.start>=hi.timestamp() || event.end.unwrap_or(event.start+1)<=lo.timestamp(){
+            report.outside+=1;
+        }else if seen.insert(dedupe_key(&event)){
+            if events.len()==5000 {report.limited=true;return false;}
+            events.push(event);
+        }
+        true
+    };
+    'blocks: for body in blocks{
         if field(&body,"UID").is_some_and(|uid|invalid_series.contains(&uid)){report.invalid+=1;continue;}
         if cancelled(&body){report.cancelled+=1;continue;}
         let Some(base)=crate::mail::meetings_of(&format!("BEGIN:VEVENT\n{body}END:VEVENT")).into_iter().next()else{
             report.invalid+=1;report.problem("部分日程的时间或时区无法解析");continue;
         };
         if field(&body,"RECURRENCE-ID").is_some()||field(&body,"RRULE").is_none(){
-            if field(&body,"RECURRENCE-ID").is_some()||!overrides.contains(&(field(&body,"UID").unwrap_or_default(),base.start)){events.push(base);}
+            if (field(&body,"RECURRENCE-ID").is_some()||!overrides.contains(&(field(&body,"UID").unwrap_or_default(),base.start))) && !add_event(base,&mut report){break;}
             continue;
         }
         let mut rules=Vec::new();let mut nested=0;
@@ -987,13 +996,12 @@ fn parse_events_in_range(xml:&str,lo:chrono::DateTime<chrono::Utc>,hi:chrono::Da
         let uid=field(&body,"UID").unwrap_or_default();
         for date in result.dates{
             let start=date.timestamp();if overrides.contains(&(uid.clone(),start)){continue;}
-            if events.len()>=5000{report.limited=true;break;}
             let mut event=base.clone();event.start=start;event.end=base.end.map(|end|start+end-base.start);
-            event.at=date.with_timezone(&chrono::Local).format(if event.all_day{"%m-%d 全天"}else{"%m-%d %H:%M"}).to_string();events.push(event);
+            event.at=date.with_timezone(&chrono::Local).format(if event.all_day{"%m-%d 全天"}else{"%m-%d %H:%M"}).to_string();
+            if !add_event(event,&mut report){break 'blocks;}
         }
     }
-    events.retain(|m|{let included=m.start<hi.timestamp()&&m.end.unwrap_or(m.start+1)>lo.timestamp();if !included{report.outside+=1;}included});
-    events.sort_by_key(|m|m.start);let mut seen=std::collections::HashSet::new();events.retain(|m|seen.insert(dedupe_key(m)));
+    events.sort_by_key(|m|m.start);
     ParsedEvents{events,report}
 }
 
@@ -1459,6 +1467,18 @@ mod tests {
         assert_eq!(calendar_data("<c:calendar-data><![CDATA[SUMMARY:A &amp; B]]></c:calendar-data>"),vec!["SUMMARY:A &amp; B"]);
         assert_eq!(calendar_home("<c:calendar-home-set><d:href>/calendar/?a=1&amp;b=2</d:href></c:calendar-home-set>","https://a.com/"),Some("https://a.com/calendar/?a=1&b=2".into()));
         assert_eq!(join_url("https://a.com/dav/user/","../team/"),"https://a.com/dav/team/");
+    }
+
+    #[test]
+    fn calendar_limit_counts_only_unique_events_in_range(){
+        let old="BEGIN:VEVENT\nUID:old\nDTSTART:20200101T120000Z\nSUMMARY:历史\nEND:VEVENT\n";
+        let current="BEGIN:VEVENT\nUID:today\nDTSTART:20261112T120000Z\nSUMMARY:今天\nEND:VEVENT\n";
+        let daily="BEGIN:VEVENT\nUID:daily\nDTSTART:20261113T120000Z\nRRULE:FREQ=DAILY;COUNT=2\nSUMMARY:重复\nEND:VEVENT\n";
+        let ics=format!("BEGIN:VCALENDAR\n{}{}{daily}END:VCALENDAR",old.repeat(5000),current.repeat(2));
+        let result=inspect_ics(&ics,"2026-11-01T00:00:00Z".parse().unwrap(),"2026-12-01T00:00:00Z".parse().unwrap()).unwrap();
+        assert_eq!(result.events.len(),3);
+        assert_eq!(result.report.outside,5000);
+        assert!(!result.report.limited);
     }
 
     #[test]

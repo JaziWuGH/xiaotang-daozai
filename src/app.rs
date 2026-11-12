@@ -25,6 +25,12 @@ pub const PH: f32 = 140.0; // 展开面板高
 pub const MUSIC_PAGE: usize = 0;
 pub const FOCUS_PAGE: usize = 1;
 pub const WATER_PAGE: usize = 2;
+/// 久坐提醒的标题（通知按钮据此区分喝水提醒）。
+pub const SIT_TITLE: &str = "该起来活动了";
+/// 连续无键鼠输入多久算作「起身离开」，久坐计时随之归零。
+/// 「稍后」把久坐提醒推迟的秒数。
+pub const SIT_SNOOZE_SECS: f64 = 10.0 * 60.0;
+
 pub const SHELF_PAGE: usize = 3;
 pub const TODO_PAGE: usize = 4;
 pub const MAIL_PAGE: usize = 5;
@@ -58,7 +64,7 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "健康", "置物架", "待办", "邮箱", "AI 额度", "日程", "天气"];
 pub(crate) const PAGE_SETTINGS_TABS: [usize; 9] = [1,2,3,5,4,7,11,8,12];
 
 // ---------- 动效参数 ----------
@@ -106,6 +112,8 @@ pub struct Env {
     /// 光标位置（与 `frame` 传入的 `win` 同一坐标系）；不在窗口附近时为 None。
     pub cursor: Option<Pos2>,
     pub idle_seconds: Option<f64>,
+    /// 当前会话是否处于锁屏（Win + L、自动锁屏、唤醒后的登录界面）。
+    pub screen_locked: bool,
     /// 前台浏览器的顶部是否与岛重叠；岛仔自身窗口或暂不可读时为 None。
     pub browser_at_top: Option<bool>,
     pub media: NowPlaying,
@@ -677,8 +685,17 @@ pub struct App {
     pub(crate) water_ml: f32,
     pub(crate) water_view: usize,
     pub(crate) water_view_t: Spring,
+    pub(crate) sit_view_t: Spring,
+    /// 饮水页当前是否显示「站立提醒」。
+    pub(crate) sit_mode: bool,
+    /// 健康提醒设置里是否打开了「提醒时段」二级页（时段 + 午休）。
+    pub(crate) health_time: bool,
     pub(crate) remind_t: Spring,
     pub(crate) last_reminder: f64,
+    /// 久坐计时起点（离开电脑足够久后重置）与上次久坐提醒时刻。
+    pub(crate) sit_start: f64,
+    pub(crate) sit_alerted: f64,
+    pub(crate) sit_t: Spring,
 
     // 专注
     pub(crate) pomo: Pomo,
@@ -706,7 +723,7 @@ pub struct App {
 
     forced_open_until:f64,
     pub settings_open:bool,
-    pub(crate) settings_window:crate::settings_window::State,
+    settings_window:std::sync::Arc<std::sync::Mutex<crate::settings_window::State>>,
     pub displays:Vec<crate::display_layout::Display>,
     browser_at_top:bool,
     browser_minimal_active:bool,
@@ -845,8 +862,14 @@ impl App {
             water_ml: 0.0,
             water_view: 0,
             water_view_t: Spring::new(0.0, 200.0, 0.9),
+            sit_view_t: Spring::new(0.0, 200.0, 0.9),
+            sit_mode: false,
+            health_time: false,
             remind_t: Spring::new(1.0, 400.0, 0.8),
             last_reminder: 0.0,
+            sit_start: 0.0,
+            sit_alerted: f64::NEG_INFINITY,
+            sit_t: Spring::new(1.0, 400.0, 0.8),
             pomo: Pomo { phase: Phase::Focus, remaining: focus_seconds, running: false }, focus_editing:false,
             ring_shown: Spring::new(1.0, 160.0, 0.95),
             reset_spin: Spring::new(0.0, 160.0, 0.82),
@@ -864,7 +887,7 @@ impl App {
             media_anchor: (String::new(), 0.0, 0.0, false),
             media: NowPlaying::default(),
             music_artwork: None,
-            forced_open_until:0.0, settings_open:false, settings_window:crate::settings_window::State::load(), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
+            forced_open_until:0.0, settings_open:false, settings_window:std::sync::Arc::new(std::sync::Mutex::new(crate::settings_window::State::load())), displays:Vec::new(), browser_at_top:false, browser_minimal_active:false, glass_tint:0.0, fluid:Default::default(), fluid_origin:Pos2::ZERO, fluid_art:None, fluid_title:String::new(), screen:None, settings_focus_requested:false, settings_tab:0, settings_category:0, messenger_statuses:Default::default(), notification_apps:model::NotificationApps::load(), subpage:None, task_dialog:None,
             listener_status: "尚未连接".into(),
             notification_bell_until: 0.0, notification_bell_at: -10.0, notice: None, hud_notice: None, hud_alpha: 0.0, notice_width:Spring::new(0.0,CLOSE.0,CLOSE.1), notice_details:false, pending_messengers:Vec::new(), messenger_scroll:0.0, alerts: Default::default(), history: Default::default(), pending: vec![],
             todo_first: 0, todo_choosing: false, pet: Default::default(), last_drink: None,
@@ -1399,12 +1422,26 @@ impl App {
         self.w.tune(OPEN_W.0,OPEN_W.1);self.h.tune(OPEN_H.0,OPEN_H.1);
         self.w.target=PW;self.h.target=self.expanded_height();
     }
+    pub(crate) fn window_layout(&self)->std::sync::MutexGuard<'_,crate::settings_window::State>{
+        self.settings_window.lock().unwrap_or_else(|e|e.into_inner())
+    }
+
+    pub fn save_window_before_exit(&self){self.window_layout().close();}
+
+    #[cfg(windows)]
+    pub fn start_tray(&self,state:crate::tray::State)->Option<crate::tray::Tray>{
+        let layout=self.settings_window.clone();
+        // 原生文件选择框会占用界面线程，托盘退出时直接保存最近一次观察到的布局。
+        crate::tray::Tray::start_with_exit(state,move||layout.lock().unwrap_or_else(|e|e.into_inner()).close())
+    }
+
     pub fn open_settings(&mut self){
         self.settings_open=true;
         self.settings_focus_requested=true;
     }
     pub fn open_settings_category(&mut self,category:usize){
         self.settings_category=category.min(3);
+        self.health_time=false;
         if category==0 || category>=3 {self.settings_tab=if category==0{0}else{6};self.open_settings();return;}
         let page=if category==1{2}else{1};
         self.show_page(page);
@@ -1412,6 +1449,14 @@ impl App {
     }
     pub fn page(&self) -> usize {
         self.page
+    }
+    /// 打开健康提醒设置里的「提醒时段」二级页（演示录制用）。
+    pub fn show_health_time(&mut self) { self.health_time = true; }
+    /// 切到饮水页的久坐屏，并假定已连续久坐 minutes 分钟（演示录制用）。
+    pub fn show_sit_view(&mut self, minutes: f64) {
+        self.show_page(WATER_PAGE);
+        self.sit_mode = true;
+        self.sit_start = self.t - minutes * 60.0;
     }
 
     // ---------- 功能模块：页面开关即模块开关，关闭后页面隐藏、后台同步和提醒一并停止 ----------
@@ -1656,6 +1701,7 @@ impl App {
             self.started = true;
             self.last_input = env.t;
             self.last_reminder = env.t;
+            self.sit_start = env.t;
             self.page_t0 = env.t - 10.0;
             if self.page==CALENDAR_PAGE {self.request_calendar_month(false);}
         }
@@ -2027,7 +2073,7 @@ impl App {
             || (self.pet_a > 0.001 && self.pet_a < 0.999)
             || !self.resident.settled()
             || self.open && self.page==3 && self.shelf_x.values().any(|s| !s.settled(68.0))
-            || self.open && self.page==2 && !self.water_ring.settled(1.0)
+            || self.open && self.page==2 && (!self.water_ring.settled(1.0) || !self.sit_view_t.settled(1.0) || !self.sit_t.settled(1.0))
             || self.toast.is_some()
             || self.t < self.notification_bell_until && self.t-self.notification_bell_at < 0.95
             || self.notice.as_ref().is_some_and(|a|a.source!=crate::extras::AlertSource::Internal&&self.t-a.at<0.95)
@@ -2703,8 +2749,14 @@ impl App {
         if settings.clicked(){self.settings_tab=PAGE_SETTINGS_TABS[self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
-            c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
-            if c.hit(9.0,7.0,28.0,23.0,"subpage-back").clicked(){self.subpage=None;self.focus_editing=false;}
+            // 健康提醒设置沿用主页的标题 + 喝水/久坐切换，切到哪边就设置哪边。
+            if self.page==2 && self.health_time {c.text(31.0,25.0,"提醒时段",size::TITLE,W::Bold,theme::WHITE,H::Left);}
+            else if self.page==2 {let sv=self.sit_view_t.pos.clamp(0.0,1.0);self.health_tabs(c,31.0,sv);}
+            else {c.text(37.0,25.0,"专注设置",size::TITLE,W::Bold,theme::WHITE,H::Left);}
+            // 「提醒时段」二级页的返回先回到健康提醒设置，再退出设置。
+            if c.hit(9.0,7.0,28.0,23.0,"subpage-back").clicked(){
+                if self.page==2 && self.health_time {self.health_time=false;} else {self.subpage=None;self.focus_editing=false;}
+            }
             self.page_settings(c);self.nav(c);return;
         }
         let e = self.page_e();
@@ -2737,7 +2789,8 @@ impl App {
         let (a, b, col) = match page {
             0 | CALENDAR_PAGE => return,
             1 => ("番茄", "专注", theme::RED_TOP),
-            2 => ("饮水", "提醒", theme::BLUE),
+            // 健康页的标题由页面自己画（「健康提醒」+ 喝水/久坐分段切换）。
+            2 => return,
             // 置物架的标题就是「置物架 | 剪贴板」分栏，由页面自己画。
             3 => return,
             4 => ("待办", "清单", theme::GREEN),
@@ -2860,9 +2913,18 @@ impl App {
         self.reset_spin.step(dt);
         self.todo_pop.step(dt);
 
-        if self.module_on(WATER_PAGE) && self.water.remind && self.water.percent() < 100.0 && self.water_hours(env.hour() as u32) && self.t - self.last_reminder >= self.settings.water_minutes as f64 * 60.0 {
+        if self.module_on(WATER_PAGE) && self.water.remind && self.water.percent() < 100.0 && self.remind_window(env) && self.t - self.last_reminder >= self.settings.water_minutes as f64 * 60.0 {
             self.last_reminder = self.t;
             self.alert("喝水时间到了", format!("休息一下，喝 {} ml 水吧", self.settings.serving_ml), 2, true);
+        }
+        // 久坐：锁屏视为已起身离开，锁屏期间计时一直停在零，解锁后从头算；
+        // 不看键盘鼠标是否闲置——只看屏幕不动鼠标的人同样是在久坐。
+        // 专注阶段不打断，等专注结束（通常正好进入休息）再提醒。
+        if env.screen_locked { self.sit_start = self.t; }
+        let focusing = self.pomo.running && self.pomo.phase == Phase::Focus;
+        if self.module_on(WATER_PAGE) && self.settings.sit_remind && !focusing && self.remind_window(env) && self.t >= self.sit_due() {
+            self.sit_alerted = self.t;
+            self.alert(SIT_TITLE, format!("已连续坐了 {} 分钟", self.sat_minutes()), 2, true);
         }
         let now = format!("{} {}", env.today, env.clock.get(..5).unwrap_or("00:00"));
         let todo_on=self.module_on(TODO_PAGE);
@@ -2911,8 +2973,12 @@ impl App {
         self.water_ml = anim::approach(self.water_ml, self.water.drunk_ml as f32, 9.0, dt);
         self.water_view_t.target = self.water_view as f32;
         self.water_view_t.step(dt);
+        self.sit_view_t.target = if self.sit_mode { 1.0 } else { 0.0 };
+        self.sit_view_t.step(dt);
         self.remind_t.target = if self.water.remind { 1.0 } else { 0.0 };
         self.remind_t.step(dt);
+        self.sit_t.target = if self.settings.sit_remind { 1.0 } else { 0.0 };
+        self.sit_t.step(dt);
         // 剪贴板记录开关：关闭时同时清掉未固定的记录。
         if self.clipboard.is_enabled() != self.clipboard_active() {
             self.clipboard.set_enabled(self.clipboard_active());

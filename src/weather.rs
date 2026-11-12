@@ -469,7 +469,7 @@ pub struct State {
     /// 上一次请求使用的城市。
     last_city: Option<String>,
     last_position: Option<Position>,
-    rx: Option<Receiver<Result<Snapshot, String>>>,
+    rx: Option<(Receiver<Result<Snapshot, String>>, bool)>,
     cache: Option<PathBuf>,
     /// 各城市最近一次的天气；切换城市时先显示这里的数据，不等网络。
     cached: Vec<Snapshot>,
@@ -584,7 +584,8 @@ impl State {
         let now=chrono::Utc::now().timestamp();
         let located=self.located.as_ref().filter(|(p,at)|city.is_empty() && p.valid() && (0..LOCATE_TTL).contains(&(now-at))).map(|(p,_)|p.clone());
         let (tx, rx) = mpsc::channel();
-        self.rx = Some(rx);
+        let fresh_location=city.is_empty() && located.is_none();
+        self.rx = Some((rx,fresh_location));
         self.loading = true;
         self.last_start = t;
         std::thread::spawn(move || {
@@ -599,7 +600,8 @@ impl State {
 
     /// 是否有新结果（外壳据此立即重绘）。
     pub fn poll(&mut self, city: &str, enabled: bool) -> bool {
-        let Some(rx) = &self.rx else { return false; };
+        let Some((rx,fresh_location)) = &self.rx else { return false; };
+        let fresh_location=*fresh_location;
         match rx.try_recv() {
             Ok(result) => {
                 self.rx = None;
@@ -614,11 +616,8 @@ impl State {
                         self.cached.retain(|s|!(s.auto==key.auto && (key.auto || s.position==key.position)));
                         self.cached.insert(0,snapshot.clone());self.cached.truncate(CACHE_LIMIT);
                         self.persist();
-                        if city.trim().is_empty() {
-                            if let Some(position)=&snapshot.position {
-                                // 复用的定位不延长有效期，保证每 3 小时至少重新识别一次。
-                                if self.located.as_ref().map(|(p,_)|p)!=Some(position) {self.located=Some((position.clone(),snapshot.at));}
-                            }
+                        if fresh_location {
+                            if let Some(position)=&snapshot.position {self.located=Some((position.clone(),snapshot.at));}
                         }
                         self.snapshot = Some(snapshot);
                         self.error = None;
@@ -664,10 +663,17 @@ mod tests {
             assert!(state.should_refresh("",wait,now,true));
         }
         assert!(state.can_refresh("",120.0),"手动刷新不受自动退避限制");
-        let (tx,rx)=mpsc::channel();state.rx=Some(rx);state.loading=true;
+        let (tx,rx)=mpsc::channel();state.rx=Some((rx,true));state.loading=true;
         tx.send(Ok(Snapshot{position:Some(Position{lat:30.0,lon:120.0,label:"杭州".into(),region:String::new()}),at:now,..Default::default()})).unwrap();
         assert!(state.poll("",true));assert_eq!(state.failures,0);assert_eq!(state.backoff(),0.0);
         assert!(state.located.as_ref().is_some_and(|(p,at)|p.label=="杭州"&&*at==now),"自动定位结果应缓存复用");
+        let position=state.snapshot.as_ref().unwrap().position.clone();
+        let (tx,rx)=mpsc::channel();state.rx=Some((rx,true));
+        tx.send(Ok(Snapshot{position:position.clone(),at:now+LOCATE_TTL+1,..Default::default()})).unwrap();
+        assert!(state.poll("",true));assert_eq!(state.located.as_ref().unwrap().1,now+LOCATE_TTL+1);
+        let (tx,rx)=mpsc::channel();state.rx=Some((rx,false));
+        tx.send(Ok(Snapshot{position,at:now+LOCATE_TTL+900,..Default::default()})).unwrap();
+        assert!(state.poll("",true));assert_eq!(state.located.as_ref().unwrap().1,now+LOCATE_TTL+1);
         state.forget_location();assert!(state.located.is_none());
     }
 
@@ -741,7 +747,7 @@ mod tests {
         let first=Position{lat:28.73401,lon:98.80612,label:"佛山".into(),region:"云南".into()};
         let second=Position{lat:30.04572,lon:106.41138,label:"佛山".into(),region:"重庆".into()};
         let (tx,rx)=mpsc::channel();
-        let mut state=State{last_city:Some("佛山".into()),last_position:Some(first.clone()),active_position:Some(first),selected_city:Some(second.clone()),city_input:"佛山".into(),manual_city:true,last_start:100.0,rx:Some(rx),..Default::default()};
+        let mut state=State{last_city:Some("佛山".into()),last_position:Some(first.clone()),active_position:Some(first),selected_city:Some(second.clone()),city_input:"佛山".into(),manual_city:true,last_start:100.0,rx:Some((rx,false)),..Default::default()};
         assert!(state.can_apply(101.0),"同名但不同地区的选择可以立即应用");
         state.active_position=Some(second);assert!(state.city_changed("佛山"));
         tx.send(Ok(Snapshot{code:73,..Default::default()})).unwrap();assert!(state.poll("佛山",true));assert!(state.snapshot.is_none());
@@ -792,7 +798,7 @@ mod tests {
             let (tx,rx)=mpsc::channel();
             let path=std::env::temp_dir().join(format!("daozai-weather-discard-{}-{enabled}.json",std::process::id()));
             let mut state=State{snapshot:Some(Snapshot{place:"上次天气".into(),..Default::default()}),
-                loading:true,last_city:Some("杭州".into()),rx:Some(rx),cache:Some(path.clone()),..Default::default()};
+                loading:true,last_city:Some("杭州".into()),rx:Some((rx,false)),cache:Some(path.clone()),..Default::default()};
             tx.send(Ok(Snapshot{place:"杭州".into(),..Default::default()})).unwrap();
             assert!(state.poll(city,enabled));
             assert!(!state.loading);
@@ -804,7 +810,7 @@ mod tests {
     #[test]
     fn weather_current_result_updates_the_snapshot_and_clears_errors(){
         let (tx,rx)=mpsc::channel();
-        let mut state=State{last_city:Some("杭州".into()),loading:true,rx:Some(rx),error:Some("旧错误".into()),..Default::default()};
+        let mut state=State{last_city:Some("杭州".into()),loading:true,rx:Some((rx,false)),error:Some("旧错误".into()),..Default::default()};
         tx.send(Ok(Snapshot{place:"杭州".into(),temp:9.0,..Default::default()})).unwrap();
         assert!(state.poll(" 杭州 ",true));
         assert_eq!(state.snapshot.as_ref().unwrap().temp,9.0);
