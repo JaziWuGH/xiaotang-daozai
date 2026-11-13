@@ -896,9 +896,9 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> eframe::Result<()> {
-    // 单实例（与原版同名互斥体）
+    // 单实例（与原版同名互斥体）；托盘「重新启动」拉起的新进程会等旧实例退场后再接管。
     #[cfg(windows)]
-    if !daozai::tray::single_instance() {
+    if !daozai::tray::claim_instance(daozai::tray::restart_requested(std::env::args())) {
         if !daozai::tray::activate_existing(std::env::args().any(|arg|arg=="--calendar")) {
             diagnostics::report("岛仔已在运行，但暂时无法打开窗口。\n请稍后重试；若仍无法打开，请在任务管理器的“详细信息”中结束 daozai.exe 后重试。", "已有实例可能正在启动或已无响应。请稍后重试；若仍无法打开，请在任务管理器的“详细信息”中结束 daozai.exe，再重新启动。");
         }
