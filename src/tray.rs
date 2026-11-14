@@ -48,9 +48,6 @@ const CMD_SETTINGS:u32=6;
 const CMD_RESTART:u32=7;
 const TIMER_MENU: usize = 12;
 
-/// 重启时附带的自有参数：新进程靠它知道「等旧实例退出」而不是直接退出。
-const RESTART_ARG: &str = "--restart";
-
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const RUN_VALUE: PCWSTR = w!("Daozai");
 const MUTEX_NAME: PCWSTR = w!("Local\\Daozai.SingleInstance");
@@ -72,6 +69,7 @@ struct Ctx {
     state: Arc<Mutex<State>>,
     taskbar_msg: u32,
     hicon: HICON,
+    before_exit: Box<dyn Fn() + Send>,
     added: AtomicBool,
     adds: AtomicU32,
 }
@@ -89,6 +87,8 @@ pub enum Event {
     OpenCalendar,
     ToggleMinimal,
     ToggleAutostart,
+    /// 托盘「重新启动」：交给界面线程走与设置页「立即重启」相同的流程。
+    Restart,
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -241,62 +241,6 @@ fn about() {
     }
 }
 
-fn message(text: &str) {
-    let text = wide(text);
-    let title = wide("岛仔");
-    unsafe {
-        MessageBoxW(
-            None,
-            PCWSTR(text.as_ptr()),
-            PCWSTR(title.as_ptr()),
-            MB_OK | MB_ICONINFORMATION,
-        );
-    }
-}
-
-/// 重启：先拉起一个带 `--restart` 的副本（它会等本进程释放单实例互斥体再启动），
-/// 再摘掉托盘图标结束本进程；拉起失败时留在原地并提示，不至于把自己关了却打不开。
-fn restart(hwnd: HWND) {
-    let exe = match std::env::current_exe() {
-        Ok(exe) => exe,
-        Err(error) => {
-            message(&format!("无法定位岛仔的程序文件：{error}"));
-            return;
-        }
-    };
-    match std::process::Command::new(&exe).arg(RESTART_ARG).spawn() {
-        Ok(_) => {
-            remove_icon(hwnd);
-            unsafe { ExitProcess(0) };
-        }
-        Err(error) => message(&format!("重新启动失败：{error}\n\n请手动退出岛仔后重新打开。")),
-    }
-}
-
-/// 命令行里是否带了重启标记。
-pub fn restart_requested<I: IntoIterator<Item = String>>(args: I) -> bool {
-    args.into_iter().any(|arg| arg == RESTART_ARG)
-}
-
-/// 抢单实例锁。`wait` 为真（重启拉起的新进程）时在旧实例退出前持续重试，
-/// 而不是立刻弹「岛仔已在运行」。
-pub fn claim_instance(wait: bool) -> bool {
-    if single_instance() {
-        return true;
-    }
-    if !wait {
-        return false;
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(80));
-        if single_instance() {
-            return true;
-        }
-    }
-    false
-}
-
 fn dump_menu(hwnd: HWND, ctx: &Ctx, menu: HMENU) {
     if let Ok(path) = std::env::var("DAOZAI_TRAY_DUMP") {
         let state = ctx.state();
@@ -350,9 +294,9 @@ fn show_menu_at(hwnd: HWND, ctx: &Ctx, x: i32, y: i32) {
             }
             CMD_SETTINGS => {let _=ctx.tx.send(Event::OpenSettings);}
             CMD_ABOUT => about(),
-            CMD_RESTART => restart(hwnd),
+            CMD_RESTART => { let _=ctx.tx.send(Event::Restart); }
             CMD_EXIT => {
-                // 原版：先摘图标，再结束进程
+                (ctx.before_exit)();
                 remove_icon(hwnd);
                 ExitProcess(0);
             }
@@ -426,7 +370,16 @@ pub struct Tray {
 }
 
 impl Tray {
-    pub fn start(state: State) -> Option<Self> {
+    /// 与托盘菜单「退出」相同：先摘图标再结束进程（用于「立即重启」）。
+    pub fn exit_process(&self) -> ! {
+        unsafe { remove_icon(self.hwnd); ExitProcess(0); }
+    }
+}
+
+impl Tray {
+    pub fn start(state: State) -> Option<Self> {Self::start_with_exit(state,||{})}
+
+    pub(crate) fn start_with_exit(state: State,before_exit:impl Fn()+Send+'static) -> Option<Self> {
         let shared = Arc::new(Mutex::new(state));
         let (event_tx, event_rx) = channel();
         let (ready_tx, ready_rx) = channel();
@@ -478,6 +431,7 @@ impl Tray {
                     return;
                 };
                 let ctx = Box::new(Ctx {
+                    before_exit:Box::new(before_exit),
                     tx: event_tx,
                     state: thread_state,
                     taskbar_msg: RegisterWindowMessageW(w!("TaskbarCreated")),
@@ -679,17 +633,6 @@ mod tests {
         unsafe {
             let _ = DestroyMenu(menu);
         }
-    }
-
-    #[test]
-    fn restart_flag_only_matches_our_own_argument() {
-        let has = |list: &[&str]| restart_requested(list.iter().map(|s| s.to_string()));
-        assert!(has(&["--restart"]));
-        assert!(has(&["--calendar", "--restart"]));
-        assert!(!has(&["--calendar", "--settings"]));
-        assert!(!has(&[]));
-        // 不能把前缀相同的参数当成重启标记。
-        assert!(!has(&["--restart-safe"]));
     }
 
     #[test]

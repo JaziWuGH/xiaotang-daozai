@@ -204,8 +204,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 9],
-    pub page_order: [usize; 9],
+    pub visible_pages: [bool; 10],
+    pub page_order: [usize; 10],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -228,6 +228,9 @@ pub struct Settings {
     pub bluetooth_notifications: bool,
     pub read_notifications:bool,
     pub wechat_notifications:bool,
+    pub wecom_notifications:bool,
+    pub feishu_notifications:bool,
+    pub dingtalk_notifications:bool,
     /// 微信缩在托盘时，点提醒通过系统托盘按钮唤起微信（默认关闭）。
     pub wechat_tray_open:bool,
     pub qq_only:bool,
@@ -238,12 +241,21 @@ pub struct Settings {
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
+    /// 顶栏类软件（含置顶的任务栏）登记占用屏幕顶部时，岛体从它的下沿开始摆放。
+    pub avoid_top_bar: bool,
     pub focus_minutes: u32,
     pub rest_minutes: u32,
     pub water_minutes: u32,
     pub serving_ml: u32,
     pub water_start: u32,
     pub water_end: u32,
+    /// 久坐提醒：连续使用电脑达到 sit_minutes 分钟后提醒起身；与喝水共用提醒时段。
+    pub sit_remind: bool,
+    pub sit_minutes: u32,
+    /// 午休免打扰：lunch_start..lunch_end（一天中的分钟数）内喝水和久坐都不提醒。
+    pub lunch_rest: bool,
+    pub lunch_start: u32,
+    pub lunch_end: u32,
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
     pub mail_sync_operations:bool,
@@ -258,11 +270,21 @@ pub struct Settings {
     pub calendar_auto_sync: bool,
     /// 记录最近复制的文字（最近记录与固定条目均在本机保存）。
     pub clipboard_history: bool,
+    /// 天气页要看的城市；留空表示按网络出口自动定位。
+    pub weather_city: String,
+    /// 用户确认的具体地点；刷新时直接使用坐标，避免同名城市重新匹配。
+    pub weather_position: Option<crate::weather::Position>,
+    /// 已保存、可在岛上下拉切换的城市（不含自动定位），最多 `weather::MAX_CITIES` 个。
+    pub weather_saved: Vec<crate::weather::Position>,
+    /// 兼容渲染：用 Direct3D 12 代替 OpenGL（部分显卡的 OpenGL 驱动会崩溃或画面错乱）。重启后生效。
+    pub render_compat: bool,
+    /// 自动切换到兼容渲染的原因；手动开启时为空。
+    pub render_compat_reason: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), time_resident: true, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), time_resident: true, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -317,9 +339,10 @@ impl Settings {
                 }
                 "page_order" => {
                     if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        // 旧配置只有 8 个页面，新增的「世界时钟」补在末尾。
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) { order.push(8); }
-                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
+                        // 旧配置缺页：先补官方的天气页（8），再补本定制的世界时钟页（9）。
+                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) { order.extend([8,9]); }
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) { order.push(9); }
+                        if order.len()==10 && (0..10).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
@@ -334,12 +357,15 @@ impl Settings {
                 "time_sync_note" => s.time_sync_note = v,
                 "time_resident" => s.time_resident = v != "0",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
                 "read_notifications" => s.read_notifications=v=="1",
                 "wechat_notifications" => s.wechat_notifications=v=="1",
+                "wecom_notifications" => s.wecom_notifications=v=="1",
+                "feishu_notifications" => s.feishu_notifications=v=="1",
+                "dingtalk_notifications" => s.dingtalk_notifications=v=="1",
                 "wechat_tray_open" => s.wechat_tray_open=v=="1",
                 "qq_only" => s.qq_only=v=="1",
                 "notification_preview" => s.notification_preview=v=="1",
@@ -351,12 +377,18 @@ impl Settings {
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
+                "avoid_top_bar" => s.avoid_top_bar = v != "0",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
                 "rest_minutes" | "short_minutes" => s.rest_minutes = v.parse::<u32>().unwrap_or(5).clamp(1, 60),
                 "water_minutes" => s.water_minutes = v.parse::<u32>().unwrap_or(45).clamp(5, 180),
                 "serving_ml" => s.serving_ml = v.parse::<u32>().unwrap_or(250).clamp(50, 1000),
                 "water_start" => s.water_start = v.parse::<u32>().unwrap_or(9).min(23),
                 "water_end" => s.water_end = v.parse::<u32>().unwrap_or(22).min(24),
+                "sit_remind" => s.sit_remind = v != "0",
+                "sit_minutes" => s.sit_minutes = v.parse::<u32>().unwrap_or(60).clamp(15, 180),
+                "lunch_rest" => s.lunch_rest = v != "0",
+                "lunch_start" => s.lunch_start = v.parse::<u32>().unwrap_or(720).min(1439),
+                "lunch_end" => s.lunch_end = v.parse::<u32>().unwrap_or(810).min(1439),
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_sync_operations" => s.mail_sync_operations=v=="1",
                 "mail_code" => s.mail_code = v != "0",
@@ -367,10 +399,20 @@ impl Settings {
                 "calendar_prompt" => s.calendar_prompt = v != "0",
                 "calendar_auto_sync" => s.calendar_auto_sync = v != "0",
                 "clipboard_history" => s.clipboard_history = v != "0",
+                "weather_city" => s.weather_city = v.trim().to_string(),
+                "weather_position" => s.weather_position=serde_json::from_str::<Option<crate::weather::Position>>(&v).ok().flatten().filter(|p|p.valid()),
+                "weather_saved" => s.weather_saved=serde_json::from_str::<Vec<crate::weather::Position>>(&v).unwrap_or_default().into_iter().filter(|p|p.valid()).collect(),
+                "render_compat" => s.render_compat = v == "1",
+                "render_compat_reason" => s.render_compat_reason = v.chars().filter(|c| !c.is_control()).take(200).collect(),
                 _ => {}
             }
         }
         if !s.visible_pages.contains(&true) { s.visible_pages[0]=true; }
+        // 旧版只有一个指定城市：迁移进已保存列表，升级后下拉框里能直接看到它。
+        if let Some(position)=s.weather_position.clone().filter(|p|p.label==s.weather_city) {
+            if !s.weather_saved.contains(&position) {s.weather_saved.insert(0,position);}
+        }
+        s.weather_saved.dedup();s.weather_saved.truncate(crate::weather::MAX_CITIES);
         s
     }
 
@@ -406,6 +448,9 @@ impl Settings {
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
+                ("wecom_notifications".into(),(self.wecom_notifications as u8).to_string()),
+                ("feishu_notifications".into(),(self.feishu_notifications as u8).to_string()),
+                ("dingtalk_notifications".into(),(self.dingtalk_notifications as u8).to_string()),
                 ("wechat_tray_open".into(),(self.wechat_tray_open as u8).to_string()),
                 ("qq_only".into(),(self.qq_only as u8).to_string()),
                 ("notification_preview".into(),(self.notification_preview as u8).to_string()),
@@ -417,12 +462,18 @@ impl Settings {
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
+                ("avoid_top_bar".into(), (self.avoid_top_bar as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),
                 ("water_minutes".into(), self.water_minutes.to_string()),
                 ("serving_ml".into(), self.serving_ml.to_string()),
                 ("water_start".into(), self.water_start.to_string()),
                 ("water_end".into(), self.water_end.to_string()),
+                ("sit_remind".into(), (self.sit_remind as u8).to_string()),
+                ("sit_minutes".into(), self.sit_minutes.to_string()),
+                ("lunch_rest".into(), (self.lunch_rest as u8).to_string()),
+                ("lunch_start".into(), self.lunch_start.to_string()),
+                ("lunch_end".into(), self.lunch_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
                 ("mail_sync_operations".into(),(self.mail_sync_operations as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
@@ -433,6 +484,11 @@ impl Settings {
                 ("calendar_prompt".into(), (self.calendar_prompt as u8).to_string()),
                 ("calendar_auto_sync".into(), (self.calendar_auto_sync as u8).to_string()),
                 ("clipboard_history".into(), (self.clipboard_history as u8).to_string()),
+                ("weather_city".into(), self.weather_city.clone()),
+                ("weather_position".into(), serde_json::to_string(&self.weather_position).unwrap()),
+                ("weather_saved".into(), serde_json::to_string(&self.weather_saved).unwrap()),
+                ("render_compat".into(), (self.render_compat as u8).to_string()),
+                ("render_compat_reason".into(), self.render_compat_reason.clone()),
             ],
         );
     }
