@@ -38,9 +38,13 @@ pub fn read_for(exe: &str) -> Option<AppVolume> {
         if let Some(volume) = platform::read(exe) {
             return Some(volume);
         }
+        return crate::system::volume().map(|(percent, muted)| AppVolume::new(percent, muted));
     }
-    let _ = exe;
-    crate::system::volume().map(|(percent, muted)| AppVolume::new(percent, muted))
+    #[cfg(not(windows))]
+    {
+        let _ = exe;
+        None
+    }
 }
 
 /// 设置播放器音量并解除静音；返回设置后的读数。
