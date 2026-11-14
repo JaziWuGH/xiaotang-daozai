@@ -23,6 +23,28 @@ Windows 桌面伙伴，把消息、音乐、日程、天气和 AI 额度放到�
 
 展开后，触控板双指或触摸屏单指左右滑动可以翻页：手指向左是下一页，向右是上一页。竖向滑动仍先滚动列表。
 
+## 本仓库是定制版（Jazi 个人自用）
+
+这个 fork 是本人自用版本，主线分支 `time-zone`，**默认分支就是它**，clone 下来即是定制版。基线跟随上游，当前 **v0.6.64**，版本号格式 `v<上游版本>-daozai.N`。
+
+相对上游多了这些：
+
+- **世界时钟页**：主时钟时差、多城市时间、显示时区与时间常驻（设置里独立一栏「时间」）
+- **底部停靠**：四边拖拽换边，落下后不会立刻弹开；胶囊形态顶边羽化
+- **播放与歌词**：播放器清单（空态点封面选播放器）、QQ 音乐播放模式、网易云原生时间轴与进度跳转、歌词沿用上次兜底
+- **托盘**：菜单里「重新启动」，复用官方的重启流程
+
+上游有新版时本地手动合并，不自动同步。
+
+### 换机安装（Windows）
+
+1. 打开本仓库 [Releases](https://github.com/JaziWuGH/xiaotang-daozai/releases)，下载最新 `daozai.exe`
+2. 退出正在运行的岛仔，把旧文件备份一份（例如改名 `daozai.exe.before`）
+3. 覆盖到 `%LOCALAPPDATA%\Programs\Daozai\daozai.exe`
+4. 双击运行，设置从 `%APPDATA%\Daozai\settings.txt` 自动继承
+
+其他设备免装 Rust，直接拿 exe 即可；只有要改代码才需要 Rust stable + Visual Studio C++ 工具链（`cargo build --release`）。
+
 ## 微信里有新消息，看一眼岛边
 
 ![微信和 QQ 未读：收起时显示图标，展开后点击切换对应窗口](docs/images/readme/notifications.webp)
