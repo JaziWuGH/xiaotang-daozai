@@ -36,12 +36,12 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom }
 impl Provider {
-    pub const ALL: [Self; 16] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包"} }
-    pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm|Self::NewApi|Self::OneApi|Self::Sub2Api)}
-    pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api)}
+    pub const ALL: [Self; 18] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::RelayGeneral=>"通用余额",Self::RelayCustom=>"自定义查询"} }
+    pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm)||self.relay()}
+    pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api|Self::RelayGeneral|Self::RelayCustom)}
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
     fn parse(s: &str) -> Option<Self> {if s.eq_ignore_ascii_case("grokbot"){return Some(Self::GrokBot);}if s.eq_ignore_ascii_case("doubao"){return Some(Self::Doubao);}Self::ALL.into_iter().find(|p|p.name().eq_ignore_ascii_case(s))}
 }
@@ -295,7 +295,8 @@ pub fn parse(provider:Provider,v:&Value)->Result<Snapshot,String>{
     s.windows.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));Ok(s)
 }
 
-struct Credential {token:String,account_id:Option<String>,identity:Option<String>,stamp:Option<std::time::SystemTime>}
+pub const KIMI_RELOGIN:&str="登录已失效，请在 Kimi Code 重新登录";
+struct Credential {token:String,account_id:Option<String>,identity:Option<String>,expires_at:Option<f64>,stamp:Option<std::time::SystemTime>}
 fn same_login(a:&Credential,b:&Credential)->bool{a.token==b.token||a.identity.as_ref().zip(b.identity.as_ref()).is_some_and(|(a,b)|a==b)}
 fn login_json(path:&Path)->Result<Value,String>{
     let raw=fs::read(path).map_err(|_|"无法读取登录文件".to_string())?;
@@ -318,13 +319,16 @@ fn credentials(provider:Provider,path:&Path)->Result<Credential,String>{
         Provider::Kiro=>v.get("profileArn").and_then(Value::as_str).filter(|s|!s.is_empty()).map(str::to_owned),
         _=>None,
     };
-    Ok(Credential{token,account_id,identity,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
+    let expires_at=if provider==Provider::Kimi {
+        number(&v["expires_at"]).filter(|at|*at!=0.0).or_else(||number(&claims["exp"]))
+    }else{None};
+    Ok(Credential{token,account_id,identity,expires_at,stamp:fs::metadata(path).and_then(|m|m.modified()).ok()})
 }
 pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
 #[derive(Default)]
 struct Pending {accounts:Option<Vec<Account>>,running:bool,cooldowns:HashMap<(String,Option<String>,PathBuf),(Instant,String)>}
 type PendingAccounts = std::sync::Arc<std::sync::Mutex<Pending>>;
-fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,_=>0}}
+fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi|Provider::RelayGeneral|Provider::RelayCustom=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,_=>0}}
 struct Worker {pending:PendingAccounts,wake:mpsc::SyncSender<()>}
 pub struct Service {
     workers:HashMap<usize,Worker>,
@@ -424,11 +428,25 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     if account.provider==Provider::Doubao{return doubao::fetch(agent,account);}
-    let auth=account_credentials(account).map_err(|e|(e,0))?;
     let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",_=>unreachable!()};
-    let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent","codex-cli/Daozai");
+    fetch_subscription_at(agent,account,url)
+}
+fn fetch_subscription_at(agent:&ureq::Agent,account:&Account,url:&str)->Result<Snapshot,(String,u64)>{
+    let auth=account_credentials(account).map_err(|e|(e,0))?;
+    if auth.expires_at.is_some_and(|at|at<=chrono::Utc::now().timestamp_millis() as f64/1000.0){
+        return Err((KIMI_RELOGIN.into(),0));
+    }
+    let user_agent=if account.provider==Provider::Kimi{concat!("Daozai/",env!("CARGO_PKG_VERSION"))}else{"codex-cli/Daozai"};
+    let mut req=agent.get(url).set("Authorization",&format!("Bearer {}",auth.token)).set("Accept","application/json").set("User-Agent",user_agent);
     if account.provider==Provider::Codex{if let Some(id)=&auth.account_id{req=req.set("ChatGPT-Account-Id",id);}}
-    let response=req.call().map_err(|e|match e{ureq::Error::Status(401|403,_)=>("登录已失效或权限不足，请在对应工具中重新登录".into(),0),ureq::Error::Status(429,r)=>("请求过于频繁，稍后自动重试".into(),r.header("Retry-After").and_then(|s|s.parse().ok()).unwrap_or(180).clamp(30,3600)),ureq::Error::Status(n,_)=>(format!("额度服务暂不可用（{n}）"),60),_=>("无法连接额度服务，请检查网络或代理".into(),30)})?;
+    let response=req.call().map_err(|e|match e{
+        ureq::Error::Status(401,_) if account.provider==Provider::Kimi=>(KIMI_RELOGIN.into(),0),
+        ureq::Error::Status(403,_) if account.provider==Provider::Kimi=>("当前账号没有查询 Kimi Code 订阅额度的权限".into(),0),
+        ureq::Error::Status(401|403,_)=>("登录已失效或权限不足，请在对应工具中重新登录".into(),0),
+        ureq::Error::Status(429,r)=>("请求过于频繁，稍后自动重试".into(),r.header("Retry-After").and_then(|s|s.parse().ok()).unwrap_or(180).clamp(30,3600)),
+        ureq::Error::Status(n,_)=>(format!("额度服务暂不可用（{n}）"),60),
+        _=>("无法连接额度服务，请检查网络或代理".into(),30),
+    })?;
     let mut body=String::new();response.into_reader().take(1024*1024).read_to_string(&mut body).map_err(|_|("读取额度响应失败".into(),30))?;
     if auth.stamp!=fs::metadata(&account.source).and_then(|m|m.modified()).ok(){return Err(("登录信息已变化，请刷新额度".into(),0));}
     let value=serde_json::from_str(&body).map_err(|_|("服务没有返回有效的额度数据".into(),60))?;
@@ -437,6 +455,55 @@ fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
 
 #[cfg(test)] mod tests {
     use super::*;
+    #[test]
+    fn kimi_expired_login_recovers_on_the_next_poll() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::net::TcpListener;
+
+        let path=std::env::temp_dir().join(format!("daozai-kimi-expiry-{}.json",std::process::id()));
+        let expired=json!({"access_token":"old-fixture","expires_at":1234.75}).to_string();
+        fs::write(&path,&expired).unwrap();
+        let mut config=Config::default();
+        config.add(Provider::Kimi,"测试".into(),path.clone()).unwrap();
+        let account=&config.accounts[0];
+        let agent=ureq::AgentBuilder::new().timeout(Duration::from_secs(1)).build();
+        let server=TcpListener::bind("127.0.0.1:0").unwrap();
+        let url=format!("http://{}/usage",server.local_addr().unwrap());
+        let (message,wait)=fetch_subscription_at(&agent,account,&url).unwrap_err();
+        assert!(message.contains("Kimi Code") && message.contains("重新登录"));
+        assert_eq!(wait,0);
+        server.set_nonblocking(true).unwrap();
+        assert_eq!(server.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock,"过期凭据不应发出请求");
+        server.set_nonblocking(false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(),expired);
+
+        let responder=std::thread::spawn(move||{
+            for status in ["401 Unauthorized","403 Forbidden","429 Too Many Requests","200 OK"]{
+                let (mut stream,_)=server.accept().unwrap();
+                let reader=BufReader::new(stream.try_clone().unwrap());
+                let headers:Vec<_>=reader.lines().map(Result::unwrap).take_while(|line|!line.is_empty()).map(|line|line.to_ascii_lowercase()).collect();
+                let body=r#"{"usages":{"limit_5h":{"used_ratio":0.25}}}"#;
+                write!(stream,"HTTP/1.1 {status}\r\nRetry-After: 77\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+                if status=="200 OK"{
+                    assert!(headers.iter().any(|h|h=="authorization: bearer renewed-fixture"));
+                    assert!(headers.iter().any(|h|h==concat!("user-agent: daozai/",env!("CARGO_PKG_VERSION"))));
+                }
+            }
+        });
+        fs::write(&path,r#"{"access_token":"legacy-fixture"}"#).unwrap();
+        assert_eq!(fetch_subscription_at(&agent,account,&url).unwrap_err(),(KIMI_RELOGIN.into(),0));
+        fs::write(&path,r#"{"access_token":"legacy-fixture","expires_at":0}"#).unwrap();
+        assert!(fetch_subscription_at(&agent,account,&url).unwrap_err().0.contains("权限"));
+        assert_eq!(fetch_subscription_at(&agent,account,&url).unwrap_err().1,77);
+
+        let renewed=json!({"access_token":"renewed-fixture","expires_at":chrono::Utc::now().timestamp()+900}).to_string();
+        fs::write(&path,&renewed).unwrap();
+        let snapshot=fetch_subscription_at(&agent,account,&url).unwrap();
+        assert_eq!(snapshot.rings()[0].remaining,75.0);
+        responder.join().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(),renewed);
+        fs::remove_file(path).unwrap();
+    }
     #[test] fn lightweight_quota_startup_has_no_unused_workers(){
         let mut service=Service::start();assert!(service.workers.is_empty(),"未启用额度来源时不应创建后台线程");
         assert!(service.refresh(vec![]));assert!(service.workers.is_empty());

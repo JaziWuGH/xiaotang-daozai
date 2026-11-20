@@ -47,6 +47,21 @@ fn write_kv(path: &Path, pairs: &[(String, String)]) -> std::io::Result<()> {
     atomic_write(path, body.as_bytes())
 }
 
+pub(crate) fn load_health_pending()->[bool;2] {
+    let mut pending=[false;2];
+    for (key,value) in read_kv(&config_dir().join("health-pending.txt")) {
+        match key.as_str() {"water"=>pending[0]=value=="1","sit"=>pending[1]=value=="1",_=>{}}
+    }
+    pending
+}
+
+pub(crate) fn save_health_pending(pending:[bool;2]) {
+    let _=write_kv(&config_dir().join("health-pending.txt"),&[
+        ("water".into(),u8::from(pending[0]).to_string()),
+        ("sit".into(),u8::from(pending[1]).to_string()),
+    ]);
+}
+
 pub(crate) fn atomic_write(path:&Path,body:&[u8])->std::io::Result<()> {
     use std::io::Write;
     use std::sync::atomic::{AtomicU64,Ordering};
@@ -196,6 +211,9 @@ pub struct Settings {
     pub glass_blur: bool,
     pub island_size: u32,
     pub island_offset: i32,
+    /// OLED 像素偏移：岛体收起静止时沿停靠边缓慢移动几个像素，减轻 OLED 静态显示留下的痕迹。
+    /// 默认关闭，开启后也不改动 `island_offset`。
+    pub oled_shift: bool,
     /// 停靠边缘；左右停靠时 `island_offset` 表示上下位置。
     pub dock: Dock,
     pub settings_theme: crate::settings_theme::SettingsTheme,
@@ -206,7 +224,9 @@ pub struct Settings {
     pub avoid_apps: Vec<(String,String)>,
     pub visible_pages: [bool; 10],
     pub page_order: [usize; 10],
+    pub show_clock: bool,
     pub show_battery: bool,
+    pub show_weather: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
     /// 主时钟显示时区（IANA 名；空串 = 跟随系统）。只影响岛仔显示，不改系统时区。
@@ -223,6 +243,7 @@ pub struct Settings {
     pub time_sync_note: String,
     /// 收起时在药丸左端为时间留一个常驻席位：极简刘海、岛上歌词、通知横幅都不把它顶掉。
     pub time_resident: bool,
+    pub clock_seconds: bool,
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
@@ -236,13 +257,17 @@ pub struct Settings {
     pub qq_only:bool,
     pub notification_preview:bool,
     pub notifications: bool,
+    /// 岛上提醒的同时发一条 Windows 系统通知（默认开启）；关闭后只在岛上提醒。
+    pub system_notify: bool,
+    /// 系统通知的提示音；岛上提醒本身不发声。
     pub sound: bool,
     pub lyrics_enabled:bool,
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
-    /// 顶栏类软件（含置顶的任务栏）登记占用屏幕顶部时，岛体从它的下沿开始摆放。
+    /// 启用顶栏适配，按显示方式避让顶栏或保持岛体在顶栏上方。
     pub avoid_top_bar: bool,
+    pub top_bar_on_top: bool,
     pub focus_minutes: u32,
     pub rest_minutes: u32,
     pub water_minutes: u32,
@@ -284,11 +309,13 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_battery: true, clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), time_resident: true, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), time_resident: true, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
 impl Settings {
+    pub fn avoids_top_bar(&self) -> bool { self.avoid_top_bar && !self.top_bar_on_top }
+
     /// 主窗口（灵动岛）的界面缩放倍率。
     pub fn island_scale(&self) -> f32 {
         island_size_value(self.island_size) as f32 / 100.0
@@ -301,9 +328,10 @@ impl Settings {
 
     pub fn clock_text(&self, clock: &str) -> String {
         use chrono::Timelike;
-        let Ok(time) = chrono::NaiveTime::parse_from_str(clock.get(..5).unwrap_or(""), "%H:%M") else { return "--:--".into(); };
+        let Ok(time) = chrono::NaiveTime::parse_from_str(clock, "%H:%M:%S").or_else(|_|chrono::NaiveTime::parse_from_str(clock,"%H:%M")) else { return if self.clock_seconds {"--:--:--"}else{"--:--"}.into(); };
         let (pm, hour) = time.hour12();
-        let digits=if self.clock_12h {format!("{}:{:02}",hour,time.minute())}else{time.format("%H:%M").to_string()};
+        let mut digits=if self.clock_12h {format!("{}:{:02}",hour,time.minute())}else{time.format("%H:%M").to_string()};
+        if self.clock_seconds {digits.push_str(&format!(":{:02}",time.second()));}
         let period=match self.clock_period {
             1=>if pm {"下午"}else{"上午"},
             2=>match time.hour() {0..=5=>"凌晨",6..=10=>"上午",11..=12=>"中午",13..=16=>"下午",17..=18=>"傍晚",_=>"晚上"},
@@ -328,13 +356,17 @@ impl Settings {
                 "glass_blur" => s.glass_blur = v != "0",
                 "island_size" => s.island_size = island_size_value(v.parse::<u32>().unwrap_or(100)),
                 "island_offset" => s.island_offset = v.parse::<i32>().unwrap_or(0).clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX),
+                "oled_shift" => s.oled_shift = v != "0",
                 "pet" => s.pet = v == "1" || v.eq_ignore_ascii_case("true"),
                 "minimal" => s.minimal = v == "1" || v.eq_ignore_ascii_case("true"),
                 "browser_minimal" => s.browser_minimal = v == "1",
                 "avoid_browsers" => s.avoid_browsers = v != "0",
                 "avoid_apps" => s.avoid_apps = serde_json::from_str(&v).unwrap_or_default(),
                 "resident_order" => {
-                    let order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
+                    let mut order:Vec<usize>=v.split(',').filter_map(|n|n.parse().ok()).collect();
+                    if order.len()==6 && !order.contains(&crate::bar_layout::WEATHER) {
+                        if let Some(clock)=order.iter().position(|slot|*slot==crate::bar_layout::CLOCK){order.insert(clock+1,crate::bar_layout::WEATHER);}
+                    }
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
@@ -349,6 +381,7 @@ impl Settings {
                 }
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
+                "clock_seconds" => s.clock_seconds = v == "1",
                 "time_zone" => s.time_zone = if v.is_empty() || v.parse::<chrono_tz::Tz>().is_ok() { v } else { String::new() },
                 "world_clocks" => s.world_clocks = serde_json::from_str(&v).unwrap_or_else(|_|crate::timezone::default_cities()),
                 "time_sync" => s.time_sync = v != "0",
@@ -357,6 +390,8 @@ impl Settings {
                 "time_sync_note" => s.time_sync_note = v,
                 "time_resident" => s.time_resident = v != "0",
                 "show_battery" => s.show_battery = v != "0",
+                "show_clock" => s.show_clock = v != "0",
+                "show_weather" => s.show_weather = v != "0",
                 "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
@@ -372,12 +407,14 @@ impl Settings {
                 "system_hud" => s.system_hud = v != "0",
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
                 "notifications" => s.notifications = v != "0",
+                "system_notify" => s.system_notify = v != "0",
                 "sound" => s.sound = v == "1",
                 "lyrics_enabled" => s.lyrics_enabled=v!="0",
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
                 "avoid_top_bar" => s.avoid_top_bar = v != "0",
+                "top_bar_on_top" => s.top_bar_on_top = v == "1",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
                 "rest_minutes" | "short_minutes" => s.rest_minutes = v.parse::<u32>().unwrap_or(5).clamp(1, 60),
                 "water_minutes" => s.water_minutes = v.parse::<u32>().unwrap_or(45).clamp(5, 180),
@@ -413,6 +450,11 @@ impl Settings {
             if !s.weather_saved.contains(&position) {s.weather_saved.insert(0,position);}
         }
         s.weather_saved.dedup();s.weather_saved.truncate(crate::weather::MAX_CITIES);
+        // 「时间」与「时间常驻」在本定制里是同一个开关：任一为关就一起关，
+        // 避免旧配置里出现「时间常驻开着、显示时钟却关着」这种自相矛盾的状态。
+        let clock_on = s.show_clock && s.time_resident;
+        s.show_clock = clock_on;
+        s.time_resident = clock_on;
         s
     }
 
@@ -427,6 +469,7 @@ impl Settings {
                 ("glass_blur".into(),(self.glass_blur as u8).to_string()),
                 ("island_size".into(),island_size_value(self.island_size).to_string()),
                 ("island_offset".into(),self.island_offset.clamp(-ISLAND_OFFSET_MAX,ISLAND_OFFSET_MAX).to_string()),
+                ("oled_shift".into(),(self.oled_shift as u8).to_string()),
                 ("settings_theme".into(),self.settings_theme.key().into()),
                 ("pet".into(), if self.pet { "1".to_string() } else { "0".to_string() }),
                 ("minimal".into(), if self.minimal { "1".to_string() } else { "0".to_string() }),
@@ -438,6 +481,7 @@ impl Settings {
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
+                ("clock_seconds".into(), (self.clock_seconds as u8).to_string()),
                 ("time_zone".into(), self.time_zone.clone()),
                 ("world_clocks".into(), serde_json::to_string(&self.world_clocks).unwrap_or_default()),
                 ("time_sync".into(), (self.time_sync as u8).to_string()),
@@ -446,6 +490,8 @@ impl Settings {
                 ("time_sync_note".into(), self.time_sync_note.clone()),
                 ("time_resident".into(), (self.time_resident as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
+                ("show_clock".into(), (self.show_clock as u8).to_string()),
+                ("show_weather".into(), (self.show_weather as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
                 ("wecom_notifications".into(),(self.wecom_notifications as u8).to_string()),
@@ -457,12 +503,14 @@ impl Settings {
                 ("system_hud".into(), (self.system_hud as u8).to_string()),
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
                 ("notifications".into(), (self.notifications as u8).to_string()),
+                ("system_notify".into(), (self.system_notify as u8).to_string()),
                 ("sound".into(), (self.sound as u8).to_string()),
                 ("lyrics_enabled".into(),(self.lyrics_enabled as u8).to_string()),
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
                 ("avoid_top_bar".into(), (self.avoid_top_bar as u8).to_string()),
+                ("top_bar_on_top".into(), (self.top_bar_on_top as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
                 ("rest_minutes".into(), self.rest_minutes.to_string()),
                 ("water_minutes".into(), self.water_minutes.to_string()),

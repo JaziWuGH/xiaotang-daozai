@@ -75,8 +75,10 @@ impl<'a> Card<'a> {
     pub fn font(&self, size: f32, w: W) -> FontId {
         font(size * self.s, w)
     }
+    /// 测量、绘制、截断、折行都经过这里：维语等从右往左的文字在这里做连写和方向转换（#200）。
+    /// 截断（`fit`）按阅读顺序截、再转换，省略号自然落在从右往左阅读的末尾（最左边）。
     pub fn galley(&self, t: &str, size: f32, w: W, color: Color32) -> std::sync::Arc<egui::Galley> {
-        self.painter.layout_no_wrap(t.to_owned(), self.font(size, w), color)
+        self.painter.layout_no_wrap(crate::rtl_text::display(t).into_owned(), self.font(size, w), color)
     }
     pub fn text_w(&self, t: &str, size: f32, w: W) -> f32 {
         self.galley(t, size, w, Color32::WHITE).size().x / self.s

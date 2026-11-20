@@ -509,6 +509,14 @@ impl Drop for Tray {
     }
 }
 
+/// 健康提醒独立播放，托盘气泡被 Windows 隐藏时也能听到。
+pub fn play_health_sound() {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_MEMORY, SND_NODEFAULT, SND_NOSTOP};
+    // 异步播放期间 Windows 仍会读取这段内嵌的 WAV。
+    let wav = include_bytes!("../assets/health-reminder.wav");
+    unsafe { let _ = PlaySoundW(PCWSTR(wav.as_ptr().cast()), None, SND_MEMORY | SND_ASYNC | SND_NODEFAULT | SND_NOSTOP); }
+}
+
 /// 单实例：已有岛仔实例时返回 false。
 pub fn single_instance() -> bool {
     unsafe {

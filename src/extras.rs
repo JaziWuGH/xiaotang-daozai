@@ -1,12 +1,34 @@
 //! 设置、通知队列与岛仔表情。
 use crate::settings_theme::color as settings_color;
-use crate::app::{App, Cmd, Env, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W, PAGE_NAMES};
+use crate::app::{App, Cmd, Env, NotificationSound, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W, PAGE_NAMES};
 use crate::paint::{Card, H};
 use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Rect};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum AlertSource { Internal, Messenger(crate::app::Messenger), External(String) }
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) enum HealthReminder {Water,Sit}
+impl HealthReminder {
+    pub(crate) const ALL:[Self;2]=[Self::Water,Self::Sit];
+    pub(crate) fn title(self)->&'static str {match self {Self::Water=>"喝水时间到了",Self::Sit=>crate::app::SIT_TITLE}}
+    pub(crate) fn label(self)->&'static str {match self {Self::Water=>"待喝水",Self::Sit=>"待活动"}}
+    pub(crate) fn id(self)->&'static str {match self {Self::Water=>"health-water",Self::Sit=>"health-sit"}}
+    pub(crate) fn icon(self,c:&Card,x:f32,y:f32,scale:f32) {
+        let c=&c.scaled(x,y,scale);
+        match self {
+            Self::Water=>{
+                c.poly(&[(x-7.0,y-1.0),(x+5.0,y-1.0),(x+3.5,y+8.0),(x-5.5,y+8.0)],theme::BLUE);
+                c.path(&[(x-9.0,y-10.0),(x-6.5,y+9.0),(x+4.5,y+9.0),(x+7.0,y-10.0)],1.6,theme::CYAN);
+                c.seg((x-9.0,y-10.0),(x+7.0,y-10.0),1.6,theme::CYAN);
+                c.path(&[(x+6.5,y-6.0),(x+10.5,y-6.0),(x+11.5,y-3.0),(x+10.0,y+2.0),(x+5.5,y+3.0)],1.6,theme::CYAN);
+                c.seg((x-5.0,y-6.5),(x-4.2,y-2.5),1.0,Color32::from_white_alpha(170));
+            },
+            Self::Sit=>crate::paint::chair(c,x,y,0.6,theme::SOFT_GREEN),
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Alert {
@@ -21,6 +43,10 @@ pub(crate) struct Alert {
     pub unread: Option<crate::app::Unread>,
 }
 impl Alert {
+    pub(crate) fn health(&self)->Option<HealthReminder> {
+        if self.source!=AlertSource::Internal{return None;}
+        HealthReminder::ALL.into_iter().find(|kind|self.title==kind.title())
+    }
     pub(crate) fn messenger(&self)->Option<crate::app::Messenger>{
         match &self.source {
             AlertSource::Messenger(client)=>Some(*client),
@@ -112,14 +138,8 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
                 c.poly(&[(x+0.5,y-0.8),(x+4.0,y-0.8),(x-1.0,y+4.5)],ink);
             }else{c.fill(x-8.0,y-3.5,12.0,7.0,1.0,ink);}
         },
-        "喝水时间到了"=>{
-            c.poly(&[(x-7.0,y-1.0),(x+5.0,y-1.0),(x+3.5,y+8.0),(x-5.5,y+8.0)],theme::BLUE);
-            c.path(&[(x-9.0,y-10.0),(x-6.5,y+9.0),(x+4.5,y+9.0),(x+7.0,y-10.0)],1.6,theme::CYAN);
-            c.seg((x-9.0,y-10.0),(x+7.0,y-10.0),1.6,theme::CYAN);
-            c.path(&[(x+6.5,y-6.0),(x+10.5,y-6.0),(x+11.5,y-3.0),(x+10.0,y+2.0),(x+5.5,y+3.0)],1.6,theme::CYAN);
-            c.seg((x-5.0,y-6.5),(x-4.2,y-2.5),1.0,Color32::from_white_alpha(170));
-        },
-        crate::app::SIT_TITLE=>crate::paint::chair(c,x,y,0.6,theme::SOFT_GREEN),
+        "喝水时间到了"=>HealthReminder::Water.icon(c,x,y,1.0),
+        crate::app::SIT_TITLE=>HealthReminder::Sit.icon(c,x,y,1.0),
         "待办到时间了"=>crate::paint::checklist(c,x,y,23.0,Color32::from_rgb(190,180,255),Color32::from_rgb(43,35,66)),
         "会议提醒"=>{
             let label=a.meeting.as_ref().map(|(_,source)|source.as_str()).unwrap_or("");
@@ -133,6 +153,20 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
 }
 
 impl App {
+    pub(crate) fn health_badges(&self)->Vec<HealthReminder> {
+        if self.fullscreen_hidden || !self.module_on(crate::app::WATER_PAGE){return Vec::new();}
+        HealthReminder::ALL.into_iter().filter(|kind|self.health_pending[*kind as usize]
+            && (match kind {HealthReminder::Water=>self.water.remind,HealthReminder::Sit=>self.settings.sit_remind})
+            && (self.open || !self.notice.as_ref().is_some_and(|a|a.health()==Some(*kind)))).collect()
+    }
+    pub(crate) fn confirm_health_reminder(&mut self,kind:HealthReminder) {
+        self.health_pending[kind as usize]=false;
+        crate::model::save_health_pending(self.health_pending);
+        match kind {HealthReminder::Water=>self.last_reminder=self.t,HealthReminder::Sit=>self.sit_start=self.t}
+        self.alerts.retain(|a|a.health()!=Some(kind));
+        if self.notice.as_ref().is_some_and(|a|a.health()==Some(kind)){self.notice=None;}
+        if self.hud_notice.as_ref().is_some_and(|a|a.health()==Some(kind)){self.hud_notice=None;}
+    }
     pub(crate) fn phase_secs(&self, phase: Phase) -> f32 {
         (match phase {
             Phase::Focus => self.settings.focus_minutes,
@@ -144,19 +178,15 @@ impl App {
     pub(crate) fn sat_minutes(&self) -> u32 {
         ((self.t - self.sit_start).max(0.0) / 60.0) as u32
     }
-    /// 下一次久坐提醒的时刻：从开始久坐或上次提醒起算满 sit_minutes。
+    /// 下一次久坐提醒的时刻：从上次确认或起身起算满 sit_minutes。
     pub(crate) fn sit_due(&self) -> f64 {
-        self.sit_start.max(self.sit_alerted) + self.settings.sit_minutes as f64 * 60.0
+        self.sit_start + self.settings.sit_minutes as f64 * 60.0
     }
     /// 「起身了」：久坐计时归零。
     pub(crate) fn stood_up(&mut self) {
-        self.sit_start = self.t;
-        self.sit_alerted = f64::NEG_INFINITY;
+        self.confirm_health_reminder(HealthReminder::Sit);
         self.pet.react(PetState::Happy);
         self.say("久坐计时已重新开始");
-    }
-    pub(crate) fn snooze_sit(&mut self) {
-        self.sit_alerted = self.t - self.settings.sit_minutes as f64 * 60.0 + crate::app::SIT_SNOOZE_SECS;
     }
     /// 现在是否在午休免打扰时段内（支持跨午夜；起止相同视为未设置）。
     pub(crate) fn lunch_now(&self, env: &Env) -> bool {
@@ -207,6 +237,11 @@ impl App {
         system: bool,
     ) {
         let title = title.into();
+        if let Some(kind)=HealthReminder::ALL.into_iter().find(|kind|title==kind.title()) {
+            if self.health_pending[kind as usize]{return;}
+            self.health_pending[kind as usize]=true;
+            crate::model::save_health_pending(self.health_pending);
+        }
         let transient = matches!(
             title.as_str(),
             "系统音量" | "大写锁定" | "键盘输入语言" | "网络连接" | "电源已连接" | "已切换电池供电" | "蓝牙设备"
@@ -252,10 +287,13 @@ impl App {
         // 通知仅保存在本次运行的内存中。
         if a.source==AlertSource::Internal {self.history.push_front(a.clone());}
         self.history.truncate(50);
+        if self.fullscreen_hidden && a.health().is_some(){return;}
         if self.settings.notifications {
-            if system && a.source==AlertSource::Internal {
-                self.pending
-                    .push(Cmd::Notify(a.title.clone(), a.body.clone()));
+            if system && a.source==AlertSource::Internal && self.settings.system_notify {
+                let sound = if !self.settings.sound { NotificationSound::Silent }
+                    else if a.health().is_some() { NotificationSound::Health }
+                    else { NotificationSound::System };
+                self.pending.push(Cmd::Notify(a.title.clone(), a.body.clone(), sound));
             }
             let same_event=|old:&Alert| match (&a.meeting,&old.meeting) {
                 (Some((next,_)),Some((previous,_)))=>crate::calendar::dedupe_key(next)==crate::calendar::dedupe_key(previous),
@@ -283,6 +321,11 @@ impl App {
         if pid!=0{self.clear_account_notices(source,pid);}
         if !source.adapter().keep_unidentified{self.clear_account_notices(source,0);}
         if !self.pending_messengers.iter().any(|u|u.source==source){self.clear_messenger_notices(source);}
+    }
+    pub fn confirm_messenger_open(&mut self,unread:crate::app::Unread,foreground:Option<(crate::app::Messenger,u32)>)->bool{
+        if unread.pid==0 || foreground!=Some((unread.source,unread.pid)){return false;}
+        self.viewed_client(unread.source,unread.pid);
+        true
     }
     pub fn discard_unread(&mut self,unread:crate::app::Unread){
         if !self.pending_messengers.contains(&unread){return;}
@@ -368,13 +411,16 @@ impl App {
         self.pending_messengers.retain(|u|u.source.enabled(&self.settings) && (u.source.adapter().capture!=crate::messenger::Capture::SystemToast
             || self.notification_apps.items.iter().any(|(key,_,on)|key==u.source.adapter().notification_id && *on)));
         let allowed=|a:&Alert|match &a.source {
-            AlertSource::Internal=>true,
+            AlertSource::Internal=>!self.fullscreen_hidden || a.health().is_none(),
             AlertSource::Messenger(client)=>client.enabled(&self.settings),
             AlertSource::External(id)=>self.settings.read_notifications && crate::messenger::NotificationFilter::for_settings(&self.settings).allows(id) && self.settings.notifications && !crate::messenger::suppresses_toast(&a.title,id,crate::messenger::toast_suppression(&self.settings)) && self.notification_apps.items.iter().any(|(key,_,on)|key==id && *on),
         };
         self.alerts.retain(&allowed);
         if self.notice.as_ref().is_some_and(|a|!allowed(a)){self.notice=None;}
         if self.hud_notice.as_ref().is_some_and(|a|!allowed(a)){self.hud_notice=None;}
+        if self.fullscreen_hidden {
+            self.pending.retain(|cmd|!matches!(cmd,Cmd::Notify(title,..)if HealthReminder::ALL.into_iter().any(|kind|title==kind.title())));
+        }
         if !self.settings.notification_preview {
             for a in self.alerts.iter_mut().chain(self.notice.iter_mut()).chain(self.hud_notice.iter_mut()) {
                 if matches!(&a.source,AlertSource::External(_)){a.body="收到新通知 · 内容已隐藏".into();}
@@ -492,16 +538,16 @@ impl App {
                 nc.centered_text(HUD_W-16.0,19.0,&nc.fit(body,10.5,W::Regular,92.0),10.5,W::Regular,if a.title=="大写锁定"&&a.body=="已开启"||a.title=="网络连接"&&a.body.contains("已连接"){theme::GREEN}else{theme::GRAY},H::Right);
             }
         } else {
-            let is_sit=a.title==crate::app::SIT_TITLE;let is_water=a.page==2&&!is_sit;let is_focus=a.page==1;let is_power=a.title=="电量偏低";
+            let is_sit=a.health()==Some(HealthReminder::Sit);let is_water=a.health()==Some(HealthReminder::Water);let is_focus=a.page==1;let is_power=a.title=="电量偏低";
             notice_icon(&nc,22.0,22.0,a);
             let max=if is_water||is_sit{125.0}else{195.0};
             nc.centered_text(43.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,max),11.0,W::Semibold,theme::WHITE,H::Left);
             nc.centered_text(43.0,30.0,&nc.fit(&a.body,10.5,W::Regular,max),10.5,W::Regular,theme::GRAY,H::Left);
             if is_sit {
-                if notice_button(&nc,181.0,12.0,62.0,"稍后","sit-snooze"){self.snooze_sit();self.notice=None;}
+                if notice_button(&nc,181.0,12.0,62.0,"知道了","sit-confirm-read"){self.confirm_health_reminder(HealthReminder::Sit);}
                 if notice_button(&nc,250.0,12.0,68.0,"起身了","sit-confirm"){self.notice=None;self.stood_up();}
             }else if is_water {
-                if notice_button(&nc,181.0,12.0,62.0,"稍后","water-snooze"){self.last_reminder=self.t-self.settings.water_minutes as f64*60.0+600.0;self.notice=None;}
+                if notice_button(&nc,181.0,12.0,62.0,"知道了","water-confirm-read"){self.confirm_health_reminder(HealthReminder::Water);}
                 if notice_button(&nc,250.0,12.0,68.0,"喝一口","water-confirm"){self.notice=None;self.drink_water();}
             }else{
                 let label=if is_focus{"开始"}else if is_power{"知道了"}else{"查看"};
@@ -516,6 +562,9 @@ impl App {
                         }
                     }else{self.settings_tab=6;self.open_settings();}
                 }
+            }
+            if let Some(kind)=a.health() {
+                if nc.hit(0.0,0.0,175.0,44.0,"health-notice-confirm").clicked(){self.confirm_health_reminder(kind);}
             }
         }
     }
@@ -579,7 +628,7 @@ impl App {
         self.water.drink(amount, hour);
         let amount = self.water.drunk_ml.saturating_sub(before);
         self.last_drink = Some((amount, hour));
-        self.last_reminder = self.t;
+        self.confirm_health_reminder(HealthReminder::Water);
         self.pet.react(PetState::Satisfied);
         self.say(format!("已记录 {amount} ml"));
         if was < 100.0 && self.water.percent() >= 100.0 {
@@ -700,9 +749,9 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "天气"];
+        let groups = ["通用", "音乐", "专注与健康", "专注与健康", "待办与置物", "待办与置物", "消息提醒", "邮箱", "日程", "关于", "页面管理", "AI 额度", "天气", "外观", "位置"];
         for (tab, expected) in groups.iter().enumerate() {
-            let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
+            let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end,_)| (*start..=*end).contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
             assert_eq!(matches[0].0, *expected);
         }
@@ -899,9 +948,13 @@ impl App {
         c.text(44.0,y+13.0,"提醒时段",10.5,W::Regular,theme::GRAY,H::Left);
         c.text(250.0,y+13.0,"至",10.5,W::Regular,theme::GRAY,H::Center);
         for i in 0..2{
-            let hour=if i==0{self.settings.water_start}else{self.settings.water_end};
-            let d=stepper(c,if i==0{238.0}else{370.0},y,&format!("{hour:02}:00"),&format!("hour-{i}"));
-            if d!=0{let v=(hour as i32+d).rem_euclid(24) as u32;if i==0{self.settings.water_start=v}else{self.settings.water_end=v}}
+            let hour=if i==0{&mut self.settings.water_start}else{&mut self.settings.water_end};
+            let value=egui::DragValue::new(hour).range(0..=if i==0{23}else{24})
+                .custom_formatter(|v,_|format!("{:02}:00",v as u32))
+                .custom_parser(|t|{let t=t.trim();t.strip_suffix(":00").or_else(||t.strip_suffix("：00")).unwrap_or(t).parse::<u32>().ok().map(|v|v as f64)});
+            let (d,field)=stepper(c,if i==0{238.0}else{370.0},y,value,&format!("hour-{i}"));
+            if field.gained_focus(){self.pending.push(Cmd::Focus);}self.settings_editing|=field.has_focus();
+            if d!=0{let hour=if i==0{&mut self.settings.water_start}else{&mut self.settings.water_end};*hour=(*hour as i32+d).rem_euclid(24) as u32;}
         }
         let y=row_y(1);
         c.text(44.0,y+13.0,"午休不提醒",10.5,W::Regular,theme::GRAY,H::Left);
@@ -912,27 +965,41 @@ impl App {
         lc.text(44.0,y+13.0,"午休时间",10.5,W::Regular,theme::GRAY,H::Left);
         lc.text(250.0,y+13.0,"至",10.5,W::Regular,theme::GRAY,H::Center);
         for i in 0..2{
-            let m=if i==0{self.settings.lunch_start}else{self.settings.lunch_end};
-            let d=stepper(&lc,if i==0{238.0}else{370.0},y,&hhmm(m),&format!("lunch-{i}"));
-            if d!=0{let v=(m as i32+d*15).rem_euclid(1440) as u32;if i==0{self.settings.lunch_start=v}else{self.settings.lunch_end=v}}
+            let minute=if i==0{&mut self.settings.lunch_start}else{&mut self.settings.lunch_end};
+            let value=egui::DragValue::new(minute).range(0..=1439).speed(1.0).custom_formatter(|v,_|hhmm(v as u32))
+                .custom_parser(|t|{let (h,m)=t.trim().split_once([':','：'])?;Some((h.parse::<u32>().ok()?.min(23)*60+m.parse::<u32>().ok()?.min(59)) as f64)});
+            let (d,field)=stepper(&lc,if i==0{238.0}else{370.0},y,value,&format!("lunch-{i}"));
+            if field.gained_focus(){self.pending.push(Cmd::Focus);}self.settings_editing|=field.has_focus();
+            if d!=0{let minute=if i==0{&mut self.settings.lunch_start}else{&mut self.settings.lunch_end};*minute=(*minute as i32+d*15).rem_euclid(1440) as u32;}
         }
         c.text(44.0,row_y(3)+13.0,"喝水和久坐提醒都只在提醒时段内、午休以外弹出",10.5,W::Regular,theme::GRAY,H::Left);
     }
 }
-/// 加减器：[−] 数值 [+]，右缘对齐到 right。返回 −1 / 0 / +1。
-fn stepper(c:&Card,right:f32,y:f32,value:&str,id:&str)->i32 {
+fn island_number_field(c:&Card,rect:Rect,value:egui::DragValue<'_>,id:impl std::hash::Hash)->egui::Response {
+    let mut ui=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(id),egui::UiBuilder::new().layer_id(c.ui.layer_id()).max_rect(rect).style(c.ui.style().clone()));
+    ui.set_clip_rect(c.painter.clip_rect());ui.set_opacity(c.painter.opacity());if !c.live{ui.disable();}
+    ui.spacing_mut().interact_size=rect.size();ui.spacing_mut().button_padding=egui::vec2(2.0,1.0);
+    ui.style_mut().drag_value_text_style=egui::TextStyle::Body;
+    ui.style_mut().text_styles.insert(egui::TextStyle::Body,c.font(11.0,W::Bold));
+    ui.style_mut().explanation_tooltips=false;
+    ui.visuals_mut().widgets.inactive.weak_bg_fill=Color32::TRANSPARENT;
+    crate::quota_ui::bar_tooltip(ui.put(rect,value.update_while_editing(false)),"点击输入数值".into())
+}
+/// 加减器：[−] 可输入数值 [+]，右缘对齐到 right。
+fn stepper(c:&Card,right:f32,y:f32,value:egui::DragValue<'_>,id:&str)->(i32,egui::Response) {
     let (w,vw)=(25.0,58.0);
     let x=right-w*2.0-vw;
-    c.text(x+w+vw/2.0,y+13.0,value,10.5,W::Semibold,theme::WHITE,H::Center);
-    if setting_button(c,x,y,w,"−",false,&format!("{id}-minus")){return -1;}
-    if setting_button(c,right-w,y,w,"+",false,&format!("{id}-plus")){return 1;}
-    0
+    let field=island_number_field(c,c.rect(x+w,y,vw,19.0),value,("health-number",id));
+    let delta=if setting_button(c,x,y,w,"−",false,&format!("{id}-minus")){-1}
+        else if setting_button(c,right-w,y,w,"+",false,&format!("{id}-plus")){1}else{0};
+    (delta,field)
 }
 impl App {
     pub(crate) fn page_settings(&mut self,c:&Card) {
         let help=match self.settings_category{0=>"外观与系统",1=>"调整喝水、久坐与提醒时段",2=>"点击分钟数可直接输入，也可用加减微调",_=>"通知"};
         if self.settings_category!=1{c.text(44.0,44.0,help,10.5,W::Regular,theme::GRAY,H::Left);}
         let before=format!("{:?}",self.settings);
+        self.settings_editing=false;
         match self.settings_category {
             0=>{
                 let choices=[("吉祥物",self.settings.pet),("极简刘海",self.settings.minimal),("系统提示",self.settings.system_hud),("全屏隐藏",self.settings.hide_fullscreen)];
@@ -948,26 +1015,32 @@ impl App {
                 for i in 1..4{c.fill(44.0,row_y(i)-2.0,326.0,1.0,0.5,Color32::from_rgb(28,28,31));}
                 if sv<0.99{
                     let wc=c.faded(1.0-sv);let wc=if self.sit_mode{wc.ghost()}else{wc};
-                    let rows=[("每日目标",format!("{:.1} L",self.water.goal_ml as f32/1000.0)),("每次记录",format!("{} ml",self.settings.serving_ml)),("提醒间隔",format!("{} 分钟",self.settings.water_minutes))];
-                    for (i,(label,value)) in rows.iter().enumerate(){
+                    for (i,label) in ["每日目标","每次记录","提醒间隔"].iter().enumerate(){
                         wc.text(44.0,row_y(i)+13.0,label,10.5,W::Regular,theme::GRAY,H::Left);
-                        match stepper(&wc,370.0,row_y(i),value,&format!("water-{i}")){
-                            0=>{}
-                            d=>match i{
-                                0=>{self.water.goal_ml=(self.water.goal_ml as i32+d*250).clamp(500,6000) as u32;self.water.save();}
-                                1=>self.settings.serving_ml=(self.settings.serving_ml as i32+d*50).clamp(50,1000) as u32,
-                                _=>self.settings.water_minutes=(self.settings.water_minutes as i32+d*5).clamp(5,180) as u32,
-                            }
+                        let goal=self.water.goal_ml;let mut liters=goal as f32/1000.0;
+                        let value=match i {
+                            0=>egui::DragValue::new(&mut liters).range(0.5..=6.0).speed(0.25).suffix(" L").min_decimals(1).max_decimals(2),
+                            1=>egui::DragValue::new(&mut self.settings.serving_ml).range(50..=1000).speed(50.0).suffix(" ml"),
+                            _=>egui::DragValue::new(&mut self.settings.water_minutes).range(5..=180).speed(5.0).suffix(" 分钟"),
+                        };
+                        let (d,field)=stepper(&wc,370.0,row_y(i),value,&format!("water-{i}"));
+                        if field.gained_focus(){self.pending.push(Cmd::Focus);}self.settings_editing|=field.has_focus();
+                        match i {
+                            0=>{self.water.goal_ml=((liters*1000.0).round() as i32+d*250).clamp(500,6000) as u32;if self.water.goal_ml!=goal{self.water.save();}}
+                            1=>self.settings.serving_ml=(self.settings.serving_ml as i32+d*50).clamp(50,1000) as u32,
+                            _=>self.settings.water_minutes=(self.settings.water_minutes as i32+d*5).clamp(5,180) as u32,
                         }
                     }
                 }
                 if sv>0.01{
                     let sc=c.faded(sv);let sc=if self.sit_mode{sc}else{sc.ghost()};
                     sc.text(44.0,row_y(0)+13.0,"坐满多久提醒",10.5,W::Regular,theme::GRAY,H::Left);
-                    let d=stepper(&sc,370.0,row_y(0),&format!("{} 分钟",self.settings.sit_minutes),"sit");
+                    let value=egui::DragValue::new(&mut self.settings.sit_minutes).range(15..=180).speed(5.0).suffix(" 分钟");
+                    let (d,field)=stepper(&sc,370.0,row_y(0),value,"sit");
+                    if field.gained_focus(){self.pending.push(Cmd::Focus);}self.settings_editing|=field.has_focus();
                     if d!=0{self.settings.sit_minutes=(self.settings.sit_minutes as i32+d*5).clamp(15,180) as u32;}
                     sc.text(44.0,row_y(1)+13.0,"专注计时进行中不打扰，专注结束后再提醒",10.5,W::Regular,theme::GRAY,H::Left);
-                    sc.text(44.0,row_y(2)+13.0,"锁屏或点「起身了」后，久坐计时归零",10.5,W::Regular,theme::GRAY,H::Left);
+                    sc.text(44.0,row_y(2)+13.0,"提醒后常驻，点击确认或起身后重新计时",10.5,W::Regular,theme::GRAY,H::Left);
                 }
                 // 最后一行两边共用：提醒时段 + 午休的摘要，点进二级页修改。
                 let y=row_y(3);
@@ -980,22 +1053,14 @@ impl App {
                 if r.clicked(){self.health_time=true;}
             }
             2=>{
-                self.focus_editing=false;
                 for (i,name) in ["专注","休息"].iter().enumerate(){
                     let y=53.0+i as f32*23.0;
                     c.text(48.0,y+13.0,name,10.5,W::Regular,theme::GRAY,H::Left);
                     let value=if i==0{&mut self.settings.focus_minutes}else{&mut self.settings.rest_minutes};
                     let max=if i==0{180}else{60};let rect=c.rect(168.0,y,76.0,19.0);
-                    let mut ui=egui::Ui::new(c.ui.ctx().clone(),egui::Id::new(("focus-duration",i)),egui::UiBuilder::new().layer_id(c.ui.layer_id()).max_rect(rect).style(c.ui.style().clone()));
-                    ui.set_clip_rect(c.painter.clip_rect());ui.set_opacity(c.painter.opacity());if !c.live{ui.disable();}
-                    ui.spacing_mut().interact_size=rect.size();ui.spacing_mut().button_padding=egui::vec2(2.0,1.0);
-                    ui.style_mut().drag_value_text_style=egui::TextStyle::Body;
-                    ui.style_mut().text_styles.insert(egui::TextStyle::Body,c.font(11.0,W::Bold));
-                    ui.style_mut().explanation_tooltips=false;
-                    ui.visuals_mut().widgets.inactive.weak_bg_fill=Color32::TRANSPARENT;
-                    let field=ui.put(rect,egui::DragValue::new(value).range(1..=max).suffix(" 分钟").update_while_editing(false)).on_hover_text("点击输入分钟数");
+                    let field=island_number_field(c,rect,egui::DragValue::new(value).range(1..=max).suffix(" 分钟"),("focus-duration",i));
                     if field.gained_focus(){self.pending.push(Cmd::Focus);}
-                    self.focus_editing|=field.has_focus();
+                    self.settings_editing|=field.has_focus();
                     if setting_button(c,131.0,y,27.0,"−",false,&format!("focus-minus-{i}")){*value=value.saturating_sub(1).max(1);}
                     if setting_button(c,255.0,y,27.0,"+",false,&format!("focus-plus-{i}")){*value=(*value+1).min(max);}
                 }
@@ -1003,12 +1068,15 @@ impl App {
             }
             _=>{
                 if setting_button(c,43.0,56.0,152.0,if self.settings.notifications{"提醒 · 开"}else{"提醒 · 关"},self.settings.notifications,"set-notice"){self.settings.notifications=!self.settings.notifications;}
-                if setting_button(c,212.0,56.0,153.0,if self.settings.sound{"声音 · 开"}else{"声音 · 关"},self.settings.sound,"set-sound"){self.settings.sound=!self.settings.sound;}
+                if setting_button(c,212.0,56.0,153.0,if self.settings.system_notify && self.settings.sound{"声音 · 开"}else{"声音 · 关"},self.settings.system_notify && self.settings.sound,"set-sound"){
+                    self.settings.sound=!(self.settings.system_notify && self.settings.sound);
+                    if self.settings.sound {self.settings.system_notify=true;}
+                }
                 if setting_button(c,43.0,84.0,152.0,if self.settings.read_notifications{"断开系统通知"}else{"连接系统通知"},self.settings.read_notifications,"set-listener"){self.pending.push(if self.settings.read_notifications{Cmd::DisconnectNotifications}else{Cmd::RequestNotifications});}
                 let status=c.fit(&self.listener_status,10.5,W::Regular,170.0);c.text(210.0,97.0,&status,10.5,W::Regular,theme::GRAY,H::Left);
             }
         }
-        if before!=format!("{:?}",self.settings){self.settings.save();self.last_reminder=self.t;}
+        if before!=format!("{:?}",self.settings){self.settings.save();}
     }
 }
 
@@ -1037,7 +1105,7 @@ pub(crate) fn setting_row(ui:&mut egui::Ui,title:&str,description:&str,value:&mu
             ui.set_width(text_w);
             ui.spacing_mut().item_spacing.y=2.0;
             ui.add(egui::Label::new(egui::RichText::new(title).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)))).wrap());
-            if !description.is_empty(){ui.add(egui::Label::new(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(175),Color32::from_gray(90)))).wrap());}
+            if !description.is_empty(){ui.add(egui::Label::new(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(185),Color32::from_gray(82)))).wrap());}
         });
         // add_space 之后还会再插入一次 item_spacing.x，这里一并扣掉，开关才不会每行往外挤一点。
         ui.add_space((ui.available_width()-SETTINGS_SWITCH_W-ui.spacing().item_spacing.x).max(0.0));
@@ -1052,7 +1120,7 @@ pub(crate) fn settings_segmented<T:PartialEq+Copy>(ui:&mut egui::Ui,value:&mut T
     let mut changed=false;
     egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(28,28,30),Color32::from_rgb(230,233,238)))
         .corner_radius(8.0).inner_margin(3).show(ui,|ui|{
-            ui.horizontal(|ui|{
+            ui.horizontal_wrapped(|ui|{
                 ui.spacing_mut().item_spacing.x=2.0;
                 for (option,label) in options {
                     let selected=*value==*option;
@@ -1061,7 +1129,12 @@ pub(crate) fn settings_segmented<T:PartialEq+Copy>(ui:&mut egui::Ui,value:&mut T
                         .fill(if selected{settings_color(ctx,Color32::from_rgb(72,72,76),Color32::WHITE)}else{Color32::TRANSPARENT})
                         .stroke(egui::Stroke::NONE).corner_radius(6.0);
                     let width=item_w.max(ctx.fonts(|f|f.layout_no_wrap(label.to_string(),egui::FontId::proportional(12.0),Color32::WHITE).size().x)+20.0);
-                    if ui.add_sized([width,26.0],button).clicked() && !selected {*value=*option;changed=true;}
+                    // 选中项浮起一点：浅色模式白底加淡阴影，深色模式更亮的底色加阴影。
+                    let clicked=if selected {
+                        egui::Frame::new().corner_radius(6.0).shadow(egui::Shadow{offset:[0,1],blur:4,spread:0,color:Color32::from_black_alpha(if ui.visuals().dark_mode{90}else{38})})
+                            .show(ui,|ui|ui.add_sized([width,26.0],button)).inner.clicked()
+                    } else {ui.add_sized([width,26.0],button).clicked()};
+                    if clicked && !selected {*value=*option;changed=true;}
                 }
             });
         });
@@ -1090,7 +1163,7 @@ fn island_size_slider(ui:&mut egui::Ui,value:&mut u32)->egui::Response {
 
 pub(crate) fn settings_hint(ui:&mut egui::Ui,text:&str){
     let ctx=&ui.ctx().clone();
-    ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(160),Color32::from_gray(105)))).wrap());
+    ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(170),Color32::from_gray(92)))).wrap());
 }
 pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
     let ctx=&ui.ctx().clone();
@@ -1098,10 +1171,118 @@ pub(crate) fn settings_card(ui:&mut egui::Ui,add:impl FnOnce(&mut egui::Ui)) {
         .corner_radius(10.0).inner_margin(egui::Margin::symmetric(16,12))
         .show(ui,|ui|{ui.set_min_width(ui.available_width());ui.spacing_mut().item_spacing.y=8.0;add(ui);});
 }
-/// 设置分页对应的功能模块（页面序号）；常规、通知、关于、页面管理不属于任何模块。
+
+/// 卡片底部的「高级」折叠区：只放内容多的页面里不常改的项，默认收起。整条都可以点，右侧箭头表示展开状态。
+pub(crate) fn settings_advanced(ui:&mut egui::Ui,id:&str,add:impl FnOnce(&mut egui::Ui)){
+    let ctx=&ui.ctx().clone();
+    let state=egui::Id::new(("settings-advanced",id));
+    let mut open=ctx.data(|d|d.get_temp::<bool>(state)).unwrap_or(false);
+    ui.add_space(2.0);
+    let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),34.0),egui::Sense::click());
+    if response.hovered(){ui.painter().rect_filled(rect.expand2(egui::vec2(6.0,0.0)),7.0,settings_color(ctx,Color32::from_rgb(44,44,48),Color32::from_rgb(242,244,247)));}
+    let fg=settings_color(ctx,Color32::from_gray(205),Color32::from_gray(60));
+    ui.painter().text(egui::pos2(rect.left(),rect.center().y),egui::Align2::LEFT_CENTER,"高级",egui::FontId::proportional(13.0),fg);
+    // 右侧箭头：收起朝右，展开朝下。
+    let c=egui::pos2(rect.right()-10.0,rect.center().y);
+    let pts=if open{vec![c+egui::vec2(-4.5,-2.0),c+egui::vec2(0.0,2.5),c+egui::vec2(4.5,-2.0)]}else{vec![c+egui::vec2(-2.0,-4.5),c+egui::vec2(2.5,0.0),c+egui::vec2(-2.0,4.5)]};
+    ui.painter().add(egui::Shape::line(pts,egui::Stroke::new(1.6,fg)));
+    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked(){open=!open;ctx.data_mut(|d|d.insert_temp(state,open));}
+    if open {
+        ui.spacing_mut().item_spacing.y=8.0;
+        add(ui);
+    }
+}
+/// 状态小标签：「已开启」绿色，「已关闭」灰色；固定高度的胶囊，不随行高拉伸。
+fn settings_state_chip(ui:&mut egui::Ui,on:bool){
+    let ctx=&ui.ctx().clone();
+    let (text,fg,bg)=if on{("已开启",settings_color(ctx,Color32::from_rgb(127,214,155),Color32::from_rgb(29,122,60)),settings_color(ctx,Color32::from_rgb(28,51,36),Color32::from_rgb(227,244,232)))}
+        else{("已关闭",settings_color(ctx,Color32::from_gray(160),Color32::from_gray(105)),settings_color(ctx,Color32::from_rgb(44,44,48),Color32::from_rgb(232,235,240)))};
+    let galley=ui.painter().layout_no_wrap(text.into(),egui::FontId::proportional(11.5),fg);
+    let (rect,_)=ui.allocate_exact_size(egui::vec2(galley.size().x+16.0,20.0),egui::Sense::hover());
+    ui.painter().rect_filled(rect,10.0,bg);
+    ui.painter().galley(rect.center()-galley.size()/2.0,galley,fg);
+}
+/// 设置页统一的控件样式（按钮、输入框、选中色）；设置页正文和弹窗共用。
+pub(crate) fn settings_apply_style(ui:&mut egui::Ui){
+    let ctx=&ui.ctx().clone();
+    // 分割线：浅色模式用很淡的灰，深色模式略亮于卡片，不再是系统默认的粗灰线。
+    ui.visuals_mut().widgets.noninteractive.bg_stroke=egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(52,52,57),Color32::from_rgb(233,235,240)));
+    ui.spacing_mut().item_spacing.y=ui.spacing().item_spacing.y.max(5.0);
+    ui.spacing_mut().item_spacing=egui::vec2(8.0,5.0);
+    ui.spacing_mut().button_padding=egui::vec2(10.0,6.0);
+    ui.style_mut().text_styles.insert(egui::TextStyle::Small,egui::FontId::proportional(12.0));
+    ui.visuals_mut().override_text_color=Some(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)));
+    ui.visuals_mut().extreme_bg_color=settings_color(ctx,Color32::from_rgb(25,25,28),Color32::from_rgb(244,246,249));
+    ui.visuals_mut().widgets.inactive.bg_fill=settings_color(ctx,Color32::from_rgb(50,50,54),Color32::from_rgb(228,231,236));
+    ui.visuals_mut().widgets.hovered.bg_fill=settings_color(ctx,Color32::from_rgb(65,65,71),Color32::from_rgb(216,222,231));
+    // 统一按钮：高度 28、圆角 7、内边距 12×5，无描边；默认按钮也套用这套样式。
+    ui.spacing_mut().button_padding=egui::vec2(12.0,5.0);
+    ui.spacing_mut().interact_size.y=28.0;
+    {
+        let fill=settings_color(ctx,Color32::from_rgb(50,50,54),Color32::from_rgb(228,231,236));
+        let hover=settings_color(ctx,Color32::from_rgb(65,65,71),Color32::from_rgb(216,222,231));
+        let widgets=&mut ui.visuals_mut().widgets;
+        for (w,f) in [(&mut widgets.inactive,fill),(&mut widgets.hovered,hover),(&mut widgets.active,hover)] {
+            w.corner_radius=egui::CornerRadius::same(7);
+            w.weak_bg_fill=f;
+            w.bg_stroke=egui::Stroke::NONE;
+        }
+    }
+    ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
+}
+/// 设置页弹窗的外框：卡片底色、大圆角、细描边和阴影。
+pub(crate) fn settings_modal_frame(ctx:&egui::Context)->egui::Frame{
+    egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(36,36,40),Color32::WHITE)).corner_radius(14.0).inner_margin(egui::Margin::same(20))
+        .stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(58,58,64),Color32::from_rgb(222,225,231))))
+        .shadow(egui::Shadow{offset:[0,8],blur:28,spread:0,color:Color32::from_black_alpha(90)})
+}
+/// 弹窗标题栏：标题在左、关闭在右，下面一条分隔线。返回是否点了关闭。
+pub(crate) fn settings_modal_title(ui:&mut egui::Ui,title:&str)->bool{
+    let ctx=&ui.ctx().clone();
+    let mut close=false;
+    ui.horizontal(|ui|{
+        ui.label(egui::RichText::new(title).size(16.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+            close=ui.add(egui::Button::new(egui::RichText::new("×").size(18.0)).frame(false)).on_hover_text("关闭").clicked();
+        });
+    });
+    ui.add_space(4.0);settings_separator(ui);ui.add_space(6.0);
+    close
+}
+/// 设置页分割线（样式由 settings_apply_style 统一设定）。
+fn settings_separator(ui:&mut egui::Ui){ui.separator();}
+/// 可点选的标签：开启时绿色底，关闭时描边灰字。
+fn settings_toggle_chip(ui:&mut egui::Ui,text:&str,on:bool)->egui::Response{
+    let ctx=&ui.ctx().clone();
+    let label=text.to_string();
+    let fg=if on{settings_color(ctx,Color32::from_rgb(127,214,155),Color32::from_rgb(29,122,60))}else{settings_color(ctx,Color32::from_gray(185),Color32::from_gray(80))};
+    let fill=if on{settings_color(ctx,Color32::from_rgb(28,51,36),Color32::from_rgb(227,244,232))}else{Color32::TRANSPARENT};
+    let stroke=if on{egui::Stroke::NONE}else{egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(60,60,66),Color32::from_rgb(214,218,225)))};
+    ui.add(egui::Button::new(egui::RichText::new(label).size(12.0).color(fg)).fill(fill).stroke(stroke).corner_radius(13.0).min_size(egui::vec2(0.0,26.0)))
+}
+/// 功能页面对应的图标，与侧栏同一套。
+/// 纹理缓存只按地址区分、不分尺寸：侧栏 23px 先加载后，36px 的卡片图标会被放大发糊，所以这里用独立地址。
+fn settings_page_icon(page:usize)->egui::ImageSource<'static>{
+    use crate::app::*;
+    let (name,bytes):(&str,&'static [u8])=match page {
+        MUSIC_PAGE=>("music",include_bytes!("../assets/settings-icons/system/music.svg")),
+        FOCUS_PAGE=>("focus",include_bytes!("../assets/settings-icons/system/focus.svg")),
+        WATER_PAGE=>("health",include_bytes!("../assets/settings-icons/system/health.svg")),
+        SHELF_PAGE=>("shelf",include_bytes!("../assets/settings-icons/system/shelf.svg")),
+        TODO_PAGE=>("tasks",include_bytes!("../assets/settings-icons/system/tasks.svg")),
+        MAIL_PAGE=>("mail",include_bytes!("../assets/settings-icons/system/mail.svg")),
+        QUOTA_PAGE=>("quota",include_bytes!("../assets/settings-icons/system/quota.svg")),
+        CALENDAR_PAGE=>("calendar",include_bytes!("../assets/settings-icons/system/calendar.svg")),
+        _=>("weather",include_bytes!("../assets/settings-icons/system/weather.svg")),
+    };
+    egui::ImageSource::Bytes{uri:format!("bytes://settings-header-{name}.svg").into(),bytes:bytes.into()}
+}
+
+/// 设置分页对应的功能模块（页面序号）；通用、外观、位置、消息提醒、关于、页面管理不属于任何模块。
+#[cfg_attr(not(test),allow(dead_code))]
 pub(crate) fn settings_tab_module(tab:usize)->Option<usize>{
     use crate::app::*;
-    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),13=>Some(WORLD_CLOCK_PAGE),_=>None}
+    match tab {1=>Some(MUSIC_PAGE),2=>Some(FOCUS_PAGE),3=>Some(WATER_PAGE),4=>Some(TODO_PAGE),5=>Some(SHELF_PAGE),7=>Some(MAIL_PAGE),8=>Some(CALENDAR_PAGE),11=>Some(QUOTA_PAGE),12=>Some(WEATHER_PAGE),SETTINGS_TAB_TIME=>Some(WORLD_CLOCK_PAGE),_=>None}
 }
 
 pub(crate) fn settings_label(ui:&mut egui::Ui,text:&str){
@@ -1204,6 +1385,10 @@ fn number_stepper<N:egui::emath::Numeric>(ui:&mut egui::Ui,value:&mut N,min:N,ma
     });
     changed
 }
+/// 时段行的宽度：两个加减器（−、输入框、+ 各间隔 6）加中间的「至」和两侧间距。
+/// 区域刚好装下内容，靠右放置时右边缘就和单个加减器对齐。
+const TIME_RANGE_HOURS_W:f32=(26.0+6.0+48.0+6.0+26.0)*2.0+8.0+13.0+8.0;
+const TIME_RANGE_CLOCK_W:f32=(26.0+6.0+56.0+6.0+26.0)*2.0+8.0+13.0+8.0;
 /// 时刻加减器（一天中的分钟数，15 分钟一档，跨午夜循环），中间可直接输入 12:30。
 fn time_stepper(ui:&mut egui::Ui,value:&mut u32,id:&str)->bool{
     let ctx=&ui.ctx().clone();
@@ -1227,15 +1412,61 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
     let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
     settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);10] = [
-    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("天气",12,12),
-    ("世界时钟",13,13), ("关于",9,9),
+/// 设置页分页序号。旧序号保持不变（岛上入口、测试都按序号跳转），新增外观与位置两页。
+pub(crate) const SETTINGS_TAB_APPEARANCE: usize = 13;
+pub(crate) const SETTINGS_TAB_POSITION: usize = 14;
+/// 本定制的「时间」页（显示时区、互联网对时、世界时钟城市），排在外观与位置之后。
+pub(crate) const SETTINGS_TAB_TIME: usize = 15;
+/// 侧栏：一项就是一页，不再有页内子标签。专注与健康（2、3）、待办与置物（4、5）各合成一页；关于固定左下角。
+/// 第四列是这一项之前的分组标题。
+const SETTINGS_GROUPS: [(&str,usize,usize,&str);14] = [
+    ("通用",0,0,"岛仔"), ("外观",SETTINGS_TAB_APPEARANCE,SETTINGS_TAB_APPEARANCE,""), ("位置",SETTINGS_TAB_POSITION,SETTINGS_TAB_POSITION,""), ("页面管理",10,10,""),
+    ("音乐",1,1,"功能"), ("专注与健康",2,3,""), ("待办与置物",4,5,""), ("消息提醒",6,6,""), ("邮箱",7,7,""), ("日程",8,8,""), ("AI 额度",11,11,""), ("天气",12,12,""), ("时间",SETTINGS_TAB_TIME,SETTINGS_TAB_TIME,""),
+    ("关于",9,9,""),
 ];
+/// 分页标题；合并页（3→2、5→4）显示合并后的名字。
+fn settings_tab_title(tab:usize)->&'static str{
+    SETTINGS_GROUPS.iter().find(|(_,start,end,_)|(*start..=*end).contains(&tab)).map_or("通用",|g|g.0)
+}
+#[cfg(test)]
+pub(crate) fn settings_tab_group_for_tests(tab:usize)->&'static str{settings_tab_title(tab)}
 
 impl App {
+    /// 功能页顶部卡片：名称、说明和开启状态。开关统一在「页面管理」；关闭时这里给出「开启」入口。
+    /// 返回功能是否开启，调用方据此把下面的设置置灰。
+    fn settings_feature_header(&mut self,ui:&mut egui::Ui,page:usize,description:&str,extra:impl FnOnce(&mut Self,&mut egui::Ui))->bool{
+        let ctx=&ui.ctx().clone();
+        let on=self.module_on(page);
+        let (mut enable,mut open)=(false,false);
+        settings_card(ui,|ui|{
+            ui.horizontal(|ui|{
+                ui.add(egui::Image::new(settings_page_icon(page)).fit_to_exact_size(egui::vec2(36.0,36.0)));
+                ui.add_space(4.0);
+                ui.vertical(|ui|{
+                    ui.spacing_mut().item_spacing.y=2.0;
+                    ui.label(egui::RichText::new(PAGE_NAMES[page]).size(15.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                    ui.label(egui::RichText::new(description).size(11.5).color(settings_color(ctx,Color32::from_gray(175),Color32::from_gray(90))));
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                    // 每个功能卡片同一个位置：开着时「打开」跳到岛上对应页面，关着时「开启」。
+                    if on {open=ui.button("打开").on_hover_text(format!("在岛上打开「{}」",PAGE_NAMES[page])).clicked();extra(self,ui);} else {enable=ui.button("开启").clicked();}
+                    settings_state_chip(ui,on);
+                });
+            });
+            if !on {
+                ui.label(egui::RichText::new(format!("「{}」已关闭，不会在后台同步或提醒",PAGE_NAMES[page])).size(12.0).color(settings_color(ctx,Color32::from_rgb(238,181,91),Color32::from_rgb(139,88,12))));
+            }
+        });
+        if enable {self.set_page_visible(page,true);}
+        if open {
+            self.settings_open=false;
+            if page==crate::app::CALENDAR_PAGE {self.open_calendar(None);}
+            else {if page==crate::app::SHELF_PAGE {self.shelf_tab=0;} self.show_page(page);}
+        }
+        self.module_on(page)
+    }
     pub fn settings_ui(&mut self,ctx:&egui::Context,autostart:bool){
-        if !self.settings_open{self.window_layout().close();release_support_codes(ctx);}
+        if !self.settings_open{self.window_layout().close();release_support_codes(ctx);self.weather_source.close();}
         self.updates.poll(ctx);
         self.updates.dialog_ui(ctx);
         if !self.settings_open{return;}
@@ -1249,6 +1480,9 @@ impl App {
             let original_style=ctx.style();
             let mut style=(*original_style).clone();
             style.visuals=if dark{egui::Visuals::dark()}else{egui::Visuals::light()};
+            // 侧栏与正文之间的竖线、弹窗里的分隔线都用这条淡线；浅色模式不再是一条深灰粗线。
+            // 侧栏边框已去掉，这里是唯一的一条：浅色模式一条淡线，深色模式不画线，靠两块底色区分。
+            style.visuals.widgets.noninteractive.bg_stroke=if dark{egui::Stroke::NONE}else{egui::Stroke::new(1.0,Color32::from_rgb(226,229,234))};
             ctx.set_style(style);
             ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(if dark{egui::SystemTheme::Dark}else{egui::SystemTheme::Light}));
             if self.settings.settings_theme==crate::settings_theme::SettingsTheme::System {
@@ -1262,21 +1496,29 @@ impl App {
             }
             if ctx.input(|i|i.viewport().close_requested()){self.settings_open=false;self.quota_close_connection();}
             let before=format!("{:?}",self.settings);
-            egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::new(1.0,settings_color(ctx,Color32::from_rgb(42,42,45),Color32::from_rgb(216,219,225)))).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
-                ui.add_space(5.0);
-                ui.label(egui::RichText::new("设置").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
-                ui.add_space(7.0);
-                for (name,start,end) in SETTINGS_GROUPS {
-                    if start==9 {ui.add_space((ui.available_height()-38.0).max(0.0));}
+            egui::SidePanel::left("settings-sidebar").resizable(false).exact_width(180.0).frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,32),Color32::from_rgb(237,239,243))).stroke(egui::Stroke::NONE).inner_margin(egui::Margin::symmetric(10,12))).show(ctx,|ui|{
+                ui.add_space(2.0);
+                // 13 项加两个分组标题：窗口拉到最矮时按可用高度压缩行高，「关于」始终留在底部可见。
+                // 每项占 行高 + 控件间距(3) + 行后空隙；两个分组标题和「关于」上方预留约 80。
+                let per=(ui.available_height()-80.0)/SETTINGS_GROUPS.len() as f32;
+                let row_h=(per-6.0).clamp(20.0,32.0);
+                let row_gap=(per-3.0-row_h).clamp(0.0,3.0);
+                for (name,start,end,section) in SETTINGS_GROUPS {
+                    if !section.is_empty() {
+                        ui.add_space(if start==0{2.0}else{8.0});
+                        ui.label(egui::RichText::new(section).size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
+                        ui.add_space(3.0);
+                    }
+                    if start==9 {ui.add_space((ui.available_height()-row_h-4.0).max(4.0));}
                     let selected=(start..=end).contains(&self.settings_tab);
-                    let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),36.0),egui::Sense::click());
+                    let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),row_h),egui::Sense::click());
                     if response.clicked() && !selected{self.settings_tab=start;}
                     if selected || response.hovered(){
                         ui.painter().rect_filled(rect,7.0,if selected{settings_color(ctx,Color32::from_rgb(43,43,46),Color32::from_rgb(214,221,232))}else{settings_color(ctx,Color32::from_rgb(30,30,33),Color32::from_rgb(225,230,238))});
                     }
                     let icon=match start {
                         0=>egui::include_image!("../assets/settings-icons/system/general.svg"),
-                        13=>egui::include_image!("../assets/settings-icons/system/general.svg"),
+                        SETTINGS_TAB_TIME=>egui::include_image!("../assets/settings-icons/system/general.svg"),
                         11=>egui::include_image!("../assets/settings-icons/system/quota.svg"),
                         10=>egui::include_image!("../assets/settings-icons/system/pages.svg"),
                         1=>egui::include_image!("../assets/settings-icons/system/music.svg"),
@@ -1284,259 +1526,35 @@ impl App {
                         4=>egui::include_image!("../assets/settings-icons/system/tasks.svg"),
                         6=>egui::include_image!("../assets/settings-icons/system/notifications.svg"),
                         12=>egui::include_image!("../assets/settings-icons/system/weather.svg"),
+                        7=>egui::include_image!("../assets/settings-icons/system/mail.svg"),
+                        8=>egui::include_image!("../assets/settings-icons/system/calendar.svg"),
+                        SETTINGS_TAB_APPEARANCE=>egui::include_image!("../assets/settings-icons/system/appearance.svg"),
+                        SETTINGS_TAB_POSITION=>egui::include_image!("../assets/settings-icons/system/position.svg"),
                         _=>egui::include_image!("../assets/settings-icons/system/about.svg"),
                     };
-                    let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+21.0,rect.center().y),egui::vec2(25.0,25.0));
+                    let icon_bg=egui::Rect::from_center_size(egui::pos2(rect.left()+21.0,rect.center().y),egui::vec2(23.0,23.0));
                     egui::Image::new(icon).paint_at(ui,icon_bg);
                     ui.painter().text(egui::pos2(rect.left()+40.0,rect.center().y),egui::Align2::LEFT_CENTER,name,egui::FontId::proportional(13.0),if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(225),Color32::from_gray(55))});
-                    ui.add_space(3.0);
+                    ui.add_space(row_gap);
                 }
             });
             egui::CentralPanel::default().frame(egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(25,25,27),Color32::from_rgb(246,247,249))).inner_margin(egui::Margin::symmetric(22,16))).show(ctx,|ui|{
-                ui.spacing_mut().item_spacing=egui::vec2(8.0,5.0);
-                ui.spacing_mut().button_padding=egui::vec2(10.0,6.0);
-                ui.style_mut().text_styles.insert(egui::TextStyle::Small,egui::FontId::proportional(12.0));
-                ui.visuals_mut().override_text_color=Some(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41)));
-                ui.visuals_mut().extreme_bg_color=settings_color(ctx,Color32::from_rgb(25,25,28),Color32::from_rgb(244,246,249));
-                ui.visuals_mut().widgets.inactive.bg_fill=settings_color(ctx,Color32::from_rgb(50,50,54),Color32::from_rgb(228,231,236));
-                ui.visuals_mut().widgets.hovered.bg_fill=settings_color(ctx,Color32::from_rgb(65,65,71),Color32::from_rgb(216,222,231));
-                // 统一按钮：高度 28、圆角 7、内边距 12×5，无描边；默认按钮也套用这套样式。
-                ui.spacing_mut().button_padding=egui::vec2(12.0,5.0);
-                ui.spacing_mut().interact_size.y=28.0;
-                {
-                    let fill=settings_color(ctx,Color32::from_rgb(50,50,54),Color32::from_rgb(228,231,236));
-                    let hover=settings_color(ctx,Color32::from_rgb(65,65,71),Color32::from_rgb(216,222,231));
-                    let widgets=&mut ui.visuals_mut().widgets;
-                    for (w,f) in [(&mut widgets.inactive,fill),(&mut widgets.hovered,hover),(&mut widgets.active,hover)] {
-                        w.corner_radius=egui::CornerRadius::same(7);
-                        w.weak_bg_fill=f;
-                        w.bg_stroke=egui::Stroke::NONE;
-                    }
-                }
-                ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","健康提醒","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","天气","世界时钟"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(13)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
-                if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
-                    if start!=end {
-                        ui.add_space(7.0);
-                        egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(33,33,36),Color32::from_rgb(232,235,240))).corner_radius(8.0).inner_margin(3).show(ui,|ui|{
-                            ui.spacing_mut().item_spacing.x=2.0;
-                            ui.horizontal(|ui|{
-                                for index in *start..=*end {
-                                    let selected=self.settings_tab==index;
-                                    let button=egui::Button::new(egui::RichText::new(titles[index]).size(12.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))}))
-                                        .fill(if selected{settings_color(ctx,Color32::from_rgb(70,70,74),Color32::from_rgb(205,215,229))}else{Color32::TRANSPARENT})
-                                        .stroke(egui::Stroke::NONE).corner_radius(6.0);
-                                    if ui.add_sized([68.0,26.0],button).clicked(){self.settings_tab=index;}
-                                }
-                            });
-                        });
-                    }
-                }
+                settings_apply_style(ui);
+                ui.label(egui::RichText::new(settings_tab_title(self.settings_tab)).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 ui.add_space(6.0);
-                egui::ScrollArea::vertical().id_salt(("settings-scroll",self.settings_tab)).auto_shrink([false,false]).show(ui,|ui|{
+                // 合并页：健康（3）并入专注（2），置物（4→5）并入待办，旧序号仍能打开对应页面。
+                let tab=match self.settings_tab {3=>2,5=>4,t=>t};
+                egui::ScrollArea::vertical().id_salt(("settings-scroll",tab)).auto_shrink([false,false]).show(ui,|ui|{
                     // 右侧给滚动条留出空隙，卡片和开关不会被它压住。
                     ui.set_width((ui.available_width()-12.0).max(240.0));
-                    // 模块已关闭：顶部说明并提供开启入口，下面的设置置灰。
-                    if let Some(page)=settings_tab_module(self.settings_tab).filter(|page|!self.module_on(*page)) {
-                        let mut enable=false;
-                        settings_card(ui,|ui|{
-                            ui.horizontal(|ui|{
-                                ui.label(egui::RichText::new(format!("「{}」已关闭，不会在后台同步或提醒",PAGE_NAMES[page])).size(12.5));
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{enable=ui.button("开启").clicked();});
-                            });
-                        });
-                        if enable {self.set_page_visible(page,true);}
-                        ui.add_space(6.0);
-                        if !self.module_on(page) {ui.disable();}
-                    }
-                    match self.settings_tab {
-                    12=>self.weather_settings(ui),
-                    11=>self.quota_settings(ui),
-                    10=>{
-                        ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                        settings_label(ui,"常驻排列");
-                        settings_card(ui,|ui|self.resident_order_settings(ui));
-                        settings_label(ui,"状态组件");
-                        settings_card(ui,|ui|{
-                            setting_row(ui,"电量","本机电量、充电状态与提醒；无电池设备自动隐藏",&mut self.settings.show_battery);
-                            ui.separator();
-                            setting_row(ui,"岛上歌词","收起时显示歌词，无歌词时显示封面和歌名",&mut self.settings.island_lyrics);
-                        });
-                        settings_label(ui,"功能页面");
-                        settings_card(ui,|ui|{
-let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","主时钟时差与多城市时间"];
-                            ui.label(egui::RichText::new("拖动左侧手柄调整顺序；关闭的功能不在后台运行，不同步也不提醒，已有数据保留。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            #[derive(Clone)]
-                            struct PageDrag(usize);
-                            let mut movement=None;
-                            let row_w=ui.available_width();
-                            for (index,page) in self.settings.page_order.into_iter().enumerate() {
-                                if index>0 {ui.separator();}
-                                let mut visible=self.settings.visible_pages[page];
-                                let can_change=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
-                                let row=ui.push_id(("page-order",page),|ui|ui.horizontal(|ui|{
-                                    ui.set_max_width(row_w);
-                                    let (rect,handle)=ui.allocate_exact_size(egui::vec2(20.0,40.0),egui::Sense::drag());
-                                    for x in [-3.0,3.0] {for y in [-6.0,0.0,6.0] {
-                                        ui.painter().circle_filled(rect.center()+egui::vec2(x,y),1.4,settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)));
-                                    }}
-                                    handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(page));
-                                    ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],descriptions[page],&mut visible);});
-                                })).inner.response;
-                                if let Some(payload)=row.dnd_hover_payload::<PageDrag>() {
-                                    if payload.0!=page {
-                                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
-                                        let y=if self.settings.page_order.iter().position(|p|*p==payload.0).unwrap()<index {row.rect.bottom()}else{row.rect.top()};
-                                        ui.painter().line_segment([egui::pos2(row.rect.left(),y),egui::pos2(row.rect.right(),y)],egui::Stroke::new(2.0,Color32::from_rgb(70,150,255)));
-                                    }
-                                }
-                                if let Some(payload)=row.dnd_release_payload::<PageDrag>() {movement=Some((payload.0,index));}
-                                if visible!=self.settings.visible_pages[page] {self.set_page_visible(page,visible);}
-                            }
-                            if let Some((page,to))=movement {
-                                let from=self.settings.page_order.iter().position(|p|*p==page).unwrap();
-                                if from<to {self.settings.page_order[from..=to].rotate_left(1);}
-                                else {self.settings.page_order[to..=from].rotate_right(1);}
-                            }
-                            if self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1 {
-                                ui.add_space(5.0);
-                                ui.label(egui::RichText::new("至少保留一个页面。").size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            }
-                        });
-                    }
-                    0=>{
-                        settings_label(ui,"设置页外观");
-                        settings_card(ui,|ui|{
-                            use crate::settings_theme::SettingsTheme;
-                            settings_control_row_right(ui,"主题",|ui|{
-                                if settings_segmented(ui,&mut self.settings.settings_theme,&[(SettingsTheme::System,"跟随系统"),(SettingsTheme::Light,"浅色"),(SettingsTheme::Dark,"深色")],52.0) {ctx.request_repaint();}
-                            });
-                            settings_hint(ui,"仅影响设置页，岛的外观保持不变。");
-                        });
-                        settings_label(ui,"启动");
-                        settings_card(ui,|ui|{
-                            let mut a=autostart;
-                            setting_row(ui,"开机启动","登录 Windows 时自动打开岛仔",&mut a);
-                            if a!=autostart{self.pending.push(Cmd::ToggleAutostart);}
-                        });
-                        settings_label(ui,"图形渲染");
-                        settings_card(ui,|ui|{
-                            let before=self.settings.render_compat;
-                            setting_row(ui,"兼容渲染（Direct3D 12）","岛周围出现黑框、画面闪烁或错乱，或打开设置后崩溃退出时开启；切换后重启岛仔生效",&mut self.settings.render_compat);
-                            // 手动关闭后不再显示自动切换的原因；再次开启视为手动开启。
-                            if before!=self.settings.render_compat {self.settings.render_compat_reason.clear();}
-                            if !self.settings.render_compat_reason.is_empty() {settings_hint(ui,&self.settings.render_compat_reason);}
-                            if self.settings.render_compat!=self.render_compat_running {
-                                ui.horizontal(|ui|{
-                                    ui.label(egui::RichText::new("重启岛仔后生效").size(12.0).color(Color32::from_rgb(230,150,40)));
-                                    if ui.button("立即重启").clicked(){self.pending.push(Cmd::RestartApp);}
-                                });
-                            }
-                        });
-                        settings_label(ui,"岛体外观");
-                        settings_card(ui,|ui|{
-                            use crate::model::{self as model,Skin};
-                            let skins:Vec<(Skin,&str)>=Skin::ALL.iter().map(|s|(*s,s.label())).collect();
-                            settings_control_row_right(ui,"皮肤",|ui|{settings_segmented(ui,&mut self.settings.skin,&skins,64.0);});
-                            settings_hint(ui,self.settings.skin.description());
-                            ui.separator();
-                            let shapes:Vec<(model::IslandShape,&str)>=model::IslandShape::ALL.iter().map(|s|(*s,s.label())).collect();
-                            settings_control_row_right(ui,"形状",|ui|{settings_segmented(ui,&mut self.settings.island_shape,&shapes,64.0);});
-                            settings_hint(ui,self.settings.island_shape.description());
-                            if self.settings.skin.is_glass() {
-                                ui.separator();
-                                let mut blur=self.settings.glass_blur;
-                                setting_row(ui,"背景模糊","使用 Windows 合成引擎的实时模糊，严格贴合岛体形状（需开启系统“透明效果”）；关闭后改为烟熏半透明",&mut blur);
-                                self.settings.glass_blur=blur;
-                            }
-                            ui.separator();
-                            settings_control_row(ui,"大小",56.0,|ui|{
-                                ui.horizontal(|ui|{
-                                    ui.spacing_mut().slider_width=180.0;
-                                    island_size_slider(ui,&mut self.settings.island_size);
-                                    if ui.add_enabled(self.settings.island_size!=100,egui::Button::new("恢复默认")).clicked(){self.settings.island_size=100;}
-                                }).response
-                            });
-                            settings_hint(ui,"文字、图标和吉祥物按实际像素重新绘制，放大后依旧清晰；范围 80%–200%，只影响岛体，不影响设置窗口。");
-                        });
-                        settings_label(ui,"岛体显示");
-                        settings_card(ui,|ui|{
-                            let selected=self.displays.iter().find(|d|d.id==self.settings.display_id);
-                            let label=if self.settings.display_id.is_empty(){"跟随主屏"}else{selected.map_or("所选屏幕未连接",|d|d.label.as_str())};
-                            settings_control_row(ui,"显示屏",56.0,|ui|{
-                                egui::ComboBox::from_id_salt("island-display").selected_text(label).width(ui.available_width().min(300.0)).truncate().show_ui(ui,|ui|{
-                                    ui.selectable_value(&mut self.settings.display_id,String::new(),"跟随主屏");
-                                    for display in &self.displays {ui.selectable_value(&mut self.settings.display_id,display.id.clone(),&display.label);}
-                                }).response
-                            });
-                            let edge=self.settings.dock.label();
-                            ui.label(egui::RichText::new(if !self.settings.display_id.is_empty()&&selected.is_none(){"暂时显示在主屏，重新连接所选屏幕后自动恢复。".to_string()}else{format!("显示在所选屏幕的{edge}；断开时暂时回到主屏。")}).size(11.0).color(ui.visuals().weak_text_color()));
-                            ui.add_space(4.0);
-                            // 停靠边缘：顶部 / 底部为横向，左右为竖向排列；底部面板朝上展开。
-                            let docks:Vec<(crate::model::Dock,&str)>=crate::model::Dock::ALL.iter().map(|d|(*d,d.label())).collect();
-                            settings_control_row_right(ui,"停靠",|ui|{
-                                // 换边后偏移的含义变了（水平 ↔ 上下），回到居中。
-                                if settings_segmented(ui,&mut self.settings.dock,&docks,52.0) {self.settings.island_offset=0;}
-                            });
-                            if self.settings.dock.is_side() {
-                                ui.label(egui::RichText::new("收起时竖向排列时间、电池、播放、专注和 AI 额度；展开面板从屏幕边缘滑出。吉祥物和岛上歌词只在顶部、底部停靠时显示。").size(11.0).color(ui.visuals().weak_text_color()));
-                            } else if self.settings.dock.is_bottom() {
-                                ui.label(egui::RichText::new("贴在任务栏上方，形状上下翻转、展开面板朝上展开；水平位置与顶部停靠一致。").size(11.0).color(ui.visuals().weak_text_color()));
-                            }
-                            ui.add_space(4.0);
-                            let side=self.settings.dock.is_side();
-                            settings_control_row(ui,if side{"上下位置"}else{"水平位置"},56.0,|ui|{
-                                ui.horizontal(|ui|{
-                                    let limit=crate::model::ISLAND_OFFSET_MAX;
-                                    let offset=&mut self.settings.island_offset;
-                                    let (less,more,less_tip,more_tip)=if side{("↑","↓","向上微调","向下微调")}else{("←","→","向左微调","向右微调")};
-                                    if ui.add_enabled(*offset>-limit,egui::Button::new(less).min_size(egui::vec2(26.0,22.0))).on_hover_text(less_tip).clicked(){*offset=(*offset-5).max(-limit);}
-                                    ui.spacing_mut().slider_width=150.0;
-                                    ui.add(egui::Slider::new(&mut *offset,-limit..=limit).show_value(false));
-                                    if ui.add_enabled(*offset<limit,egui::Button::new(more).min_size(egui::vec2(26.0,22.0))).on_hover_text(more_tip).clicked(){*offset=(*offset+5).min(limit);}
-                                    if ui.add_enabled(*offset!=0,egui::Button::new("恢复居中")).clicked(){*offset=0;}
-                                }).response
-                            });
-                            let offset=self.settings.island_offset;
-                            let (less,more)=if side{("偏上","偏下")}else{("偏左","偏右")};
-                            let position=match offset {0=>"居中".to_string(),o if o<0=>format!("{less} {}%",-o),o=>format!("{more} {o}%")};
-                            ui.label(egui::RichText::new(format!("当前：{position}。也可以展开后按住日期时间，拖到屏幕顶部、左侧或右侧；展开面板和通知始终留在屏幕内，换屏或调整大小后保持相对位置。")).size(11.0).color(ui.visuals().weak_text_color()));
-                            ui.add_space(4.0);
-                            setting_row(ui,"避开顶栏","顶部有菜单栏类软件或任务栏时，岛体放在它下方",&mut self.settings.avoid_top_bar);
-                            if self.settings.avoid_top_bar {
-                                let reserved=crate::display_layout::selected(&self.displays,&self.settings.display_id).map_or(0,|d|{
-                                    let b=crate::display_layout::placement_bounds(d,true);(b.top-d.bounds.top).max(0)
-                                });
-                                settings_hint(ui,&if reserved>0 {format!("已检测到顶栏，岛体下移 {reserved} 像素。")}else{"未检测到顶栏；未向系统登记占用区域的顶栏无法识别，可改用胶囊形状。".to_string()});
-                            }
-                            ui.separator();
-                            settings_control_row_right(ui,"时间制式",|ui|{settings_segmented(ui,&mut self.settings.clock_12h,&[(false,"24 小时"),(true,"12 小时")],72.0);});
-                            settings_control_row_right(ui,"时段文字",|ui|{settings_segmented(ui,&mut self.settings.clock_period,&[(0,"不显示"),(1,"上午 / 下午"),(2,"详细时段")],72.0);});
-                            settings_hint(ui,"详细时段：凌晨、上午、中午、下午、傍晚、晚上");
-                            ui.separator();
-                            let mut minimal=self.settings.minimal;
-                            setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);
-                            if minimal!=self.settings.minimal {self.set_minimal(minimal);}
-                            ui.separator();
-
-                            let mut pet=self.settings.pet;
-                            setting_row(ui,"岛仔吉祥物","收起时常驻，播放音乐时一起唱歌",&mut pet);
-                            if pet!=self.settings.pet {self.set_pet(pet);}
-                        });
-                        self.avoidance.settings(ui,&mut self.settings);
-                        settings_label(ui,"声音与显示");
-                        settings_card(ui,|ui|{
-                            setting_row(ui,"提醒声音","喝水、久坐、待办和专注提醒",&mut self.settings.sound);
-                            ui.separator();
-                            setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
-                        });
-                    }
-                    13=>{
+                    match tab {
+                    SETTINGS_TAB_TIME=>{
                         settings_label(ui,"时间");
                         settings_card(ui,|ui|{
                             setting_row(ui,"时间常驻","收起时始终在岛上显示时间，极简刘海、歌词和通知都不顶掉",&mut self.settings.time_resident);
-                            settings_hint(ui,"开启后药丸左端固定留给时钟；关闭则回到原来的紧凑形态。");
+                            // 与「页面管理 → 岛上显示 → 时间」是同一个开关，两处同步。
+                            self.settings.show_clock=self.settings.time_resident;
+                            settings_hint(ui,"开启后药丸左端固定留给时钟；关闭则回到原来的紧凑形态，展开顶栏仍显示时间。");
                             ui.separator();
                             settings_control_row_right(ui,"显示时区",|ui|{
                                 egui::ComboBox::from_id_salt("main-time-zone").width(190.0)
@@ -1589,192 +1607,455 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                             ui.data_mut(|d|d.insert_temp(draft_id,draft));
                         });
                     }
-                    1=>{
-                        settings_label(ui,"歌词");
+                    12=>{
+                        let on=self.settings_feature_header(ui,crate::app::WEATHER_PAGE,"当地天气与七日预报",|_,_|{});
+                        ui.add_space(4.0);
+                        ui.add_enabled_ui(on,|ui|self.weather_settings(ui));
+                    }
+                    11=>{
+                        let on=self.settings_feature_header(ui,crate::app::QUOTA_PAGE,"每 3 分钟自动更新剩余额度",|_,_|{});
+                        ui.add_space(4.0);
+                        ui.add_enabled_ui(on,|ui|self.quota_settings(ui));
+                    }
+                    10=>{
+                        ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                        // 岛上显示：收起时的常驻内容在这里统一排序和开关；岛上歌词属于音乐的显示方式，在音乐页设置。
+                        settings_label(ui,"岛上显示");
                         settings_card(ui,|ui|{
-                            setting_row(ui,"展开时显示歌词","在播放器右侧同步滚动显示歌词",&mut self.settings.lyrics_enabled);
-                            self.show_lyrics=self.settings.lyrics_enabled;
+                            self.resident_order_settings(ui);
                             ui.separator();
-                            setting_row(ui,"岛上歌词","收起时显示当前句；无同步歌词时显示封面和歌名",&mut self.settings.island_lyrics);
+                            // 本定制把「时间」与「时间常驻」合并成一个开关：关掉就是收起态不再留时钟席位，
+                            // 常驻栏里的时钟槽位、侧边停靠的时钟一起收掉；两个字段保持同步，不会互相打架。
+                            setting_row(ui,"时间","关闭后收起态不再显示时间，仍可在展开顶栏查看",&mut self.settings.show_clock);
+                            self.settings.time_resident=self.settings.show_clock;
+                            ui.separator();
+                            setting_row(ui,"电量","无电池设备自动隐藏",&mut self.settings.show_battery);
+                            ui.separator();
+                            setting_row(ui,"天气","天气图标和温度，点击打开天气页",&mut self.settings.show_weather);
+                            ui.separator();
+                            let before=self.quota.config.compact;
+                            setting_row(ui,"AI 额度","常驻账号；WorkBuddy 积分在前，DeepSeek 余额在最后",&mut self.quota.config.compact);
+                            if before!=self.quota.config.compact {self.quota.config.save();}
                         });
-                        settings_label(ui,"歌词显示时间");
+                        settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let mut advance=-self.settings.lyric_delay_ms as f64/1000.0;
-                            if setting_number(ui,"时间偏移",&mut advance,-5.0,5.0," 秒",0.1){self.settings.lyric_delay_ms=(-advance*1000.0).round()as i32;}
-                            ui.add_space(3.0);
-                            ui.small("正数提前，负数延后；默认提前 0.35 秒。");
+let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝水与久坐提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","当地天气与七日预报","主时钟时差与多城市时间"];
+                            ui.label(egui::RichText::new("拖动左侧手柄调整顺序；关闭的功能不在后台运行，不同步也不提醒，已有数据保留。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            #[derive(Clone)]
+                            struct PageDrag(usize);
+                            let mut movement=None;
+                            let mut jump=None;
+                            let row_w=ui.available_width();
+                            for (index,page) in self.settings.page_order.into_iter().enumerate() {
+                                if index>0 {ui.separator();}
+                                let mut visible=self.settings.visible_pages[page];
+                                let can_change=!visible || self.settings.visible_pages.iter().filter(|enabled|**enabled).count()>1;
+                                let row=ui.push_id(("page-order",page),|ui|ui.horizontal(|ui|{
+                                    ui.set_max_width(row_w);
+                                    let (rect,handle)=ui.allocate_exact_size(egui::vec2(20.0,40.0),egui::Sense::drag());
+                                    for x in [-3.0,3.0] {for y in [-6.0,0.0,6.0] {
+                                        ui.painter().circle_filled(rect.center()+egui::vec2(x,y),1.4,settings_color(ctx,Color32::from_gray(155),Color32::from_gray(100)));
+                                    }}
+                                    handle.on_hover_cursor(egui::CursorIcon::Grab).dnd_set_drag_payload(PageDrag(page));
+                                    // 每行右侧「设置 ›」直接跳到这个功能的设置页，开关仍在最右。
+                                    let jump_w=58.0;
+                                    ui.allocate_ui(egui::vec2((ui.available_width()-jump_w-ui.spacing().item_spacing.x).max(160.0),40.0),|ui|{
+                                        ui.add_enabled_ui(can_change,|ui|{setting_row(ui,PAGE_NAMES[page],descriptions[page],&mut visible);});
+                                    });
+                                    if ui.add_sized([jump_w,26.0],egui::Button::new(egui::RichText::new("设置 ›").size(12.0)).frame(false)).on_hover_text(format!("打开「{}」设置",PAGE_NAMES[page])).clicked(){jump=Some(crate::app::PAGE_SETTINGS_TABS[page]);}
+                                })).inner.response;
+                                if let Some(payload)=row.dnd_hover_payload::<PageDrag>() {
+                                    if payload.0!=page {
+                                        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                        let y=if self.settings.page_order.iter().position(|p|*p==payload.0).unwrap()<index {row.rect.bottom()}else{row.rect.top()};
+                                        ui.painter().line_segment([egui::pos2(row.rect.left(),y),egui::pos2(row.rect.right(),y)],egui::Stroke::new(2.0,Color32::from_rgb(70,150,255)));
+                                    }
+                                }
+                                if let Some(payload)=row.dnd_release_payload::<PageDrag>() {movement=Some((payload.0,index));}
+                                if visible!=self.settings.visible_pages[page] {self.set_page_visible(page,visible);}
+                            }
+                            if let Some(tab)=jump {self.settings_tab=tab;}
+                            if let Some((page,to))=movement {
+                                let from=self.settings.page_order.iter().position(|p|*p==page).unwrap();
+                                if from<to {self.settings.page_order[from..=to].rotate_left(1);}
+                                else {self.settings.page_order[to..=from].rotate_right(1);}
+                            }
+                            if self.settings.visible_pages.iter().filter(|enabled|**enabled).count()==1 {
+                                ui.add_space(5.0);
+                                ui.label(egui::RichText::new("至少保留一个页面。").size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            }
+                        });
+                    }
+                    0=>{
+                        settings_label(ui,"设置页外观");
+                        settings_card(ui,|ui|{
+                            use crate::settings_theme::SettingsTheme;
+                            settings_control_row_right(ui,"主题",|ui|{
+                                if settings_segmented(ui,&mut self.settings.settings_theme,&[(SettingsTheme::System,"跟随系统"),(SettingsTheme::Light,"浅色"),(SettingsTheme::Dark,"深色")],52.0) {ctx.request_repaint();}
+                            });
+                            settings_hint(ui,"仅影响设置页，岛的外观保持不变。");
+                        });
+                        settings_label(ui,"时间格式");
+                        settings_card(ui,|ui|{
+                            settings_control_row_right(ui,"时间制式",|ui|{settings_segmented(ui,&mut self.settings.clock_12h,&[(false,"24 小时"),(true,"12 小时")],72.0);});
+                            settings_control_row_right(ui,"时段文字",|ui|{settings_segmented(ui,&mut self.settings.clock_period,&[(0,"不显示"),(1,"上午 / 下午"),(2,"详细时段")],72.0);});
+                            if self.settings.clock_period==2 {settings_hint(ui,"详细时段：凌晨、上午、中午、下午、傍晚、晚上");}
+                            ui.separator();
+                            setting_row(ui,"显示秒数","时间显示为 14:32:08",&mut self.settings.clock_seconds);
+                        });
+                        settings_label(ui,"启动");
+                        settings_card(ui,|ui|{
+                            let mut a=autostart;
+                            setting_row(ui,"开机启动","",&mut a);
+                            if a!=autostart{self.pending.push(Cmd::ToggleAutostart);}
+                            ui.separator();
+                            setting_row(ui,"全屏时隐藏","全屏隐藏岛仔，健康提醒静默保留",&mut self.settings.hide_fullscreen);
+                        });
+                        self.avoidance.settings(ui,&mut self.settings);
+                        ui.add_space(8.0);
+                        settings_card(ui,|ui|{
+                            settings_advanced(ui,"settings-general-advanced",|ui|{
+                                let before=self.settings.render_compat;
+                                setting_row(ui,"兼容渲染（Direct3D 12）","出现黑框、闪烁或打开设置后崩溃时开启；切换后重启岛仔生效",&mut self.settings.render_compat);
+                                // 手动关闭后不再显示自动切换的原因；再次开启视为手动开启。
+                                if before!=self.settings.render_compat {self.settings.render_compat_reason.clear();}
+                                if !self.settings.render_compat_reason.is_empty() {settings_hint(ui,&self.settings.render_compat_reason);}
+                            });
+                            // 待重启的提示不折叠，收起「高级」也能看到。
+                            if self.settings.render_compat!=self.render_compat_running {
+                                ui.horizontal(|ui|{
+                                    ui.label(egui::RichText::new("兼容渲染重启岛仔后生效").size(12.0).color(Color32::from_rgb(230,150,40)));
+                                    if ui.button("立即重启").clicked(){self.pending.push(Cmd::RestartApp);}
+                                });
+                            }
+                        });
+                    }
+                    SETTINGS_TAB_APPEARANCE=>{
+                        settings_label(ui,"岛体外观");
+                        settings_card(ui,|ui|{
+                            use crate::model::{self as model,Skin};
+                            let skins:Vec<(Skin,&str)>=Skin::ALL.iter().map(|s|(*s,s.label())).collect();
+                            settings_control_row_right(ui,"皮肤",|ui|{settings_segmented(ui,&mut self.settings.skin,&skins,64.0);});
+                            settings_hint(ui,self.settings.skin.description());
+                            if self.settings.skin.is_glass() {
+                                let mut blur=self.settings.glass_blur;
+                                setting_row(ui,"背景模糊","需开启系统“透明效果”；关闭后改为烟熏半透明",&mut blur);
+                                self.settings.glass_blur=blur;
+                            }
+                            ui.separator();
+                            let shapes:Vec<(model::IslandShape,&str)>=model::IslandShape::ALL.iter().map(|s|(*s,s.label())).collect();
+                            settings_control_row_right(ui,"形状",|ui|{settings_segmented(ui,&mut self.settings.island_shape,&shapes,64.0);});
+                            settings_hint(ui,self.settings.island_shape.description());
+                            ui.separator();
+                            settings_control_row(ui,"大小",56.0,|ui|{
+                                ui.horizontal_wrapped(|ui|{
+                                    // 给百分比和恢复按钮留出空间，宽窗口仍使用原来的轨道长度。
+                                    ui.spacing_mut().slider_width=(ui.available_width()-150.0).clamp(64.0,180.0);
+                                    island_size_slider(ui,&mut self.settings.island_size);
+                                    if ui.add_enabled(self.settings.island_size!=100,egui::Button::new("恢复默认")).clicked(){self.settings.island_size=100;}
+                                }).response
+                            });
+                            settings_hint(ui,"只影响岛体，放大后文字和图标依旧清晰。");
+                        });
+                        settings_label(ui,"岛体显示");
+                        settings_card(ui,|ui|{
+                            let mut minimal=self.settings.minimal;
+                            setting_row(ui,"极简刘海","收起时显示一条细线",&mut minimal);
+                            if minimal!=self.settings.minimal {self.set_minimal(minimal);}
+                            ui.separator();
+                            let mut pet=self.settings.pet;
+                            setting_row(ui,"岛仔吉祥物","收起时常驻，播放音乐时一起唱歌",&mut pet);
+                            if pet!=self.settings.pet {self.set_pet(pet);}
+                            settings_advanced(ui,"settings-appearance-advanced",|ui|{
+                                setting_row(ui,"OLED 像素偏移","防止 OLED 屏幕烧屏：收起静止时让岛体缓慢移动几个像素，不改动你保存的位置",&mut self.settings.oled_shift);
+                            });
+                        });
+                    }
+                    SETTINGS_TAB_POSITION=>{
+                        settings_card(ui,|ui|{
+                            let selected=self.displays.iter().find(|d|d.id==self.settings.display_id);
+                            let label=if self.settings.display_id.is_empty(){"跟随主屏"}else{selected.map_or("所选屏幕未连接",|d|d.label.as_str())};
+                            settings_control_row(ui,"显示屏",56.0,|ui|{
+                                egui::ComboBox::from_id_salt("island-display").selected_text(label).width(ui.available_width().min(300.0)).truncate().show_ui(ui,|ui|{
+                                    ui.selectable_value(&mut self.settings.display_id,String::new(),"跟随主屏");
+                                    for display in &self.displays {ui.selectable_value(&mut self.settings.display_id,display.id.clone(),&display.label);}
+                                }).response
+                            });
+                            let edge=self.settings.dock.label();
+                            ui.label(egui::RichText::new(if !self.settings.display_id.is_empty()&&selected.is_none(){"暂时显示在主屏，重新连接所选屏幕后自动恢复。".to_string()}else{format!("显示在所选屏幕的{edge}；断开时暂时回到主屏。")}).size(11.0).color(ui.visuals().weak_text_color()));
+                            ui.add_space(4.0);
+                            // 停靠边缘：顶部 / 底部为横向，左右为竖向排列；底部面板朝上展开。
+                            let docks:Vec<(crate::model::Dock,&str)>=crate::model::Dock::ALL.iter().map(|d|(*d,d.label())).collect();
+                            settings_control_row_right(ui,"停靠",|ui|{
+                                // 换边后偏移的含义变了（水平 ↔ 上下），回到居中。
+                                if settings_segmented(ui,&mut self.settings.dock,&docks,52.0) {self.settings.island_offset=0;}
+                            });
+                            if self.settings.dock.is_side() {
+                                ui.label(egui::RichText::new("收起时竖向排列时间、电池、播放、专注和 AI 额度；展开面板从屏幕边缘滑出。吉祥物和岛上歌词只在顶部、底部停靠时显示。").size(11.0).color(ui.visuals().weak_text_color()));
+                            } else if self.settings.dock.is_bottom() {
+                                ui.label(egui::RichText::new("贴在任务栏上方，形状上下翻转、展开面板朝上展开；水平位置与顶部停靠一致。").size(11.0).color(ui.visuals().weak_text_color()));
+                            }
+                            ui.add_space(4.0);
+                            let side=self.settings.dock.is_side();
+                            settings_control_row(ui,if side{"上下位置"}else{"水平位置"},56.0,|ui|{
+                                ui.horizontal_wrapped(|ui|{
+                                    let limit=crate::model::ISLAND_OFFSET_MAX;
+                                    let offset=&mut self.settings.island_offset;
+                                    let (less,more,less_tip,more_tip)=if side{("↑","↓","向上微调","向下微调")}else{("←","→","向左微调","向右微调")};
+                                    if ui.add_enabled(*offset>-limit,egui::Button::new(less).min_size(egui::vec2(26.0,22.0))).on_hover_text(less_tip).clicked(){*offset=(*offset-5).max(-limit);}
+                                    // 左侧微调按钮已占位，剩余宽度还要容纳右侧微调和恢复居中。
+                                    ui.spacing_mut().slider_width=(ui.available_size_before_wrap().x-134.0).clamp(64.0,150.0);
+                                    ui.add(egui::Slider::new(&mut *offset,-limit..=limit).show_value(false));
+                                    if ui.add_enabled(*offset<limit,egui::Button::new(more).min_size(egui::vec2(26.0,22.0))).on_hover_text(more_tip).clicked(){*offset=(*offset+5).min(limit);}
+                                    if ui.add_enabled(*offset!=0,egui::Button::new("恢复居中")).clicked(){*offset=0;}
+                                }).response
+                            });
+                            let offset=self.settings.island_offset;
+                            let (less,more)=if side{("偏上","偏下")}else{("偏左","偏右")};
+                            let position=match offset {0=>"居中".to_string(),o if o<0=>format!("{less} {}%",-o),o=>format!("{more} {o}%")};
+                            settings_hint(ui,&format!("当前：{position}。也可以展开后按住日期时间直接拖动。"));
+                            ui.separator();
+                            setting_row(ui,"顶栏适配","顶部有菜单栏或任务栏时使用",&mut self.settings.avoid_top_bar);
+                            if self.settings.avoid_top_bar {
+                                settings_control_row_right(ui,"显示方式",|ui|{
+                                    settings_segmented(ui,&mut self.settings.top_bar_on_top,&[(false,"避开顶栏"),(true,"岛仔置顶")],90.0);
+                                });
+                                if self.settings.top_bar_on_top {
+                                    settings_hint(ui,"岛体显示在顶栏上方。");
+                                } else {
+                                    let reserved=crate::display_layout::selected(&self.displays,&self.settings.display_id).map_or(0,|d|{
+                                        let b=crate::display_layout::placement_bounds(d,true);(b.top-d.bounds.top).max(0)
+                                    });
+                                    settings_hint(ui,&if reserved>0 {format!("已检测到顶栏，岛体下移 {reserved} 像素。")}else{"未检测到顶栏；没有向系统登记的顶栏可尝试“岛仔置顶”。".to_string()});
+                                }
+                            }
+                        });
+                    }
+                    1=>{
+                        let on=self.settings_feature_header(ui,crate::app::MUSIC_PAGE,"播放控制与同步歌词",|_,_|{});
+                        ui.add_enabled_ui(on,|ui|{
+                            settings_label(ui,"歌词");
+                            settings_card(ui,|ui|{
+                                setting_row(ui,"岛上歌词","播放时收起的岛显示当前句，其他常驻图标暂时隐藏；无同步歌词时显示封面和歌名",&mut self.settings.island_lyrics);
+                                ui.separator();
+                                setting_row(ui,"展开时显示歌词","在播放器右侧同步滚动",&mut self.settings.lyrics_enabled);
+                                self.show_lyrics=self.settings.lyrics_enabled;
+                                ui.separator();
+                                let mut advance=-self.settings.lyric_delay_ms as f64/1000.0;
+                                if setting_number(ui,"时间偏移",&mut advance,-5.0,5.0," 秒",0.1){self.settings.lyric_delay_ms=(-advance*1000.0).round()as i32;}
+                                settings_hint(ui,"歌词和歌声对不上时调整：正数提前，负数延后；默认提前 0.35 秒。");
+                            });
                         });
                     }
                     2=>{
-                        settings_label(ui,"计时时长");
-                        settings_card(ui,|ui|{
-                            setting_number(ui,"专注",&mut self.settings.focus_minutes,1,180," 分钟",1.0);
-                            ui.separator();
-                            setting_number(ui,"休息",&mut self.settings.rest_minutes,1,60," 分钟",1.0);
-                            ui.add_space(3.0);
-                            ui.small("调整后从下一阶段开始生效。");
-                        });
-                    }
-                    3=>{
-                        settings_label(ui,"喝水提醒");
-                        settings_card(ui,|ui|{
-                            let old_remind=self.water.remind;
-                            setting_row(ui,"定时提醒","达到每日目标后停止提醒",&mut self.water.remind);
-                            if self.water.remind!=old_remind{self.water.save();self.last_reminder=self.t;}
-                            ui.separator();
-                            if setting_number(ui,"每日目标",&mut self.water.goal_ml,500,6000," ml",50.0){self.water.save();}
-                            setting_number(ui,"每次记录",&mut self.settings.serving_ml,50,1000," ml",25.0);
-                            setting_number(ui,"提醒间隔",&mut self.settings.water_minutes,5,180," 分钟",1.0);
-                        });
-                        settings_label(ui,"久坐提醒");
-                        settings_card(ui,|ui|{
-                            let old_sit=self.settings.sit_remind;
-                            setting_row(ui,"定时提醒","锁屏或点「起身了」后重新计时；只看屏幕不动鼠标也照样计时",&mut self.settings.sit_remind);
-                            if self.settings.sit_remind && !old_sit {self.sit_alerted=self.t;}
-                            ui.separator();
-                            setting_number(ui,"久坐时长",&mut self.settings.sit_minutes,15,180," 分钟",1.0);
-                            ui.add_space(3.0);
-                            ui.small("专注计时进行中不打扰，专注结束后再提醒。");
-                        });
-                        settings_label(ui,"提醒时段");
-                        settings_card(ui,|ui|{
-                            settings_control_row(ui,"提醒时段",80.0,|ui|{
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                    ui.allocate_ui_with_layout(egui::vec2(252.0,30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-                                        number_stepper(ui,&mut self.settings.water_start,0,23," 时",1,48.0);
-                                        ui.label("至");
-                                        number_stepper(ui,&mut self.settings.water_end,0,24," 时",1,48.0);
-                                    });
-                                }).response
+                        let on=self.settings_feature_header(ui,crate::app::FOCUS_PAGE,"番茄钟与休息计时",|_,_|{});
+                        ui.add_enabled_ui(on,|ui|{
+                            settings_card(ui,|ui|{
+                                setting_number(ui,"专注",&mut self.settings.focus_minutes,1,180," 分钟",1.0);
+                                ui.separator();
+                                setting_number(ui,"休息",&mut self.settings.rest_minutes,1,60," 分钟",1.0);
+                                settings_hint(ui,"调整后从下一阶段开始生效。");
                             });
-                            ui.separator();
-                            setting_row(ui,"午休不提醒","午休时间内喝水和久坐都不弹提醒",&mut self.settings.lunch_rest);
-                            if self.settings.lunch_rest {
-                                settings_control_row(ui,"午休时间",80.0,|ui|{
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                        ui.allocate_ui_with_layout(egui::vec2(252.0,30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-                                            time_stepper(ui,&mut self.settings.lunch_start,"lunch-start");
-                                            ui.label("至");
-                                            time_stepper(ui,&mut self.settings.lunch_end,"lunch-end");
-                                        });
-                                    }).response
+                        });
+                        ui.add_space(12.0);
+                        let on=self.settings_feature_header(ui,crate::app::WATER_PAGE,"喝水与久坐提醒",|_,_|{});
+                        ui.add_enabled_ui(on,|ui|{
+                            settings_card(ui,|ui|{
+                                // 喝水：开关一行，数量与间隔紧随其后。
+                                let old_remind=self.water.remind;
+                                setting_row(ui,"喝水提醒","确认或喝水后重新计时；达标后停止提醒",&mut self.water.remind);
+                                if self.water.remind!=old_remind{self.water.save();self.confirm_health_reminder(HealthReminder::Water);}
+                                ui.add_enabled_ui(self.water.remind,|ui|{
+                                    setting_number(ui,"提醒间隔",&mut self.settings.water_minutes,5,180," 分钟",1.0);
+                                    setting_number(ui,"每次记录",&mut self.settings.serving_ml,50,1000," ml",25.0);
+                                    if setting_number(ui,"每日目标",&mut self.water.goal_ml,500,6000," ml",50.0){self.water.save();}
                                 });
-                            }
-                            ui.add_space(3.0);
-                            ui.small("喝水和久坐提醒只在提醒时段内、午休以外弹出。");
+                                ui.separator();
+                                let old_sit=self.settings.sit_remind;
+                                setting_row(ui,"久坐提醒","确认提醒或点「起身了」后重新计时",&mut self.settings.sit_remind);
+                                if self.settings.sit_remind!=old_sit {self.confirm_health_reminder(HealthReminder::Sit);}
+                                ui.add_enabled_ui(self.settings.sit_remind,|ui|{
+                                    setting_number(ui,"久坐时长",&mut self.settings.sit_minutes,15,180," 分钟",1.0);
+                                });
+                                ui.separator();
+                                // 提醒时段与午休对喝水和久坐都生效。
+                                // 喝水和久坐提醒都关掉时，时段和午休不起作用，一起置灰。
+                                let any_reminder=self.water.remind||self.settings.sit_remind;
+                                ui.add_enabled_ui(any_reminder,|ui|{
+                                    settings_control_row(ui,"提醒时段",80.0,|ui|{
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                            // 区域宽度正好等于两个加减器加「至」，靠右放置后与上面单个加减器的右边缘对齐。
+                                            ui.allocate_ui_with_layout(egui::vec2(TIME_RANGE_HOURS_W,30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
+                                                number_stepper(ui,&mut self.settings.water_start,0,23," 时",1,48.0);
+                                                ui.label("至");
+                                                number_stepper(ui,&mut self.settings.water_end,0,24," 时",1,48.0);
+                                            });
+                                        }).response
+                                    });
+                                    setting_row(ui,"午休不提醒","午休时间内喝水和久坐都不弹提醒",&mut self.settings.lunch_rest);
+                                    if self.settings.lunch_rest {
+                                        settings_control_row(ui,"午休时间",80.0,|ui|{
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                                ui.allocate_ui_with_layout(egui::vec2(TIME_RANGE_CLOCK_W,30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
+                                                    time_stepper(ui,&mut self.settings.lunch_start,"lunch-start");
+                                                    ui.label("至");
+                                                    time_stepper(ui,&mut self.settings.lunch_end,"lunch-end");
+                                                });
+                                            }).response
+                                        });
+                                    }
+                                    settings_hint(ui,"提醒时段和午休对喝水、久坐都生效；专注计时进行中不打扰，结束后再提醒。");
+                                });
+                            });
                         });
                     }
                     4=>{
-                        settings_label(ui,"待办清单");
-                        settings_card(ui,|ui|{
-                            ui.label(egui::RichText::new("在待办页添加、编辑任务并设置提醒时间。").size(13.0));
-                            ui.add_space(5.0);
-                            if ui.add_sized([120.0,32.0],egui::Button::new("打开待办页")).clicked(){self.settings_open=false;self.show_page(4);}
-                        });
-                    }
-                    5=>{
-                        settings_label(ui,"置物架");
-                        settings_card(ui,|ui|{
-                            ui.label(egui::RichText::new("保存文件位置，移除条目不会删除原文件。").size(13.0));
-                            ui.label(egui::RichText::new(format!("当前 {} 项",self.shelf.items.len())).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            ui.add_space(5.0);
-                            if ui.add_sized([120.0,32.0],egui::Button::new("打开置物架")).clicked(){self.settings_open=false;self.shelf_tab=0;self.show_page(3);}
-                        });
-                        settings_label(ui,"剪贴板");
-                        settings_card(ui,|ui|{
-                            setting_row(ui,"记录剪贴板","在置物架的「剪贴板」里查看最近复制的文字，点一下再次复制",&mut self.settings.clipboard_history);
-                            ui.label(egui::RichText::new(format!("本机保存最近 {} 条，重新打开后可继续使用。关闭记录会暂停收集，手动清空会保留固定条目。密码管理器标记为敏感的内容不会记录。",crate::clipboard::MAX_RECENT)).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            ui.add_space(5.0);
-                            if ui.add_sized([120.0,32.0],egui::Button::new("打开剪贴板")).clicked(){self.settings_open=false;self.shelf_tab=1;self.show_page(3);}
+                        let on=self.settings_feature_header(ui,crate::app::TODO_PAGE,"任务清单与到期提醒",|_,_|{});
+                        let _=on;
+                        ui.add_space(12.0);
+                        let on=self.settings_feature_header(ui,crate::app::SHELF_PAGE,"临时收纳文件与剪贴板",|_,_|{});
+                        ui.add_enabled_ui(on,|ui|{
+                            settings_card(ui,|ui|{
+                                ui.label(egui::RichText::new(format!("当前 {} 项 · 移除条目不会删除原文件",self.shelf.items.len())).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                                ui.separator();
+                                setting_row(ui,"记录剪贴板","在置物架的「剪贴板」里查看最近复制的文字，点一下再次复制",&mut self.settings.clipboard_history);
+                                settings_hint(ui,&format!("本机保存最近 {} 条；密码管理器标记为敏感的内容不会记录。",crate::clipboard::MAX_RECENT));
+                                if ui.button("打开剪贴板").clicked(){self.settings_open=false;self.shelf_tab=1;self.show_page(3);}
+                            });
                         });
                     }
                     6=>{
+                        settings_label(ui,"提醒");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"提醒总开关","关闭后饮水、专注、待办及聊天软件提醒都不显示",&mut self.settings.notifications);
+                            // 提醒方式由系统通知和提示音两个设置共同决定。
+                            ui.separator();
+                            ui.add_enabled_ui(self.settings.notifications,|ui|{
+                                let mut mode:u8=if !self.settings.system_notify{0}else if self.settings.sound{2}else{1};
+                                settings_control_row_right(ui,"提醒方式",|ui|{settings_segmented(ui,&mut mode,&[(0,"仅岛上"),(1,"加系统通知"),(2,"系统通知 + 声音")],96.0);});
+                                settings_hint(ui,["只在岛上提醒，不发送 Windows 系统通知","同时在 Windows 通知中心留下记录，不响铃","同时发送 Windows 系统通知并播放提示音"][mode as usize]);
+                                self.settings.system_notify=mode>0;
+                                self.settings.sound=mode==2;
+                            });
+                        });
                         settings_label(ui,"系统提示");
                         settings_card(ui,|ui|{
                             setting_row(ui,"系统状态","音量、充电、网络和键盘状态",&mut self.settings.system_hud);
                             ui.separator();
-                            setting_row(ui,"蓝牙通知","设备连接与断开提醒；关闭后停止蓝牙监听",&mut self.settings.bluetooth_notifications);
-                            ui.separator();
-                            setting_row(ui,"提醒总开关","关闭后饮水、专注、待办及聊天软件提醒都不显示",&mut self.settings.notifications);
+                            setting_row(ui,"蓝牙设备","连接与断开时提醒；关闭后停止蓝牙监听",&mut self.settings.bluetooth_notifications);
                         });
-                        // 总开关关闭时，微信与 QQ 两栏置灰并说明原因，避免「开了也不提醒」。
+                        // 聊天软件：一个软件一行、一个开关；附属选项缩进跟在所属软件下面。
                         let master=self.settings.notifications;
-                        let master_hint=|ui:&mut egui::Ui|if !master {
-                            ui.label(egui::RichText::new("提醒总开关已关闭（上方「系统提示」），打开后这里才会生效").size(12.0).color(Color32::from_rgb(230,150,40)));
+                        settings_label(ui,"聊天软件");
+                        if !master {
+                            ui.label(egui::RichText::new("提醒总开关已关闭，打开后下面的提醒才会生效").size(12.0).color(Color32::from_rgb(230,150,40)));
+                        }
+                        let sub=|ui:&mut egui::Ui,title:&str,description:&str,value:&mut bool|{
+                            ui.horizontal(|ui|{ui.add_space(22.0);ui.vertical(|ui|setting_row(ui,title,description,value));});
                         };
-                        settings_label(ui,"微信提醒");
+                        let mut open_connect=false;
                         settings_card(ui,|ui|{
-                            master_hint(ui);
                             ui.add_enabled_ui(master,|ui|{
-                            setting_row(ui,"微信新消息提醒","根据任务栏闪动提醒，不读取联系人或聊天正文",&mut self.settings.wechat_notifications);
-                            if self.settings.wechat_notifications {
-                                ui.separator();
-                                setting_row(ui,"托盘一键唤起微信","微信缩在托盘时，点提醒由系统按下微信托盘图标；图标收在折叠区时托盘菜单会短暂弹出",&mut self.settings.wechat_tray_open);
-                            }
-                            if master && !self.messenger_status(crate::app::Messenger::Wechat).is_empty(){ui.label(egui::RichText::new(self.messenger_status(crate::app::Messenger::Wechat)).size(12.0));}
-                            });
-                        });
-                        settings_label(ui,"办公软件提醒");
-                        settings_card(ui,|ui|{
-                            master_hint(ui);
-                            ui.add_enabled_ui(master,|ui|{
-                                setting_row(ui,"企业微信","根据任务栏闪动提醒",&mut self.settings.wecom_notifications);
-                                setting_row(ui,"飞书","根据任务栏闪动提醒",&mut self.settings.feishu_notifications);
-                                setting_row(ui,"钉钉","根据任务栏闪动提醒",&mut self.settings.dingtalk_notifications);
-                                ui.label(egui::RichText::new("需在客户端开启任务栏闪动，不读取联系人或聊天正文。点击提醒打开对应窗口；账号无法确认时可手动关闭提醒。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                                for client in crate::messenger::Messenger::OFFICE {
-                                    if client.enabled(&self.settings) && !self.messenger_status(client).is_empty(){ui.label(egui::RichText::new(self.messenger_status(client)).size(12.0));}
+                                setting_row(ui,"微信","根据任务栏闪动提醒，不读取联系人或聊天正文",&mut self.settings.wechat_notifications);
+                                if self.settings.wechat_notifications {
+                                    sub(ui,"托盘一键唤起","微信缩在托盘时，点提醒直接唤起微信",&mut self.settings.wechat_tray_open);
                                 }
-                            });
-                        });
-                        settings_label(ui,"QQ 与 Windows 通知");
-                        settings_card(ui,|ui|{
-                            master_hint(ui);
-                            ui.add_enabled_ui(master,|ui|{
-                            ui.label(egui::RichText::new(&self.listener_status).size(13.0));
-                            if self.settings.read_notifications {
-                                if ui.button(if self.settings.qq_only{"断开 QQ 通知"}else{"断开系统通知"}).clicked(){self.pending.push(Cmd::DisconnectNotifications);}
-                            }else{
-                                ui.horizontal_wrapped(|ui|{
-                                    if ui.button("只连接 QQ").clicked(){self.pending.push(Cmd::RequestQqNotifications);}
-                                    if ui.button("连接所有应用通知").clicked(){self.pending.push(Cmd::RequestNotifications);}
+                                if master && !self.messenger_status(crate::app::Messenger::Wechat).is_empty(){settings_hint(ui,&self.messenger_status(crate::app::Messenger::Wechat));}
+                                ui.separator();
+                                setting_row(ui,"企业微信","",&mut self.settings.wecom_notifications);
+                                setting_row(ui,"飞书","",&mut self.settings.feishu_notifications);
+                                setting_row(ui,"钉钉","",&mut self.settings.dingtalk_notifications);
+                                settings_hint(ui,"企业微信、飞书、钉钉需在客户端开启任务栏闪动；点击提醒打开对应窗口。");
+                                for client in crate::messenger::Messenger::OFFICE {
+                                    if client.enabled(&self.settings) && !self.messenger_status(client).is_empty(){settings_hint(ui,&self.messenger_status(client));}
+                                }
+                                ui.separator();
+                                ui.horizontal(|ui|{
+                                    ui.vertical(|ui|{
+                                        ui.spacing_mut().item_spacing.y=2.0;
+                                        ui.label(egui::RichText::new("QQ 与其他应用").size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                                        ui.label(egui::RichText::new(&self.listener_status).size(11.5).color(settings_color(ctx,Color32::from_gray(175),Color32::from_gray(90))));
+                                    });
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
+                                        if self.settings.read_notifications {
+                                            if ui.button(if self.settings.qq_only{"断开 QQ 通知"}else{"断开系统通知"}).clicked(){self.pending.push(Cmd::DisconnectNotifications);}
+                                        } else if ui.button("连接…").clicked(){open_connect=true;}
+                                    });
                                 });
-                            }
-                            ui.label(egui::RichText::new("QQ 需开启系统通知；新通知在岛上显示约 4.5 秒，默认隐藏正文。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            ui.separator();
-                            setting_row(ui,"显示通知正文","可能包含私密消息；屏幕共享时建议关闭",&mut self.settings.notification_preview);
-                            ui.label(egui::RichText::new("只接收 Windows 通知中心可见的内容；应用会在收到通知后出现在下方。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            let before_apps=self.notification_apps.items.clone();
-                            for (_,name,enabled) in &mut self.notification_apps.items {setting_row(ui,name,"",enabled);}
-                            if before_apps!=self.notification_apps.items{self.notification_apps.save();}
+                                sub(ui,"显示通知正文","仅 QQ 与 Windows 通知；可能包含私密消息，屏幕共享时建议关闭",&mut self.settings.notification_preview);
+                                // 收到过通知的应用可能有几十个：默认收起，展开后用可点选的标签排成几行，不再一应用一行。
+                                let before_apps=self.notification_apps.items.clone();
+                                let total=self.notification_apps.items.len();
+                                if total>0 {
+                                    let on_count=self.notification_apps.items.iter().filter(|(_,_,enabled)|*enabled).count();
+                                    ui.horizontal(|ui|{ui.add_space(22.0);ui.vertical(|ui|{
+                                        egui::CollapsingHeader::new(egui::RichText::new(format!("按应用接收（已开 {on_count} / 共 {total}）")).size(12.5)).id_salt("settings-notification-apps").default_open(false).show(ui,|ui|{
+                                            ui.horizontal_wrapped(|ui|{
+                                                ui.spacing_mut().item_spacing=egui::vec2(6.0,6.0);
+                                                for (_,name,enabled) in &mut self.notification_apps.items {
+                                                    if settings_toggle_chip(ui,name,*enabled).clicked(){*enabled=!*enabled;}
+                                                }
+                                            });
+                                            settings_hint(ui,"点选切换；绿色为接收，灰框为不接收。应用会在收到通知后出现在这里。");
+                                        });
+                                    });});
+                                }
+                                if before_apps!=self.notification_apps.items{self.notification_apps.save();}
                             });
                         });
+                        let connect_id=egui::Id::new("settings-notify-connect");
+                        if open_connect {ctx.data_mut(|d|d.insert_temp(connect_id,true));}
+                        if ctx.data(|d|d.get_temp::<bool>(connect_id)).unwrap_or(false) {
+                            let mut close=false;
+                            let modal=egui::Modal::new(connect_id.with("modal")).frame(settings_modal_frame(ctx)).backdrop_color(Color32::from_black_alpha(110)).show(ctx,|ui|{
+                                ui.set_width(360.0);
+                                settings_apply_style(ui);if settings_modal_title(ui,"连接 QQ 与其他应用"){close=true;}
+                                if ui.add_sized([ui.available_width(),30.0],egui::Button::new("只连接 QQ")).clicked(){self.pending.push(Cmd::RequestQqNotifications);close=true;}
+                                settings_hint(ui,"QQ 需开启系统通知；新通知在岛上显示约 4.5 秒，默认隐藏正文。");
+                                ui.add_space(6.0);
+                                if ui.add_sized([ui.available_width(),30.0],egui::Button::new("连接所有应用通知")).clicked(){self.pending.push(Cmd::RequestNotifications);close=true;}
+                                settings_hint(ui,"只接收 Windows 通知中心可见的内容；应用会在收到通知后出现在列表里。");
+                                ui.add_space(8.0);
+                                if ui.button("取消").clicked(){close=true;}
+                            });
+                            if close || modal.should_close() {ctx.data_mut(|d|d.remove::<bool>(connect_id));}
+                        }
                     }
                     7=>{
-                        settings_label(ui,"邮件提醒");
+                        let mut add_mail=false;
+                        let on=self.settings_feature_header(ui,crate::app::MAIL_PAGE,"新邮件提醒与验证码；岛上歌词模式显示右侧图标",|_,_|{});
+                        ui.add_enabled_ui(on,|ui|{
+                        settings_label(ui,"设置");
                         settings_card(ui,|ui|{
-                            setting_row(ui,"新邮件提醒","新邮件到达时显示提醒；岛上歌词模式显示右侧图标",&mut self.settings.mail_enabled);
+                            setting_row(ui,"验证码高亮","识别到验证码时在岛上放大显示，点击即复制",&mut self.settings.mail_code);
                             ui.separator();
                             let sync_before=self.settings.mail_sync_operations;
                             ui.add_enabled_ui(self.mail.manage.pending.is_empty(),|ui|{
-                                setting_row(ui,"同步邮件操作到邮箱","开启后同步已读、删除和恢复；关闭时仅整理岛仔中的记录",&mut self.settings.mail_sync_operations);
+                                setting_row(ui,"同步邮件操作到邮箱","已读、删除和恢复同步到邮箱；关闭时只整理岛仔里的记录，切换不会补交之前的操作",&mut self.settings.mail_sync_operations);
                             });
                             if sync_before!=self.settings.mail_sync_operations{self.mail_manage_mode_changed();}
-                            ui.label(egui::RichText::new("切换开关不会补交之前的本机操作。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                             ui.separator();
-                            setting_row(ui,"验证码高亮","识别到验证码时在岛上放大显示，点击即复制",&mut self.settings.mail_code);
-                            ui.separator();
-                            setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[30,60,300],"秒");
-                            ui.label("默认 60 秒。明确有效时长更短时提前隐藏；历史邮件默认隐藏。隐藏不代表失效，主动查看后 15 秒再次隐藏。");
-                            setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,[60,120,300],"秒");
-                            ui.label(egui::RichText::new("支持推送时实时收信，并每 10 秒补查；以上间隔仅用于不支持推送的邮箱。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
-                            ui.separator();
-                            setting_choices(ui,"会议提前",&mut self.settings.mail_ics,[5,15,30],"分钟");
-                            ui.label(egui::RichText::new("根据邮件中的日历邀请提醒，与日程设置共用。").size(11.5).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
+                            ui.horizontal(|ui|{
+                                ui.vertical(|ui|{
+                                    ui.spacing_mut().item_spacing.y=2.0;
+                                    ui.label(egui::RichText::new("会议提前").size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                                    ui.label(egui::RichText::new(format!("{} 分钟 · 与日程共用",self.settings.mail_ics)).size(11.5).color(settings_color(ctx,Color32::from_gray(175),Color32::from_gray(90))));
+                                });
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{if ui.button("在日程中设置 ›").clicked(){self.settings_tab=8;}});
+                            });
+                            settings_advanced(ui,"settings-mail-advanced",|ui|{
+                                setting_choices(ui,"验证码隐藏",&mut self.settings.mail_code_hide_seconds,[30,60,300],"秒");
+                                settings_hint(ui,"明确有效时长更短时提前隐藏；隐藏不代表失效，主动查看后 15 秒再次隐藏。");
+                                setting_choices(ui,"检查间隔",&mut self.settings.mail_interval,[60,120,300],"秒");
+                                settings_hint(ui,"支持推送的邮箱实时收信；间隔只用于不支持推送的邮箱。");
+                            });
                         });
-                        settings_label(ui,"已添加的邮箱");
+                        ui.horizontal(|ui|{
+                            settings_label(ui,"邮箱账号");
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::BOTTOM),|ui|{if ui.button("＋ 添加邮箱").clicked(){add_mail=true;}});
+                        });
                         settings_card(ui,|ui|{
-                            if self.mail.accounts.is_empty(){ui.label(egui::RichText::new("还没有邮箱。在下面添加，保存后自动连接。").size(12.0).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));}
+                            if self.mail.accounts.is_empty(){ui.label(egui::RichText::new("还没有邮箱。点「＋ 添加邮箱」，保存后自动连接。").size(12.0).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));}
                             let total=self.mail.accounts.len();
                             let(mut changed,mut remove,mut test)=(false,None,None);
                             for i in 0..total{
@@ -1813,9 +2094,18 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                                 }
                                 }
                             }
+                                                    if !self.mail.note.is_empty(){ui.add_space(3.0);ui.add(egui::Label::new(egui::RichText::new(&self.mail.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());}
                         });
-                        settings_label(ui,"添加邮箱");
-                        settings_card(ui,|ui|{
+                        });
+                        // 添加邮箱：一次性的长表单放进弹窗，页面上只保留账号列表。
+                        let form_id=egui::Id::new("settings-mail-add");
+                        if add_mail {self.mail.form.open=true;}
+                        if self.mail.form.open {
+                            let mut close=false;
+                            let modal=egui::Modal::new(form_id).frame(settings_modal_frame(ctx)).backdrop_color(Color32::from_black_alpha(110)).show(ctx,|ui|{
+                            ui.set_width(440.0);
+                            settings_apply_style(ui);if settings_modal_title(ui,"添加邮箱"){close=true;}
+                            ui.spacing_mut().item_spacing.y=8.0;
                             settings_control_row(ui,"邮箱服务",56.0,|ui|{
                                 egui::ComboBox::from_id_salt("mail-provider").width(160.0).selected_text(self.mail.form.provider.label()).show_ui(ui,|ui|{
                                     for p in crate::mail::Provider::ALL{if ui.selectable_label(self.mail.form.provider==p,p.label()).clicked(){self.mail.form.provider=p;}}
@@ -1883,27 +2173,44 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                             ui.label(egui::RichText::new("授权码存储在 Windows 凭据管理器中。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             });
                             }
-                            ui.label(egui::RichText::new("图片中的验证码请在邮箱查看。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                            if !self.mail.note.is_empty(){ui.add_space(3.0);ui.add(egui::Label::new(egui::RichText::new(&self.mail.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());}
-                        });
+                                                    if !self.mail.note.is_empty(){ui.add_space(3.0);ui.add(egui::Label::new(egui::RichText::new(&self.mail.note).size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());}
+                            });
+                            // 保存后弹窗保持打开，结果和「测试连接」都在这里；用户自己关闭。
+                            if close || modal.should_close() {self.mail.form.open=false;}
+                        }
                     }
                     8=>{
                         ui.spacing_mut().item_spacing.y=4.0;
-                        // v0.5.6 日程：状态在最上面，后面才是平台、账号和提醒。
-                        // 只读；服务器地址由平台决定，用户不用抄。
+                        let mut open_add=false;
+                        let on=self.settings_feature_header(ui,crate::app::CALENDAR_PAGE,"月历、邮件邀请与工作日程",|_,_|{});
+                        ui.add_enabled_ui(on,|ui|{
+                        settings_label(ui,"设置");
+                        settings_card(ui,|ui|{
+                            setting_row(ui,"自动同步","每 5 分钟更新日程；关闭后可点「立即同步」",&mut self.settings.calendar_auto_sync);
+                            ui.separator();
+                            setting_choices(ui,"会议提前",&mut self.settings.mail_ics,[5,15,30],"分钟");
+                            settings_hint(ui,"与邮件中的会议邀请共用提醒，同一场会议只提醒一次。");
+                        });
+                        settings_label(ui,"日历账号");
+                        let mut import=false;
+                        settings_card(ui,|ui|{
                         if let Some(cfg)=self.calendar.config.clone(){
-                            settings_card(ui,|ui|{
                                 let n=self.calendar.events.len();
+                                // 一行：平台图标、名称与状态，右侧立即同步和断开。
                                 ui.horizontal(|ui|{
-                                    ui.label(egui::RichText::new(if self.calendar.connected{format!("● 已连接 · 未来 24 小时 {n} 个日程")}else if self.calendar.failures==0{"● 正在连接…".into()}else{format!("● 上次连接失败 · 已知 {n} 个日程")}).size(13.0).strong().color(if self.calendar.connected{settings_color(ctx,Color32::from_rgb(120,220,160),Color32::from_rgb(24,121,64))}else{settings_color(ctx,Color32::from_rgb(240,180,110),Color32::from_rgb(145,89,12))}));
-                                });
-                                ui.horizontal(|ui|{
+                                    let (rect,_)=ui.allocate_exact_size(egui::vec2(28.0,28.0),egui::Sense::hover());
+                                    ui.painter().rect_filled(rect,7.0,Color32::from_rgb(51,112,255));
+                                    ui.painter().text(rect.center(),egui::Align2::CENTER_CENTER,cfg.provider.label().chars().next().unwrap_or('日'),egui::FontId::proportional(13.0),Color32::WHITE);
+                                    ui.vertical(|ui|{
+                                        ui.spacing_mut().item_spacing.y=2.0;
+                                        ui.label(egui::RichText::new(format!("{} · 最后同步 {}",cfg.provider.label(),if self.calendar.last_sync.is_empty(){"—".to_string()}else{self.calendar.last_sync.clone()})).size(13.0).color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                                        ui.label(egui::RichText::new(if self.calendar.connected{format!("● 已连接 · 未来 24 小时 {n} 个日程")}else if self.calendar.failures==0{"● 正在连接…".into()}else{format!("● 上次连接失败 · 已知 {n} 个日程")}).size(11.5).color(if self.calendar.connected{settings_color(ctx,Color32::from_rgb(120,220,160),Color32::from_rgb(24,121,64))}else{settings_color(ctx,Color32::from_rgb(240,180,110),Color32::from_rgb(145,89,12))}));
+                                    });
                                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                        if ui.add_enabled(!self.calendar.testing,egui::Button::new("断开").small()).clicked(){self.pending.push(Cmd::CalendarForget);}
-                                        if ui.small_button("立即同步").clicked(){self.calendar.note="正在同步…".into();self.calendar.note_error=false;self.pending.push(Cmd::CalendarSync);}
+                                        if ui.add_enabled(!self.calendar.testing,egui::Button::new("断开")).clicked(){self.pending.push(Cmd::CalendarForget);}
+                                        if ui.button("立即同步").clicked(){self.calendar.note="正在同步…".into();self.calendar.note_error=false;self.pending.push(Cmd::CalendarSync);}
                                     });
                                 });
-                                ui.label(egui::RichText::new(format!("{} · 最后同步 {}",cfg.provider.label(),if self.calendar.last_sync.is_empty(){"—".to_string()}else{self.calendar.last_sync.clone()})).size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
                                 if let Some(feed)=self.calendar.feeds.iter().find(|feed|feed.config==cfg) {
                                     let status=if feed.month.loading {"正在同步本月日程…".to_owned()}
                                         else if !feed.month.error.is_empty(){format!("本月同步失败：{}",feed.month.error)}
@@ -1912,16 +2219,33 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                                     if !status.is_empty(){ui.add(egui::Label::new(egui::RichText::new(status).size(12.0)).wrap());}
                                     if !feed.month.warning.is_empty(){ui.add(egui::Label::new(egui::RichText::new(format!("本月部分日程未同步：{}",feed.month.warning)).size(12.0).color(settings_color(ctx,Color32::from_rgb(238,181,91),Color32::from_rgb(139,88,12)))).wrap());}
                                 }
-                                setting_row(ui,"自动同步","每 5 分钟更新日程；关闭后可点「立即同步」",&mut self.settings.calendar_auto_sync);
                                 if !self.calendar.warning.is_empty(){ui.add(egui::Label::new(egui::RichText::new(format!("同步提示：{}",self.calendar.warning)).size(12.0).color(settings_color(ctx,Color32::from_rgb(238,181,91),Color32::from_rgb(139,88,12)))).wrap());}
                                 if !self.calendar.error.is_empty(){
                                     ui.add(egui::Label::new(egui::RichText::new(&self.calendar.error).size(12.0).color(settings_color(ctx,Color32::from_rgb(240,96,96),Color32::from_rgb(184,34,34)))).wrap());
                                 }
-                            });
+                                ui.separator();
+                        }else{
+                            ui.label(egui::RichText::new("还没有连接日历。添加飞书、钉钉等日历，或导入 .ics 文件。").size(12.0).color(settings_color(ctx,Color32::from_gray(195),Color32::from_gray(60))));
                         }
-                        if ui.add_sized([ui.available_width(),34.0],egui::Button::new("打开日程")).clicked(){self.open_calendar(None);}
-                        settings_label(ui,"选择日历平台");
-                        settings_card(ui,|ui|{
+                        ui.horizontal(|ui|{
+                            if ui.button(if self.calendar.config.is_some(){"更换日历"}else{"＋ 添加日历"}).clicked(){open_add=true;}
+                            if ui.button("导入 .ics 文件").clicked(){import=true;}
+                        });
+                        if !self.calendar.import_note.is_empty(){settings_hint(ui,&self.calendar.import_note);}
+                        });
+                        if import {self.pending.push(Cmd::CalendarImport);}
+                        });
+                        // 添加日历：选平台、填账号、获取方法、导入 .ics 都在弹窗里。
+                        let add_id=egui::Id::new("settings-calendar-add");
+                        if open_add {self.calendar.form.open=true;self.calendar.form.guide_open=true;}
+                        if self.calendar.form.open {
+                            let mut close=false;
+                            let connected_before=self.calendar.config.clone();
+                            let modal=egui::Modal::new(add_id.with("modal")).frame(settings_modal_frame(ctx)).backdrop_color(Color32::from_black_alpha(110)).show(ctx,|ui|{
+                            ui.set_width(460.0);
+                            ui.spacing_mut().item_spacing.y=6.0;
+                            settings_apply_style(ui);if settings_modal_title(ui,"添加日历"){close=true;}
+                            settings_label(ui,"选择日历平台");
                             egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(29,29,31),Color32::from_rgb(236,239,244))).corner_radius(8.0).inner_margin(3).show(ui,|ui|{
                                 ui.set_min_width(ui.available_width());
                                 ui.spacing_mut().item_spacing.x=2.0;
@@ -1958,9 +2282,7 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                                     ui.add(egui::Label::new(egui::RichText::new(self.calendar.form.provider.server()).size(12.0).color(settings_color(ctx,Color32::from_gray(205),Color32::from_gray(55)))).wrap());
                                 }
                             });
-                        });
-                        settings_label(ui,"连接账号");
-                        settings_card(ui,|ui|{
+                            settings_label(ui,"连接账号");
                             ui.scope(|ui|{
                                 ui.visuals_mut().extreme_bg_color=settings_color(ctx,Color32::from_rgb(25,25,28),Color32::from_rgb(244,246,249));
                             let input_width=(ui.available_width()-50.0-48.0-2.0*ui.spacing().item_spacing.x).max(80.0);
@@ -1987,7 +2309,7 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                                 });
                             });
                             ui.add_space(7.0);
-                            let guide=if self.calendar.form.guide_open{"收起获取方法"}else{"如何获取用户名和密码？"};
+                            let guide=if self.calendar.form.guide_open{"如何获取用户名和密码？（点击收起）"}else{"如何获取用户名和密码？"};
                             if ui.link(egui::RichText::new(guide).color(settings_color(ctx,Color32::from_rgb(120,185,245),Color32::from_rgb(26,100,177)))).clicked(){self.calendar.form.guide_open=!self.calendar.form.guide_open;}
                             if self.calendar.form.guide_open{
                                 ui.add_space(4.0);
@@ -2024,30 +2346,11 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                                 let color=if self.calendar.note_error{settings_color(ctx,Color32::from_rgb(255,125,125),Color32::from_rgb(184,34,34))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))};
                                 ui.add(egui::Label::new(egui::RichText::new(&self.calendar.note).size(12.0).color(color)).wrap());
                             }
-                        });
-                        settings_label(ui,"导入日历文件");
-                        settings_card(ui,|ui|{
-                            ui.add(egui::Label::new(egui::RichText::new("把 .ics 文件里的日程导入到本机日程，例如苹果「日历」App 里「文件 → 导出」得到的文件。重复日程会按未来一年展开；再次导入同一文件不会重复添加。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75)))).wrap());
-                            ui.add_space(5.0);
-                            if ui.add_sized([150.0,30.0],egui::Button::new("选择 .ics 文件…")).clicked(){self.pending.push(Cmd::CalendarImport);}
-                            if !self.calendar.import_note.is_empty(){
-                                ui.add_space(3.0);
-                                ui.add(egui::Label::new(egui::RichText::new(&self.calendar.import_note).size(12.0).color(settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55)))).wrap());
-                            }
-                        });
-                        settings_label(ui,"会议提醒");
-                        settings_card(ui,|ui|{
-                            ui.horizontal(|ui|{
-                                ui.allocate_ui_with_layout(egui::vec2(50.0,32.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{ui.set_min_size(egui::vec2(50.0,32.0));ui.label(egui::RichText::new("提前").size(13.0));});
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-                                    for minutes in [30,15,5]{let selected=self.settings.mail_ics==minutes;
-                                        if ui.add_sized([62.0,32.0],egui::Button::new(format!("{minutes} 分钟")).selected(selected)).clicked(){self.settings.mail_ics=minutes;}
-                                    }
-                                });
                             });
-                            ui.add_space(5.0);
-                            ui.label(egui::RichText::new("与邮件中的会议邀请共用提醒，同一场会议只提醒一次。").size(11.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                        });
+                            // 连接成功（日历配置变化）后自动关闭弹窗。
+                            if self.calendar.config.is_some() && self.calendar.config!=connected_before && !self.calendar.testing {close=true;}
+                            if close || modal.should_close() {self.calendar.form.open=false;}
+                        }
                     }
                     _=>{
                         settings_label(ui,"岛仔 Daozai");
@@ -2060,6 +2363,10 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
                             ui.label(egui::RichText::new("桌面顶部的音乐、专注、提醒与日程小助手。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             ui.horizontal_wrapped(|ui|{
                                 if ui.button("打开本地数据目录").clicked(){self.pending.push(Cmd::Open(crate::model::config_dir()));}
+                                if ui.button("收集诊断").clicked(){
+                                    // 另起 `daozai.exe --collect-diagnostics`：在新窗口里收集，诊断包保存到桌面并自动选中。
+                                    if crate::diagnostics_tool::launch().is_err(){self.say("无法启动诊断收集，请从开始菜单打开「收集岛仔诊断」");}
+                                }
                                 ui.label(egui::RichText::new("设备图标：Solar Icons · 480 Design").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
                                 ui.hyperlink_to("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/");
                             });
@@ -2074,7 +2381,7 @@ let descriptions=["播放控制与同步歌词","番茄钟与休息计时","喝�
             if before!=format!("{:?}",self.settings){self.settings.save();}
             ctx.set_style(original_style);
         });
-        if !self.settings_open{self.window_layout().close();}
+        if !self.settings_open{self.window_layout().close();self.weather_source.close();}else{self.weather_tutorial_ui(ctx);}
     }
 }
 

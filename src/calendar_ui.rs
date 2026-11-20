@@ -405,6 +405,7 @@ impl App {
         if let Some(uid)=edit_local{self.open_calendar_editor(Some(&uid));}
         if add_local{self.open_calendar_editor(None);}
         if let Some(event)=ignored{self.toggle_mail_event(&event);}
-        if connect {self.settings_tab=8;self.open_settings();}
+        // 从日程窗口「连接日历」进来：直接打开设置页的添加日历弹窗。
+        if connect {self.settings_tab=8;self.calendar.form.open=true;self.calendar.form.guide_open=true;self.open_settings();}
     }
 }

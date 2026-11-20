@@ -32,6 +32,7 @@ fn doubao_activity_is_visible_on_the_island_and_in_account_details() {
     let _guard=ENV_LOCK.lock().unwrap_or_else(|error|error.into_inner());let mut h=H::new();fixture(&mut h);
     h.app.show_page(6);h.hover(H::local(260.0,60.0),1.0);
     for label in ["5 小时","本周","活动额度","75%"] { assert!(has_text(&h,label),"额度面板缺少 {label}"); }
+    super::open_quota_details(&h);
     for _ in 0..5 { settings_frame(&mut h,vec![]); }
     assert!(has_text(&h,"活动额度：剩余 75.0%"),"账号明细应保留活动额度");
     assert!(has_text(&h,"5 小时：剩余 72.0%") && has_text(&h,"本周：剩余 44.0%"));
