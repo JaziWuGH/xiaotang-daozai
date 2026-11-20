@@ -38,12 +38,14 @@ Windows 桌面伙伴，把消息、音乐、日程、天气和 AI 额度放到�
 
 ### 换机安装（Windows）
 
-1. 打开本仓库 [Releases](https://github.com/JaziWuGH/xiaotang-daozai/releases)，下载最新 `daozai.exe`
-2. 退出正在运行的岛仔，把旧文件备份一份（例如改名 `daozai.exe.before`）
-3. 覆盖到 `%LOCALAPPDATA%\Programs\Daozai\daozai.exe`
-4. 双击运行，设置从 `%APPDATA%\Daozai\settings.txt` 自动继承
+1. 打开本仓库 [Releases](https://github.com/JaziWuGH/xiaotang-daozai/releases)，下载最新的 `Daozai-Setup-v版本号-x64.exe`
+2. 双击安装包 →「一键安装」（装到当前用户，不需要管理员权限；可选桌面快捷方式和开机自启）
+3. 装完在 **设置 → 应用 → 已安装的应用** 里能看到「岛仔 Daozai」，可直接卸载；开始菜单有「岛仔」「岛仔设置」
 
-其他设备免装 Rust，直接拿 exe 即可；只有要改代码才需要 Rust stable + Visual Studio C++ 工具链（`cargo build --release`）。
+设置从 `%APPDATA%\Daozai\settings.txt` 自动继承；卸载只删程序，保留设置、待办和歌词缓存。已经手工覆盖过 exe 的机器也可以直接装这个包，会接管成正式安装。
+
+其他设备免装 Rust，用安装包即可；只有要改代码才需要 Rust stable + Visual Studio C++ 工具链
+（`scripts/package.ps1` 一条命令出 exe + 安装包 + 免安装 zip）。
 
 ## 微信里有新消息，看一眼岛边
 
@@ -148,17 +150,17 @@ Windows 桌面伙伴，把消息、音乐、日程、天气和 AI 额度放到�
 
 ## 下载安装
 
-前往 **[最新正式版](https://github.com/Renly1994/xiaotang-daozai/releases/latest)**，按使用习惯选择：
+前往 **[本仓库的正式版下载页](https://github.com/JaziWuGH/xiaotang-daozai/releases/latest)**，每个版本都提供正式安装包：
 
 | 下载文件 | 使用方式 |
 | --- | --- |
-| `Daozai-Setup-v版本号-x64.exe` | **推荐**。双击安装，可选择安装位置、桌面快捷方式和开机自启 |
-| `Daozai-v版本号-windows-x64.zip` | 免安装。完整解压后运行 `daozai.exe`，用户数据仍保存在应用数据目录 |
-| `SHA256SUMS.txt` | 下载校验，可用 PowerShell `Get-FileHash -Algorithm SHA256` 比对 |
+| `Daozai-Setup-v版本号-x64.exe` | **正式安装包**。双击「一键安装」，写注册表，能在「应用和功能」里看到并卸载；可选桌面快捷方式和开机自启 |
+| `Daozai-v版本号-windows-x64.zip` | 免安装（自己构建时才有）。完整解压后运行 `daozai.exe`，用户数据仍保存在应用数据目录 |
 
 首次安装默认创建桌面快捷方式、不开机自启。安装后从小岛或托盘打开设置，选择需要的功能和连接。
 
-**更新**：设置 → 关于 → 检查更新。支持应用内下载、校验后重启更新，也可从发布页下载覆盖安装；升级保留原设置和数据，卸载同样保留用户数据。下载窗口提供夸克网盘备用入口。
+**更新**：从本仓库的发布页下载新版安装包覆盖安装即可，升级保留原设置和数据，卸载同样保留用户数据。
+程序里的「检查更新」查的是官方上游仓库，只用来知道有没有新版，不要用它的下载按钮（会换成官方原版）。
 
 **系统**：Windows 10／11 x64。默认使用 OpenGL，初始化失败时自动尝试 Direct3D 12。Windows 11 已进行本机实测，Windows 10、不同显卡及多屏组合仍需更多反馈。暂不提供 macOS、Linux 或 ARM64 成品包。
 
