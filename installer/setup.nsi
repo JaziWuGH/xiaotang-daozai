@@ -12,6 +12,10 @@ Unicode true
 !ifndef APP_NAME
   !define APP_NAME "岛仔"
 !endif
+; 展示用版本号（例如 0.6.66-daozai.1）；VIProductVersion 必须是纯数字，所以两者分开。
+!ifndef APP_VERSION_LABEL
+  !define APP_VERSION_LABEL "${APP_VERSION}"
+!endif
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 Name "${APP_NAME}"
 OutFile "${OUTPUT_FILE}"
@@ -23,7 +27,7 @@ SetCompressor /SOLID lzma
 VIProductVersion "${APP_VERSION}.0"
 VIAddVersionKey /LANG=2052 "ProductName" "${APP_NAME}"
 VIAddVersionKey /LANG=2052 "FileDescription" "${APP_NAME}安装程序"
-VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION}"
+VIAddVersionKey /LANG=2052 "FileVersion" "${APP_VERSION_LABEL}"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "岛仔贡献者"
 !define MUI_ICON "${PROJECT_DIR}\assets\daozai.ico"
 !define MUI_UNICON "${PROJECT_DIR}\assets\daozai.ico"
@@ -101,7 +105,7 @@ Function InstallPage
   Pop $0
   CreateFont $1 "Microsoft YaHei UI" 18 700
   SendMessage $0 ${WM_SETFONT} $1 0
-  ${NSD_CreateLabel} 112u 14u 188u 14u "v${APP_VERSION} · 升级保留设置和记录"
+  ${NSD_CreateLabel} 112u 14u 188u 14u "v${APP_VERSION_LABEL} · 升级保留设置和记录"
   Pop $0
   ${NSD_CreateLabel} 58u 34u 240u 20u "让重要的信息，轻轻出现在屏幕顶部。"
   Pop $0
@@ -277,7 +281,7 @@ Section "安装"
   ; 岛仔打不开、卡死时的备用入口；能打开时用「设置 → 关于 → 收集诊断」。
   CreateShortcut "$SMPROGRAMS\收集${APP_NAME}诊断.lnk" "$INSTDIR\daozai.exe" "--collect-diagnostics" "$INSTDIR\daozai.exe" 0
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "${APP_NAME} Daozai"
-  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${APP_VERSION_LABEL}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "岛仔"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\daozai.exe,0"

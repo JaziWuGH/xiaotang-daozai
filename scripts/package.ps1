@@ -1,4 +1,4 @@
-﻿param([switch]$SkipBuild, [string]$Executable, [string]$NsisCompiler, [string]$OutputDirectory)
+﻿param([switch]$SkipBuild, [string]$Executable, [string]$NsisCompiler, [string]$OutputDirectory, [string]$VersionLabel)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
@@ -44,7 +44,9 @@ try {
         else { $NsisCompiler = Join-Path ${env:ProgramFiles(x86)} 'NSIS\makensis.exe' }
     }
     if (-not (Test-Path -LiteralPath $NsisCompiler)) { throw 'NSIS compiler not found; install NSIS or pass -NsisCompiler' }
-    $packageName = "Daozai-v$version-windows-x64"
+    # 定制版的展示版本号（如 0.6.66-daozai.1）；不传就与 Cargo.toml 一致。
+    if (-not $VersionLabel) { $VersionLabel = $version }
+    $packageName = "Daozai-v$VersionLabel-windows-x64"
     if (-not $OutputDirectory) { $OutputDirectory = Join-Path $projectRoot 'dist' }
     $outputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
     $stagingDirectory = Join-Path $outputDirectory $packageName
@@ -58,8 +60,8 @@ try {
     # 免安装包没有开始菜单：附带一个只调用 daozai.exe --collect-diagnostics 的 cmd，岛仔打不开时双击收集。
     # 诊断脚本本身内嵌在程序里，不再单独附带，也就不会出现新程序配旧脚本。
     Copy-Item -LiteralPath (Join-Path $projectRoot 'installer\收集岛仔诊断.cmd') -Destination $stagingDirectory
-    $setup = Join-Path $outputDirectory "Daozai-Setup-v$version-x64.exe"
-    & $NsisCompiler /V2 /WX "/DAPP_VERSION=$version" "/DPROJECT_DIR=$projectRoot" "/DSOURCE_EXE=$($binary.FullName)" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'installer\setup.nsi')
+    $setup = Join-Path $outputDirectory "Daozai-Setup-v$VersionLabel-x64.exe"
+    & $NsisCompiler /V2 /WX "/DAPP_VERSION=$version" "/DAPP_VERSION_LABEL=$VersionLabel" "/DPROJECT_DIR=$projectRoot" "/DSOURCE_EXE=$($binary.FullName)" "/DOUTPUT_FILE=$setup" (Join-Path $projectRoot 'installer\setup.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'Installer build failed' }
     $archive = Join-Path $outputDirectory "$packageName.zip"
     Compress-Archive -LiteralPath $stagingDirectory -DestinationPath $archive
