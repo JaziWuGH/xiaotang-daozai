@@ -9,6 +9,12 @@ try {
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
     $targetDirectory = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $projectRoot 'target' }
     $privatePaths = @($targetDirectory, $projectRoot, $cargoHome, $env:USERPROFILE) | Where-Object { $_ } | Select-Object -Unique
+    # 二进制里不该出现构建机的用户目录、项目路径和依赖缓存。构建目录本身只要不在用户目录下就不算隐私
+    # （glutin 的 include! 路径不受 --remap-path-prefix 影响，会原样留下 OUT_DIR），所以那种 target 不参与检查。
+    $forbiddenPaths = @($projectRoot, $cargoHome, $env:USERPROFILE) | Where-Object { $_ } | Select-Object -Unique
+    if ($targetDirectory.StartsWith($env:USERPROFILE, [StringComparison]::OrdinalIgnoreCase)) {
+        $forbiddenPaths = @($forbiddenPaths + $targetDirectory) | Select-Object -Unique
+    }
     $env:CARGO_ENCODED_RUSTFLAGS = @('-C', 'target-feature=+crt-static', "--remap-path-prefix=$cargoHome=cargo", "--remap-path-prefix=$projectRoot=daozai", '-C', 'link-arg=/PDBALTPATH:%_PDB%') -join [char]0x1f
     if ($env:CARGO_TARGET_DIR) { $env:CARGO_ENCODED_RUSTFLAGS += [string][char]0x1f + "--remap-path-prefix=$targetDirectory=target" }
     if (-not $SkipBuild) {
@@ -36,8 +42,8 @@ try {
     $bytes = [IO.File]::ReadAllBytes($binary.FullName)
     foreach ($encoding in @([Text.Encoding]::UTF8, [Text.Encoding]::Unicode)) {
         $content = $encoding.GetString($bytes).Replace('/', '\')
-        foreach ($private in $privatePaths) {
-            if ($content.IndexOf($private.Replace('/', '\'), [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "发布程序包含本机构建路径（$($encoding.WebName)）" }
+        foreach ($private in $forbiddenPaths) {
+            if ($content.IndexOf($private.Replace('/', '\'), [StringComparison]::OrdinalIgnoreCase) -ge 0) { throw "发布程序包含本机构建路径（$($encoding.WebName)）：$private" }
         }
     }
     if (-not $NsisCompiler) {
