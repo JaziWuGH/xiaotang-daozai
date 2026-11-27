@@ -67,6 +67,7 @@ pub(crate) fn player(source:&str) {
     for pid in super::player_process::pids_named(exe) {
         let Some(path)=super::player_process::image_path(pid) else{continue;};
         let version=file_version(&path);
+        super::music_compat::set_version(exe,&version);
         if changed(&format!("播放器 · {exe} pid{pid}"),&version) {
             write(&format!("播放器 · {source} → {exe} 版本{version}"));
         }

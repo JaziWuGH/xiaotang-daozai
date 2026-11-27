@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>日子 · 理想版</title>
+
+</head>
+<body>
+
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&amp;family=Inter:wght@400;600;700;800;900&amp;display=swap">
+<style>
+body{margin:0}
+.k{font-size:12px;letter-spacing:.08em;color:#6B6B73;font-weight:700}
+.muted{color:#5D5D66}
+.card{background:#fff;border:1px solid #E2E2DC;border-radius:14px;box-sizing:border-box}
+.desk{background:#1B2333;border-radius:14px;display:flex;justify-content:center;align-items:flex-start;padding-bottom:26px;overflow:hidden}
+.isl{background:#000;color:#fff;border-radius:16px 16px 30px 30px;box-sizing:border-box;font-family:'Noto Sans SC','Inter',sans-serif;position:relative}
+.cap{background:#1C1C1F;border-radius:999px;padding:3px 10px;font-size:11px;display:inline-flex;gap:8px;align-items:center}
+.arrow{position:absolute;top:50%;width:22px;height:22px;border-radius:11px;background:#2A2A2E;display:flex;align-items:center;justify-content:center}
+.num{font-family:'Inter','Noto Sans SC',sans-serif;font-variant-numeric:tabular-nums}
+.tk{position:relative;display:flex;align-items:stretch;border-radius:9px;height:38px;overflow:hidden}
+.tk .l{flex:1;display:flex;flex-direction:column;justify-content:center;padding:0 10px;gap:1px;min-width:0}
+.tk .r{width:54px;display:flex;flex-direction:column;align-items:center;justify-content:center;border-left:1.5px dashed rgba(0,0,0,.35)}
+.tk::before,.tk::after{content:"";position:absolute;right:48px;width:12px;height:12px;border-radius:6px;background:#000}
+.tk::before{top:-6px}.tk::after{bottom:-6px}
+.pill{background:#000;color:#fff;border-radius:0 0 20px 20px;height:36px;display:flex;align-items:center;gap:10px;padding:0 14px;box-sizing:border-box;font-size:12.5px}
+.vchip{display:inline-block;font-size:11px;padding:1px 7px;border-radius:6px;background:#EEE8FF;color:#5B3FD1;font-family:'Inter',monospace}
+.std{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E3F5E9;color:#1F7A3D;font-weight:700}
+.cvs{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#EEE8FF;color:#5B3FD1;font-weight:700}
+.live{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E6F0FF;color:#1F5FBF;font-weight:700}
+td{padding:7px 8px;font-size:12.5px;border-bottom:1px solid #EEEEE9;vertical-align:top}
+</style>
+
+<div style="width: 1440px; height: 1000px; box-sizing: border-box; padding: 40px 52px; background: #F4F4F1; font-family: 'Noto Sans SC', 'Inter', sans-serif; color: #17171A; display: flex; flex-direction: column; gap: 20px">
+  <div style="display: flex; align-items: flex-end; justify-content: space-between">
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div class="k">理想版 · 5 · 第二稿</div>
+      <h1 style="margin: 0; font-size: 34px">日子</h1>
+      <p class="muted" style="margin: 0; font-size: 14px">左边一本手撕日历，最近的那一天印在最上面一页；右边是一沓「车票」，每张是一个即将到来的日子。常驻条的文字由用户自己写。</p>
+    </div>
+    <div style="display: flex; gap: 8px"><span class="std">标准组件</span><span class="cvs">自绘画布</span><span class="live">宿主实时值</span></div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; flex: 1; min-height: 0">
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">展开（1.5 倍显示，实际 419 × 250）</div>
+      <div class="desk" style="padding-bottom: 30px">
+        <div style="zoom: 1.5">
+          <div class="isl" style="width: 419px; height: 250px; padding: 12px 16px 10px; display: flex; flex-direction: column; gap: 9px">
+            <div style="display: flex; align-items: center; justify-content: space-between">
+              <span style="font-size: 15px; font-weight: 900">我的<span style="color: #FF5A4E">日子</span></span>
+              <span class="cap"><span>11月24日 周二</span><b>14:05</b></span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B2B2BA" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="8"></circle></svg>
+            </div>
+            <div style="display: flex; gap: 14px; flex: 1; min-height: 0">
+              <div style="width: 150px; position: relative; flex: 0 0 auto">
+                <div style="position: absolute; left: 6px; right: -4px; top: 10px; bottom: -2px; border-radius: 10px; background: #D9D4C8"></div>
+                <div style="position: absolute; left: 3px; right: -1px; top: 6px; bottom: 1px; border-radius: 10px; background: #EAE5DA"></div>
+                <div style="position: absolute; inset: 0 3px 4px 0; border-radius: 10px; background: #FBF8F1; overflow: hidden; display: flex; flex-direction: column; color: #1E1B16; box-shadow: 0 6px 18px rgba(0,0,0,.5)">
+                  <div style="height: 30px; background: #E8473B; color: #fff; display: flex; align-items: center; justify-content: space-between; padding: 0 10px; position: relative">
+                    <span style="font-size: 11px; font-weight: 700">距 元旦</span><span style="font-size: 9.5px; opacity: .85">放假 3 天</span>
+                    <span style="position: absolute; left: 34px; top: -4px; width: 7px; height: 10px; border-radius: 4px; background: #000"></span><span style="position: absolute; right: 34px; top: -4px; width: 7px; height: 10px; border-radius: 4px; background: #000"></span>
+                  </div>
+                  <div style="flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0">
+                    <span style="font-family: Inter; font-size: 62px; font-weight: 900; line-height: .95; color: #E8473B; letter-spacing: -.03em">38</span>
+                    <span style="font-size: 11px; font-weight: 700; color: #6B6355; margin-top: 2px">天</span>
+                  </div>
+                  <div style="border-top: 1px dashed #D2CBBC; padding: 5px 10px; display: flex; justify-content: space-between; font-size: 9.5px; color: #6B6355"><span class="num">2027.01.01</span><span>周五</span></div>
+                </div>
+              </div>
+              <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; position: relative">
+                <div style="display: flex; align-items: center; gap: 4px">
+                  <span style="font-size: 9.5px; padding: 2px 7px; border-radius: 6px; background: #fff; color: #000; font-weight: 700">全部</span><span style="font-size: 9.5px; padding: 2px 7px; border-radius: 6px; background: #1A1A1D; color: #B2B2BA">节假日 6</span><span style="font-size: 9.5px; padding: 2px 7px; border-radius: 6px; background: #1A1A1D; color: #B2B2BA">我的 3</span>
+                  <span style="margin-left: auto; font-size: 9px; color: #FFB07A">周六调休上班</span>
+                </div>
+                <div class="tk" style="background: #FFB4A8; color: #3A1410; height: 32px"><div class="l"><b style="font-size: 11px">春节</b><span class="num" style="font-size: 8.5px; opacity: .7">02.16 · 放假 8 天</span></div><div class="r"><b class="num" style="font-size: 14px">84</b><span style="font-size: 8px">天</span></div></div>
+                <div class="tk" style="background: #FFD9A0; color: #3A2410; height: 32px"><div class="l"><b style="font-size: 11px">小唐生日</b><span class="num" style="font-size: 8.5px; opacity: .7">01.12 · 每年</span></div><div class="r"><b class="num" style="font-size: 14px">49</b><span style="font-size: 8px">天</span></div></div>
+                <div class="tk" style="background: #B5E3C8; color: #0F2E1C; height: 32px"><div class="l"><b style="font-size: 11px">清明</b><span class="num" style="font-size: 8.5px; opacity: .7">04.05 · 放假 3 天</span></div><div class="r"><b class="num" style="font-size: 14px">132</b><span style="font-size: 8px">天</span></div></div>
+                <div class="tk" style="background: #C9B8FF; color: #1E1440; height: 32px"><div class="l"><b style="font-size: 11px">和小唐在一起</b><span class="num" style="font-size: 8.5px; opacity: .7">2025.06.22 起</span></div><div class="r"><b class="num" style="font-size: 14px">520</b><span style="font-size: 8px">天了</span></div></div>
+                <span style="position: absolute; left: 0; right: 0; bottom: -2px; height: 16px; background: linear-gradient(transparent, #000)"></span>
+              </div>
+            </div>
+            <span class="arrow" style="left: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg></span>
+            <span class="arrow" style="right: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M9 5l7 7-7 7"></path></svg></span>
+          </div>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 12px">
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <div class="k">常驻条 · 用户自己写的话</div>
+          <div class="desk" style="padding: 0 0 12px"><div class="pill" style="width: 290px; gap: 8px"><span style="font-weight: 700">14:05</span><span style="flex: 1; display: flex; align-items: center; gap: 7px; padding: 4px 2px"><span style="width: 12px; height: 13px; border-radius: 3px; background: #FBF8F1; border-top: 4px solid #E8473B; box-sizing: border-box"></span><span style="font-size: 11.5px">再坚持 <b class="num" style="color: #FF7A6E">38</b> 天就放元旦啦</span></span></div></div>
+          <div style="display: flex; flex-direction: column; gap: 5px; font-size: 12px">
+            <label style="display: flex; flex-direction: column; gap: 4px"><span style="color: #6B6B73; font-size: 11px">常驻文字（设置里填写，最多 24 字）</span><input type="text" value="再坚持 {天数} 天就放{名称}啦" style="height: 28px; border-radius: 7px; border: 1px solid #D8D8D2; padding: 0 8px; font-family: inherit; font-size: 12px"></label>
+            <span style="display: flex; gap: 5px; flex-wrap: wrap"><span class="vchip">{名称}</span><span class="vchip">{天数}</span><span class="vchip">{日期}</span><span class="vchip">{星期}</span></span>
+          </div>
+        </div>
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 7px">
+          <div class="k">设置 · 添加一个日子</div>
+          <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; font-size: 11.5px">
+            <label style="display: flex; flex-direction: column; gap: 2px"><span style="color: #6B6B73; font-size: 10.5px">名称</span><input type="text" value="和小唐在一起" style="height: 24px; border-radius: 6px; border: 1px solid #D8D8D2; padding: 0 6px; font-family: inherit; font-size: 11.5px"></label>
+            <label style="display: flex; flex-direction: column; gap: 2px"><span style="color: #6B6B73; font-size: 10.5px">日期</span><input type="text" value="2025-06-22" style="height: 24px; border-radius: 6px; border: 1px solid #D8D8D2; padding: 0 6px; font-family: inherit; font-size: 11.5px"></label>
+          </div>
+          <div style="display: flex; gap: 4px; font-size: 10.5px"><span style="padding: 2px 7px; border-radius: 6px; background: #F1F1EC">倒数</span><span style="padding: 2px 7px; border-radius: 6px; background: #17171A; color: #fff">纪念日 · 正数</span><span style="padding: 2px 7px; border-radius: 6px; background: #F1F1EC">生日</span><span style="padding: 2px 7px; border-radius: 6px; background: #F1F1EC">每年重复</span></div>
+          <div style="display: flex; align-items: center; gap: 4px"><span style="font-size: 10.5px; color: #6B6B73; width: 28px">图标</span>
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: #17171A; display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="#FF7EB3" aria-hidden="true"><path d="M12 21s-8-5-8-11a4.5 4.5 0 0 1 8-3 4.5 4.5 0 0 1 8 3c0 6-8 11-8 11z"></path></svg></span>
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: #F1F1EC; display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3A3A40" stroke-width="2" aria-hidden="true"><path d="M4 21h16v-8H4zM6 13V9h12v4M12 9V5"></path></svg></span>
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: #F1F1EC; display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3A3A40" stroke-width="2" aria-hidden="true"><circle cx="12" cy="14" r="6"></circle><path d="M9 4h6l-3 4z"></path></svg></span>
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: #F1F1EC; display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3A3A40" stroke-width="2" aria-hidden="true"><path d="M2 16l20-6-3 9zM8 14l3-8"></path></svg></span>
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: #F1F1EC; display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3A3A40" stroke-width="2" aria-hidden="true"><path d="M12 3l2.6 5.6 6 .8-4.4 4.2 1.1 6L12 16.8 6.7 19.6l1.1-6L3.4 9.4l6-.8z"></path></svg></span>
+            <span style="width: 22px; height: 22px; border-radius: 6px; background: #F1F1EC; display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#3A3A40" stroke-width="2" aria-hidden="true"><rect x="3" y="8" width="18" height="13" rx="2"></rect><path d="M3 12h18M12 8v13M12 8c-2-4-6-4-6-1s6 1 6 1 6 2 6-1-4-3-6 1"></path></svg></span>
+            <span style="width: 14px; height: 14px; border-radius: 7px; background: #C9B8FF; margin-left: 6px"></span><span style="width: 14px; height: 14px; border-radius: 7px; background: #FFB4A8"></span><span style="width: 14px; height: 14px; border-radius: 7px; background: #FFD9A0"></span>
+          </div>
+          <label style="display: flex; flex-direction: column; gap: 2px"><span style="color: #6B6B73; font-size: 10.5px">这个日子的常驻文字</span><input type="text" value="和小唐在一起 {天数} 天" style="height: 24px; border-radius: 6px; border: 1px solid #D8D8D2; padding: 0 6px; font-family: inherit; font-size: 11.5px"></label>
+          <div class="desk" style="padding: 0 0 8px"><div class="pill" style="width: 220px; gap: 7px; font-size: 11.5px"><svg width="12" height="12" viewBox="0 0 24 24" fill="#FF7EB3" aria-hidden="true"><path d="M12 21s-8-5-8-11a4.5 4.5 0 0 1 8-3 4.5 4.5 0 0 1 8 3c0 6-8 11-8 11z"></path></svg><span>和小唐在一起 <b class="num" style="color: #FF9CC6">520</b> 天</span></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">设计说明</div>
+      <ul class="muted" style="margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.7">
+        <li>手撕日历：米白纸、红色页眉、两个装订孔，下面压着几页纸的边。最近的那一天印成大红数字。</li>
+        <li>每过一天，最上面一页被撕掉（向右下飞出），下一页露出来。</li>
+        <li>车票：每个日子一张，颜色按类型（生日橙、法定假期红、纪念日紫），右侧虚线撕口写天数；纪念日写「N 天了」。</li>
+        <li>车票列出接下来的全部节假日和自己的日子，可按「全部 / 节假日 / 我的」筛选，上下滚动。</li>
+        <li>调休上班只在当周出现，放在筛选条右侧。</li>
+        <li>每个日子在设置里可填：名称、日期、类型（倒数 / 纪念日正数 / 生日）、每年重复、图标（爱心、蛋糕、戒指、飞机、星星、礼物…）、颜色、常驻文字。</li>
+        <li>常驻哪个日子由用户选（设置或在车票上点「常驻」）；常驻条用这个日子自己的图标和文字模板，模板支持 {名称} {天数} {日期} {星期}。</li>
+        <li>当天：日历页撕掉后显示「今天」，常驻文字换成「今天是{名称}」。</li>
+      </ul>
+      <div class="k" style="margin-top: 4px">实现方式</div>
+      <div class="card" style="padding: 6px 14px">
+        <table style="width: 100%; border-collapse: collapse">
+          <tbody>
+            <tr><td>随包节假日数据、自己的日子列表</td><td style="text-align: right"><span class="std">data · list 设置</span></td></tr>
+            <tr><td>待办卡、日历标注（保留）</td><td style="text-align: right"><span class="std">card · marker</span></td></tr>
+            <tr><td>手撕日历、纸张叠层、装订孔</td><td style="text-align: right"><span class="cvs">自绘画布</span></td></tr>
+            <tr><td>撕页动画</td><td style="text-align: right"><span class="cvs">画布过渡动画</span></td></tr>
+            <tr><td>车票卡片、虚线撕口、可滚动</td><td style="text-align: right"><span class="cvs">自绘画布 · 滚动区</span></td></tr>
+            <tr><td>调休提醒</td><td style="text-align: right"><span class="std">alert</span></td></tr>
+            <tr><td>每个日子的图标、颜色、类型、常驻文字</td><td style="text-align: right"><span class="std">list 设置 · 新增 icon、color 子项</span></td></tr>
+            <tr><td>筛选：全部 / 节假日 / 我的</td><td style="text-align: right"><span class="std">action</span></td></tr>
+            <tr><td>常驻条（日子自己的图标 + 文字）</td><td style="text-align: right"><span class="cvs">常驻小画布</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+</body>
+</html>

@@ -172,11 +172,21 @@ fn parse_glm(v: &Value, s: &mut Snapshot) -> Result<(), String> {
     let data = if v["data"].is_object() { &v["data"] } else { v };
     let rows = data["limits"].as_array().ok_or("GLM 额度响应缺少限制列表")?;
     if rows.len()>16{return Err("GLM 返回过多额度窗口，请检查响应版本".into());}
-    if !rows.iter().any(|row|matches!(row["type"].as_str(),Some("TOKENS_LIMIT"|"CREDIT_LIMIT")) && percent(&row["percentage"]).is_some()){
+    s.plan="Coding Plan".into();
+    for row in rows{
+        let Some(used)=number(&row["percentage"]).filter(|v|*v<=100.0) else{continue;};
+        let multiplier=match row["unit"].as_i64(){Some(1)=>Some(86400),Some(3)=>Some(3600),Some(5)=>Some(60),Some(6)=>Some(604800),_=>None};
+        let seconds=row["number"].as_i64().filter(|n|*n>0).zip(multiplier).and_then(|(n,m)|n.checked_mul(m));
+        let reset=row["nextResetTime"].as_i64().filter(|x|*x>0).map(|x|if x>10_000_000_000{x/1000}else{x});
+        match row["type"].as_str(){
+            Some("TOKENS_LIMIT"|"CREDIT_LIMIT")=>s.windows.push(window(&super::cadence(seconds),seconds,(100.0-used) as f32,reset)),
+            Some("TIME_LIMIT")=>s.extra.push(window("工具调用",seconds,(100.0-used) as f32,reset)),
+            _=>{},
+        }
+    }
+    if s.windows.is_empty(){
         return Err("GLM 未返回可识别的编程额度（工具额度不能代替编程额度）".into());
     }
-    // 复用原 ZCode 已支持的周期和重置时间解析，保留两种登录来源的相同口径。
-    *s=super::zcode::coding(&serde_json::json!({"data":data}))?;
     if let Some(level)=data["level"].as_str().map(str::trim).filter(|v|!v.is_empty()&&v.len()<=64){s.plan=level.into();}
     Ok(())
 }

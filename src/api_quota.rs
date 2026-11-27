@@ -19,7 +19,7 @@ fn script_path(slot:&str)->Result<PathBuf,String>{
 }
 
 fn endpoint(provider:Provider,source:&str)->Result<String,String>{
-    if provider.relay(){return relay::validate_base_url(source);}
+    if provider.relay(){return relay::site_url(source,provider==Provider::RelayCustom);}
     match provider {
         Provider::OpenCodeGo=>Ok(String::new()),
         Provider::MiniMax|Provider::Glm=>match source {""|"cn"=>Ok("cn".into()),"global"=>Ok("global".into()),_=>Err("请选择中国区或国际区，密钥不会自动跨区重试".into())},
@@ -166,7 +166,7 @@ impl Connect {
         if VALIDATING.compare_exchange(false,true,std::sync::atomic::Ordering::AcqRel,std::sync::atomic::Ordering::Acquire).is_err(){let _=tx.send(Err("上次验证仍在结束，请稍后重试".into()));return Self{rx,cancel,deadline};}
         std::thread::spawn(move||{let _slot=ValidationSlot;
             let result=(||{
-                let source=if provider.relay(){relay::normalize_base_url(&source)?}else{endpoint(provider,&source)?};
+                let source=endpoint(provider,&source)?;
                 let key=key.trim();if !(provider==Provider::RelayCustom||(provider==Provider::NewApi&&!automatic&&key.starts_with('{')))&&(key.is_empty()||key.len()>8192||key.chars().any(char::is_whitespace)||key.chars().any(char::is_control)){return Err("请输入有效的 API Key".into());}
                 let (provider,snapshot)=if automatic{
                     let (kind,snapshot)=relay::detect_cancellable(super::http_agent_with_connect_timeout,&source,key,||worker_cancel.load(std::sync::atomic::Ordering::Acquire)).map_err(|e|e.0)?;
@@ -186,10 +186,14 @@ impl Connect {
 impl Config {
     pub fn connect_api(&mut self,connected:&Connected,target:Option<&str>)->Result<String,String>{
         if let Some(id)=target {
-            let a=self.accounts.iter_mut().find(|a|a.id==id&&(a.provider==connected.provider||(a.provider.relay()&&connected.provider.relay()))).ok_or("原账号已移除，请重新添加")?;
-            if let Some(slot)=&a.slot{queue_cleanup(slot)?;}
-            a.provider=connected.provider;a.source=PathBuf::from(&connected.source);a.slot=Some(connected.slot.clone());a.alias=connected.alias.clone();a.enabled=true;
-            let id=a.id.clone();self.selected=id.clone();return Ok(id);
+            let a=self.accounts.iter_mut().find(|a|a.id==id&&(a.provider==connected.provider||(a.provider.relay()&&connected.provider.relay())||(a.provider==Provider::ZCode&&connected.provider==Provider::Glm))).ok_or("原账号已移除，请重新添加")?;
+            let legacy_zcode=a.provider==Provider::ZCode;
+            if a.provider.api_key(){
+                if let Some(slot)=&a.slot{queue_cleanup(slot)?;}
+            }
+            a.provider=connected.provider;a.source=PathBuf::from(&connected.source);a.slot=Some(connected.slot.clone());a.alias=connected.alias.clone();
+            if !legacy_zcode{a.enabled=true;self.selected=id.into();}
+            return Ok(id.into());
         }
         let id=format!("api-{}",connected.slot);self.selected=id.clone();
         self.accounts.push(Account{id:id.clone(),provider:connected.provider,alias:connected.alias.clone(),source:PathBuf::from(&connected.source),slot:Some(connected.slot.clone()),enabled:true,pinned:false});Ok(id)
@@ -200,8 +204,22 @@ impl Config {
     #[test]
     fn explicit_reconnection_can_change_relay_template_and_keep_preferences(){
         let mut config=Config::default();config.accounts.push(Account{id:"original-relay".into(),provider:Provider::NewApi,alias:"原账号".into(),source:"https://relay.example".into(),slot:None,enabled:true,pinned:true});config.colors.insert("original-relay".into(),super::super::Accent::Gold);
+        config.relay_icons.insert("original-relay".into(),super::super::RelayIcon::Layers);
         let connected=Connected{provider:Provider::RelayGeneral,source:"https://relay.example".into(),alias:"我的中转站".into(),slot:"synthetic-ref".into(),snapshot:Snapshot::default()};
         assert_eq!(config.connect_api(&connected,Some("original-relay")).unwrap(),"original-relay");assert_eq!(config.accounts[0].provider,Provider::RelayGeneral);assert!(config.accounts[0].pinned);assert_eq!(config.colors["original-relay"],super::super::Accent::Gold);
+        assert_eq!(config.relay_icon(&config.accounts[0]),super::super::RelayIcon::Layers);
+    }
+    #[test]
+    fn reconnect_zcode_with_glm_key_replaces_reference_and_retains_preferences(){
+        let mut config=Config::default();
+        config.accounts.push(Account{id:"legacy-zcode".into(),provider:Provider::ZCode,alias:"我的账号".into(),source:"synthetic/credentials.json".into(),slot:Some("legacy-account-id".into()),enabled:false,pinned:true});
+        config.selected="another-account".into();config.colors.insert("legacy-zcode".into(),super::super::Accent::Gold);
+        let connected=Connected{provider:Provider::Glm,source:"global".into(),alias:config.accounts[0].alias.clone(),slot:"synthetic-api-slot".into(),snapshot:Snapshot::default()};
+        assert_eq!(config.connect_api(&connected,Some("legacy-zcode")).unwrap(),"legacy-zcode");
+        let account=&config.accounts[0];
+        assert_eq!(account.provider,Provider::Glm);assert_eq!(account.source,PathBuf::from("global"));assert_eq!(account.slot.as_deref(),Some("synthetic-api-slot"));
+        assert_eq!(account.alias,"我的账号");assert!(account.pinned);assert!(!account.enabled);assert_eq!(config.colors["legacy-zcode"],super::super::Accent::Gold);
+        assert_eq!(config.selected,"another-account");
     }
     #[test]
     fn new_api_user_token_reads_account_balance_instead_of_unlimited_key_quota(){
@@ -251,12 +269,42 @@ impl Config {
         let c=relay::script::Credential{script:format!("{}\n/*{}*/",relay::script::DEFAULT_SCRIPT,"说明".repeat(2000)),api_key:"synthetic-script-secret".into(),access_token:String::new(),user_id:String::new()};
         let raw=serde_json::to_string(&c).unwrap();save(&slot,&raw).unwrap();assert_eq!(load(&slot).unwrap(),raw);
         let sealed=std::fs::read(script_path(&slot).unwrap()).unwrap();assert!(!sealed.windows(c.api_key.len()).any(|w|w==c.api_key.as_bytes()));
-        let mut config=Config::default();let connected=Connected{provider:Provider::RelayCustom,source:"https://relay.example".into(),alias:"自定义中转".into(),slot:slot.clone(),snapshot:Snapshot::default()};config.connect_api(&connected,None).unwrap();
+        use std::{io::{BufRead,BufReader,Write},net::TcpListener,time::Duration};
+        let listener=TcpListener::bind("127.0.0.1:0").unwrap();
+        let base=format!("http://{}/gateway",listener.local_addr().unwrap());
+        let server=std::thread::spawn(move||{
+            for _ in 0..2 {
+                let (mut stream,_)=listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let headers:Vec<_>=BufReader::new(&stream).lines().map(Result::unwrap).take_while(|s|!s.is_empty()).collect();
+                assert_eq!(headers[0],"GET /gateway/user/balance HTTP/1.1");
+                assert!(headers.iter().any(|s|s.eq_ignore_ascii_case("Authorization: Bearer synthetic-script-secret")));
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"balance\":1.1}").unwrap();
+            }
+        });
+        let connection=Connect::start_custom(format!("{base}/"),"自定义中转".into(),c.clone());
+        let validated=connection.rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        assert_eq!(validated.source,base);
+        let connected=Connected{provider:validated.provider,source:validated.source,alias:validated.alias,slot:slot.clone(),snapshot:validated.snapshot};
+        let mut config=Config::default();config.connect_api(&connected,None).unwrap();
         let json=config.json();assert!(!json.to_string().contains("synthetic-script-secret"));let restored=Config::from_json(&json);
         assert_eq!(custom_credentials(&restored.accounts[0]).unwrap().script,c.script);
-        let agent=ureq::AgentBuilder::new().middleware(|r:ureq::Request,_:ureq::MiddlewareNext|{assert_eq!(r.header("Authorization"),Some("Bearer synthetic-script-secret"));ureq::Response::new(200,"OK",r#"{"balance":1.1}"#)}).build();
-        assert_eq!(fetch(&agent,&restored.accounts[0]).unwrap().relay.unwrap().compact(),"1.1 USD");delete_slot(&slot).unwrap();assert!(!script_path(&slot).unwrap().exists());
+        assert_eq!(fetch(&super::super::http_agent(),&restored.accounts[0]).unwrap().relay.unwrap().compact(),"1.1 USD");
+        server.join().unwrap();delete_slot(&slot).unwrap();assert!(!script_path(&slot).unwrap().exists());
         assert!(script_path("script-../../outside").is_err());
+    }
+    #[test]
+    fn only_custom_scripts_accept_local_http(){
+        for host in ["localhost","127.0.0.1","[::1]"] {
+            let base=format!("http://{host}:8317/gateway");
+            assert_eq!(endpoint(Provider::RelayCustom,&format!("{base}/")).unwrap(),base);
+            for p in [Provider::NewApi,Provider::OneApi,Provider::Sub2Api,Provider::RelayGeneral] {
+                assert!(endpoint(p,&base).is_err());
+            }
+        }
+        for bad in ["http://relay.example","http://192.168.1.1","http://localhost.example","http://127.0.0.2","ftp://localhost","http://user@localhost","http://localhost/?x=1","http://localhost/#x"] {
+            assert!(endpoint(Provider::RelayCustom,bad).is_err(),"{bad}");
+        }
     }
     #[test]
     fn expired_detection_discards_even_a_ready_success_and_cancels_the_worker(){

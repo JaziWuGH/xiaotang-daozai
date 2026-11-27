@@ -151,6 +151,10 @@ unsafe fn hide_owner(owner: HWND, first_frame: bool) -> windows::core::Result<()
     Ok(())
 }
 
+unsafe fn owner_visible(owner: HWND) -> bool {
+    IsWindowVisible(owner).as_bool() && GetWindowRgnBox(owner, &mut RECT::default()) != NULLREGION
+}
+
 /// 层级上紧挨在下面的可见窗口（跳过输入法等隐藏的辅助窗口）。
 unsafe fn next_visible(hwnd: HWND) -> Option<HWND> {
     let mut current = hwnd;
@@ -169,6 +173,7 @@ pub struct Layered {
     bits: *mut u8,
     size: (i32, i32),
     last: Option<u64>,
+    owner_offset_x: i32,
 }
 
 impl Layered {
@@ -179,7 +184,7 @@ impl Layered {
             unsafe { let _ = DestroyWindow(display); }
             return Err(windows::core::Error::from_win32());
         }
-        Ok(Self { display, dc, bitmap: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), size: (0, 0), last: None })
+        Ok(Self { display, dc, bitmap: HBITMAP::default(), old: HGDIOBJ::default(), bits: std::ptr::null_mut(), size: (0, 0), last: None, owner_offset_x: 0 })
     }
 
     pub(crate) fn display(&self) -> HWND { self.display }
@@ -224,12 +229,21 @@ impl Layered {
     /// 把一帧（RGBA，已预乘）交给显示窗口。画面没变返回 Ok(false)；
     /// 尺寸与岛仔窗口当前大小不符（读回之后窗口又改了大小）时跳过，等下一帧。
     pub fn present(&mut self, owner: HWND, size: [usize; 2], rgba: &[u8]) -> windows::core::Result<bool> {
+        self.present_inner(owner,size,rgba,false)
+    }
+
+    /// 外框交接时先亮出原位置的旧画面，再把主 HWND 的画面隐藏。
+    pub(crate) fn cover(&mut self, owner:HWND, size:[usize;2], rgba:&[u8])->windows::core::Result<bool> {
+        self.present_inner(owner,size,rgba,true)
+    }
+
+    fn present_inner(&mut self, owner:HWND, size:[usize;2], rgba:&[u8], cover:bool)->windows::core::Result<bool> {
         let (w, h) = (size[0] as i32, size[1] as i32);
         let mut rect = RECT::default();
         unsafe { GetWindowRect(owner, &mut rect)?; }
         if (rect.right - rect.left, rect.bottom - rect.top) != (w, h) || rgba.len() != size[0] * size[1] * 4 { return Ok(false); }
         let hash = image_hash(size, rgba);
-        if self.last == Some(hash) { return Ok(false); }
+        if self.last == Some(hash) && self.owner_offset_x == 0 { return Ok(false); }
         if !self.ensure_bitmap(w, h) { return Err(windows::core::Error::from_win32()); }
         unsafe {
             let dst = std::slice::from_raw_parts_mut(self.bits, rgba.len());
@@ -240,12 +254,22 @@ impl Layered {
             let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: 255, AlphaFormat: AC_SRC_ALPHA as u8 };
             let (src, dst_pos, sz) = (POINT::default(), POINT { x: rect.left, y: rect.top }, SIZE { cx: w, cy: h });
             UpdateLayeredWindow(self.display, None, Some(&dst_pos), Some(&sz), self.dc, Some(&src), COLORREF(0), Some(&blend), ULW_ALPHA)?;
+            // 首次接管时，先显示已有像素的显示层，再淡化仍可见的主窗口。
+            if cover || self.last.is_none() && owner_visible(owner) {
+                SetWindowPos(self.display,HWND_TOPMOST,rect.left,rect.top,0,0,SWP_NOACTIVATE|SWP_NOSIZE|SWP_SHOWWINDOW)?;
+            }
             // 显示窗口有了内容之后才把岛仔窗口自身藏起来，避免切换瞬间什么都看不到。
             hide_owner(owner, self.last.is_none())?;
         }
         self.last = Some(hash);
-        self.sync(owner, false);
+        self.owner_offset_x = 0;
+        if !cover {self.sync(owner, false);}
         Ok(true)
+    }
+
+    /// 背景画布加宽时，旧画面留在原位置，等新尺寸的帧接管。
+    pub(crate) fn keep_frame_position_after_widening(&mut self, owner_shift_x: i32) {
+        self.owner_offset_x -= owner_shift_x;
     }
 
     /// 每帧跟随岛仔窗口：可见性、位置，以及紧贴在它正上方的层级。
@@ -254,18 +278,17 @@ impl Layered {
         unsafe {
             let _ = hide_owner(owner, false);
             // 全屏隐藏只清空主窗口区域，仍需同步隐藏独立的显示层。
-            let owner_visible = IsWindowVisible(owner).as_bool()
-                && GetWindowRgnBox(owner, &mut RECT::default()) != NULLREGION;
             let display_visible = IsWindowVisible(self.display).as_bool();
-            if !owner_visible {
+            if !owner_visible(owner) {
                 if display_visible { let _ = ShowWindow(self.display, SW_HIDE); }
                 return;
             }
             let (mut o, mut d) = (RECT::default(), RECT::default());
             if GetWindowRect(owner, &mut o).is_err() || GetWindowRect(self.display, &mut d).is_err() { return; }
             let flags = SWP_NOACTIVATE | SWP_NOSIZE;
-            if (o.left, o.top) != (d.left, d.top) || !display_visible || raise {
-                let _ = SetWindowPos(self.display, HWND_TOPMOST, o.left, o.top, 0, 0, flags | SWP_SHOWWINDOW);
+            let x = o.left + self.owner_offset_x;
+            if (x, o.top) != (d.left, d.top) || !display_visible || raise {
+                let _ = SetWindowPos(self.display, HWND_TOPMOST, x, o.top, 0, 0, flags | SWP_SHOWWINDOW);
             }
             // 岛仔窗口紧贴在显示窗口下面：别的置顶窗口不会夹在两者之间。
             if next_visible(self.display) != Some(owner) {
@@ -282,6 +305,7 @@ impl Layered {
             let _ = ShowWindow(self.display, SW_HIDE);
         }
         self.last = None;
+        self.owner_offset_x = 0;
     }
 }
 
@@ -451,6 +475,16 @@ mod tests {
             let mut d = RECT::default();
             GetWindowRect(layered.display(), &mut d).unwrap();
             assert_eq!((d.left, d.top), (-9000, -9000), "窗口移动后显示窗口跟随");
+            SetWindowPos(owner, None, -9002, -9000, 8, 2, SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
+            layered.keep_frame_position_after_widening(-2);
+            assert!(!layered.present(owner, [4, 2], &px).unwrap(), "加宽后跳过上一尺寸的帧");
+            layered.sync(owner, false);
+            GetWindowRect(layered.display(), &mut d).unwrap();
+            assert_eq!(d.left, -9000, "加宽画布时旧画面留在原位");
+            assert!(layered.present(owner, [8, 2], &[0; 64]).unwrap());
+            GetWindowRect(layered.display(), &mut d).unwrap();
+            assert_eq!(d.left, -9002, "新一帧改用新的画布坐标");
+            SetWindowPos(owner, None, -9000, -9000, 4, 2, SWP_NOZORDER | SWP_NOACTIVATE).unwrap();
             // 全屏隐藏保留主窗口的事件循环，仅清空它的窗口区域。
             assert_ne!(SetWindowRgn(owner, CreateRectRgn(0, 0, 0, 0), true), 0);
             assert!(IsWindowVisible(owner).as_bool());

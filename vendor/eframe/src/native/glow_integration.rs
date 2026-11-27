@@ -111,6 +111,8 @@ struct Viewport {
     deferred_commands: Vec<egui::viewport::ViewportCommand>,
     info: ViewportInfo,
     actions_requested: HashSet<egui_winit::ActionRequested>,
+    root_surface_size: Option<[u32; 2]>,
+    root_front_size: Option<[u32; 2]>,
 
     /// The user-callback that shows the ui.
     /// None for immediate viewports.
@@ -613,9 +615,12 @@ impl GlowWinitRunning<'_> {
         // The update function, which could call immediate viewports,
         // so make sure we don't hold any locks here required by the immediate viewports rendeer.
 
+        self.integration.frame.root_gl_front_ready =
+            cfg!(windows) && viewport_id == ViewportId::ROOT && self.glutin.borrow_mut().prepare_root_front();
         let full_output =
             self.integration
                 .update(self.app.as_mut(), viewport_ui_cb.as_deref(), raw_input);
+        self.integration.frame.root_gl_front_ready = false;
 
         // ------------------------------------------------------------
 
@@ -657,12 +662,20 @@ impl GlowWinitRunning<'_> {
         let gl_surface = viewport.gl_surface.as_ref().unwrap();
         let egui_winit = viewport.egui_winit.as_mut().unwrap();
 
+        let root_offset = integration.root_window_offset(viewport_id);
+        let mut clipped_primitives = integration.egui_ctx.tessellate(shapes, pixels_per_point);
         if viewport_id == ViewportId::ROOT {
+            if let Some(offset) = root_offset {
+                super::epi_integration::translate_root_output(
+                    &mut platform_output,
+                    &mut clipped_primitives,
+                    offset,
+                    pixels_per_point,
+                );
+            }
             crate::scale_root_output(&mut platform_output, crate::root_viewport_scale());
         }
         egui_winit.handle_platform_output(&window, platform_output);
-
-        let clipped_primitives = integration.egui_ctx.tessellate(shapes, pixels_per_point);
 
         {
             // We may need to switch contexts again, because of immediate viewports:
@@ -673,7 +686,20 @@ impl GlowWinitRunning<'_> {
 
         let screen_size_in_pixels: [u32; 2] = window.inner_size().into();
 
-        if !clear_before_update {
+        let mut cropped_resize = false;
+        if root_offset.is_some() {
+            if let [Some(width), Some(height)] = screen_size_in_pixels.map(NonZeroU32::new) {
+                if viewport.root_surface_size != Some(screen_size_in_pixels) {
+                    // 本帧已调整客户区，按新物理尺寸绘制，再提交新画面。
+                    gl_surface.resize(current_gl_context.as_ref().unwrap(), width, height);
+                    viewport.root_surface_size = Some(screen_size_in_pixels);
+                    cropped_resize = true;
+                }
+            }
+        } else {
+            viewport.root_surface_size = None;
+        }
+        if !clear_before_update || cropped_resize {
             painter.clear(screen_size_in_pixels, clear_color);
         }
 
@@ -732,6 +758,9 @@ impl GlowWinitRunning<'_> {
                 ))?;
 
             gl_surface.swap_buffers(context)?;
+            if viewport_id == ViewportId::ROOT {
+                viewport.root_front_size = Some(screen_size_in_pixels);
+            }
             frame_timer.resume();
         }
 
@@ -796,7 +825,9 @@ impl GlowWinitRunning<'_> {
                 // See: https://github.com/rust-windowing/winit/issues/208
                 // This solves an issue where the app would panic when minimizing on Windows.
                 if 0 < physical_size.width && 0 < physical_size.height {
-                    if let Some(viewport_id) = viewport_id {
+                    if let Some(viewport_id) =
+                        viewport_id.filter(|&id| self.integration.root_window_offset(id).is_none())
+                    {
                         repaint_asap = true;
                         glutin.resize(viewport_id, *physical_size);
                     }
@@ -857,7 +888,7 @@ impl GlowWinitRunning<'_> {
                 if let (Some(window), Some(egui_winit)) =
                     (&viewport.window, &mut viewport.egui_winit)
                 {
-                    event_response = self.integration.on_window_event(window, egui_winit, event);
+                    event_response = self.integration.on_window_event(viewport_id, window, egui_winit, event);
                 }
             } else {
                 log::trace!("Ignoring event: no viewport for {viewport_id:?}");
@@ -915,6 +946,33 @@ fn change_gl_context(
 }
 
 impl GlutinWindowContext {
+    fn prepare_root_front(&mut self) -> bool {
+        let Some(viewport) = self.viewports.get(&ViewportId::ROOT) else {
+            return false;
+        };
+        let (Some(context), Some(surface), Some(window), Some(last_size)) = (
+            self.current_gl_context.as_ref(),
+            viewport.gl_surface.as_ref(),
+            viewport.window.as_ref(),
+            viewport.root_front_size,
+        ) else {
+            return false;
+        };
+        let size: [u32; 2] = window.inner_size().into();
+        if size != last_size || size.contains(&0) {
+            return false;
+        }
+        // WGL 的 is_current_read 只比对 GL 上下文，窗口来源还需核对已绑定的 viewport。
+        if self.current_viewport != Some(ViewportId::ROOT) || !surface.is_current_read(context) {
+            self.current_viewport = None;
+            if context.make_current(surface).is_err() || !surface.is_current_read(context) {
+                return false;
+            }
+            self.current_viewport = Some(ViewportId::ROOT);
+        }
+        true
+    }
+
     #[allow(unsafe_code)]
     unsafe fn new(
         egui_ctx: &egui::Context,
@@ -1064,6 +1122,8 @@ impl GlutinWindowContext {
                 deferred_commands: vec![],
                 info,
                 actions_requested: Default::default(),
+                root_surface_size: None,
+                root_front_size: None,
                 viewport_ui_cb: None,
                 gl_surface: None,
                 window: window.map(Arc::new),
@@ -1224,6 +1284,7 @@ impl GlutinWindowContext {
             // create window/surface/make context current once and just use them forever.
 
             viewport.gl_surface = Some(gl_surface);
+            viewport.root_front_size = None;
 
             self.current_gl_context = Some(current_gl_context);
         }
@@ -1239,6 +1300,7 @@ impl GlutinWindowContext {
         log::debug!("received suspend event. dropping window and surface");
         for viewport in self.viewports.values_mut() {
             viewport.gl_surface = None;
+            viewport.root_front_size = None;
             viewport.window = None;
         }
         self.current_viewport = None;
@@ -1399,6 +1461,8 @@ fn initialize_or_update_viewport<'a>(
                 deferred_commands: vec![],
                 info: Default::default(),
                 actions_requested: Default::default(),
+                root_surface_size: None,
+                root_front_size: None,
                 viewport_ui_cb,
                 window: None,
                 egui_winit: None,
@@ -1425,6 +1489,7 @@ fn initialize_or_update_viewport<'a>(
                 viewport.window = None;
                 viewport.egui_winit = None;
                 viewport.gl_surface = None;
+                viewport.root_front_size = None;
                 if *current_viewport == Some(ids.this) {
                     *current_viewport = None;
                 }

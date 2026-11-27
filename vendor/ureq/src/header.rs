@@ -52,7 +52,11 @@ impl HeaderLine {
             index += 1;
         }
 
-        Ok(Header { line: self, index })
+        Ok(Header {
+            line: self,
+            index,
+            sensitive: false,
+        })
     }
 }
 
@@ -73,11 +77,16 @@ pub(crate) struct Header {
     // Invariant: index > 0
     // Invariant: index + 1 < line.len()
     index: usize,
+    pub(crate) sensitive: bool,
 }
 
 impl fmt::Debug for Header {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.line)
+        if self.sensitive {
+            write!(f, "{}: [REDACTED]", self.name())
+        } else {
+            write!(f, "{}", self.line)
+        }
     }
 }
 
@@ -85,7 +94,11 @@ impl Header {
     pub fn new(name: &str, value: &str) -> Self {
         let line = format!("{}: {}", name, value).into();
         let index = name.len();
-        Header { line, index }
+        Header {
+            line,
+            index,
+            sensitive: false,
+        }
     }
 
     /// The header name.
@@ -144,7 +157,7 @@ impl Header {
         let value_raw = &bytes[self.index + 1..];
 
         if !valid_name(name_raw) || !valid_value(value_raw) {
-            Err(ErrorKind::BadHeader.msg(format!("invalid header '{}'", self.line)))
+            Err(ErrorKind::BadHeader.msg(format!("invalid header '{self:?}'")))
         } else {
             Ok(())
         }

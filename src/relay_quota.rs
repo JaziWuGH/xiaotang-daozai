@@ -84,14 +84,19 @@ fn number(n:f64)->String {
     if raw.contains('e') { raw } else { raw.trim_end_matches('0').trim_end_matches('.').to_owned() }
 }
 
-/// Accept the site root, preserving its reverse-proxy path prefix.
-/// HTTPS only: localhost HTTP is deliberately not an implicit credential exception.
-pub fn validate_base_url(raw:&str)->Result<String,String> {
+/// 保留站点的部署路径；内置中转站模板始终要求 HTTPS。
+pub fn validate_base_url(raw:&str)->Result<String,String> {site_url(raw,false)}
+
+pub(super) fn site_url(raw:&str,allow_loopback_http:bool)->Result<String,String> {
     let raw=raw.trim();
-    if raw.is_empty() || raw.chars().any(char::is_whitespace) || raw.contains('\\') { return Err("请输入有效的 HTTPS 站点地址".into()); }
-    let url=url::Url::parse(raw).map_err(|_|"请输入完整的 HTTPS 站点地址")?;
-    if url.scheme()!="https" || url.host_str().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
-        return Err("站点地址必须使用 HTTPS，且不能包含账号、查询参数或片段".into());
+    if raw.is_empty() || raw.chars().any(char::is_whitespace) || raw.contains('\\') { return Err("请输入有效的站点地址".into()); }
+    let url=url::Url::parse(raw).map_err(|_|"请输入完整的站点地址")?;
+    let local_http=allow_loopback_http && url.scheme()=="http" && !script::loopback_ips(&url).is_empty();
+    if url.scheme()!="https" && !local_http {
+        return Err(if allow_loopback_http {"仅本机回环地址可以使用 HTTP，其他站点请使用 HTTPS"}else{"站点地址必须使用 HTTPS"}.into());
+    }
+    if url.host().is_none() || !url.username().is_empty() || url.password().is_some() || url.query().is_some() || url.fragment().is_some() {
+        return Err("站点地址需要有效主机，且不能包含账号、查询参数或片段".into());
     }
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }

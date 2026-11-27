@@ -7,6 +7,8 @@
 /// 兼容图形后端（低功耗显卡优先）：指定 Direct3D 12 或 Vulkan。
 fn compatible(mut options:eframe::NativeOptions,backends:eframe::wgpu::Backends)->eframe::NativeOptions {
     options.renderer=eframe::Renderer::Wgpu;
+    #[cfg(all(windows, feature = "sdk-material"))]
+    if backends!=eframe::wgpu::Backends::DX12 {options.wgpu_options.direct_composition=false;}
     if let eframe::egui_wgpu::WgpuSetup::CreateNew(setup)=&mut options.wgpu_options.wgpu_setup {
         setup.instance_descriptor.backends=backends;
         setup.power_preference=eframe::wgpu::PowerPreference::LowPower;
@@ -28,7 +30,17 @@ fn small_memory_blocks(descriptor:eframe::wgpu::DeviceDescriptor<'static>)->efra
 /// 兼容渲染优先用 Direct3D 12（Windows 原生、睡眠唤醒与换屏处理最稳）；
 /// 设备不支持时再退到 Vulkan。两者都不经过显卡的 OpenGL 驱动。
 fn launch_compatible(options:eframe::NativeOptions,launch:&mut impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
-    match launch(compatible(options.clone(),eframe::wgpu::Backends::DX12)) {
+    let first=launch(compatible(options.clone(),eframe::wgpu::Backends::DX12));
+    #[cfg(all(windows, feature = "sdk-material"))]
+    let first=match first {
+        Err(eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::DirectComposition(_))) if options.wgpu_options.direct_composition=>{
+            let mut fallback=options.clone();
+            fallback.wgpu_options.direct_composition=false;
+            launch(compatible(fallback,eframe::wgpu::Backends::DX12))
+        }
+        result=>result,
+    };
+    match first {
         Err(eframe::Error::Wgpu(_))=>launch(compatible(options,eframe::wgpu::Backends::VULKAN)),
         result=>result,
     }
@@ -43,10 +55,33 @@ fn forced_compatible()->bool {
 pub fn run(options:eframe::NativeOptions,launch:impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
     // 上次崩在显卡 OpenGL 驱动里时，崩溃处理留下的标记会在这里转成设置。
     let _=daozai::renderer::apply_pending_fallback();
-    run_with(forced_compatible() || daozai::renderer::compat_requested(),options,launch)
+    let forced=forced_compatible();
+    #[cfg(all(windows, feature = "sdk-js", feature = "sdk-material"))]
+    let compat_enabled=daozai::renderer::compat_requested();
+    #[cfg(not(all(windows, feature = "sdk-js", feature = "sdk-material")))]
+    let compat_enabled=!forced && daozai::renderer::compat_requested();
+    let compat_first=forced || compat_enabled;
+    #[cfg(all(windows, feature = "sdk-material"))]
+    let options={
+        let mut options=options;
+        let debug=daozai::material::debug_requested();
+        #[cfg(feature="sdk-js")]
+        let installed=compat_enabled && !daozai::material::falling_back() && !debug
+            && daozai::sdk_spike::LocalPlugins::startup_material(&daozai::model::config_dir().join("local-plugins"));
+        #[cfg(not(feature="sdk-js"))]
+        let installed=false;
+        daozai::material::configure_startup(&mut options,compat_first,debug || installed);
+        options
+    };
+    run_with(compat_first,options,launch)
 }
 
-fn opengl(mut options:eframe::NativeOptions)->eframe::NativeOptions { options.renderer=eframe::Renderer::Glow; options }
+fn opengl(mut options:eframe::NativeOptions)->eframe::NativeOptions {
+    options.renderer=eframe::Renderer::Glow;
+    #[cfg(all(windows, feature = "sdk-material"))]
+    {options.wgpu_options.direct_composition=false;}
+    options
+}
 
 fn run_with(compat_first:bool,options:eframe::NativeOptions,mut launch:impl FnMut(eframe::NativeOptions)->eframe::Result<()>)->eframe::Result<()> {
     if compat_first {
@@ -106,6 +141,40 @@ mod tests {
         });
         assert!(result.is_ok());
         assert_eq!(backends,[eframe::wgpu::Backends::DX12,eframe::wgpu::Backends::VULKAN],"先 Direct3D 12，失败再 Vulkan");
+    }
+
+    #[cfg(all(windows, feature = "sdk-material"))]
+    #[test]
+    fn compatible_fallbacks_drop_the_transparent_swapchain() {
+        let mut options=eframe::NativeOptions::default();
+        daozai::material::configure_startup(&mut options,true,true);
+        let mut attempts=Vec::new();
+        run_with(true,options,|options|{
+            attempts.push((options.renderer,options.wgpu_options.direct_composition));
+            if options.renderer==eframe::Renderer::Wgpu {Err(no_adapter())} else {Ok(())}
+        }).unwrap();
+        assert_eq!(attempts,[
+            (eframe::Renderer::Wgpu,true),
+            (eframe::Renderer::Wgpu,false),
+            (eframe::Renderer::Glow,false),
+        ]);
+    }
+
+    #[cfg(all(windows, feature = "sdk-material"))]
+    #[test]
+    fn direct_composition_failure_retries_ordinary_dx12() {
+        let mut options=eframe::NativeOptions::default();
+        daozai::material::configure_startup(&mut options,true,true);
+        let mut attempts=Vec::new();
+        launch_compatible(options,&mut |options|{
+            let eframe::egui_wgpu::WgpuSetup::CreateNew(setup)=options.wgpu_options.wgpu_setup else{panic!("应创建兼容图形设备")};
+            let direct_composition=options.wgpu_options.direct_composition;
+            attempts.push((setup.instance_descriptor.backends,direct_composition));
+            if direct_composition {
+                Err(eframe::Error::Wgpu(eframe::egui_wgpu::WgpuError::DirectComposition("测试".into())))
+            } else {Ok(())}
+        }).unwrap();
+        assert_eq!(attempts,[(eframe::wgpu::Backends::DX12,true),(eframe::wgpu::Backends::DX12,false)]);
     }
 
     #[test]

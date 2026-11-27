@@ -1,0 +1,19 @@
+{
+  "id": "example.canvas-live-demo",
+  "name": "实时画布",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "status",
+  "capabilities": ["status.page", "status.canvas", "action", "storage"],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [],
+  "statusLayout": {
+    "components": [{"type": "canvas"}],
+    "style": {"accent": "#A78BFA", "surface": "plain"}
+  }
+}

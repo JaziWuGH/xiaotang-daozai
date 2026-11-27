@@ -4,6 +4,8 @@
 use crate::anim::{self, lerp, smoothstep, Spring};
 use crate::app::{App, Cmd, Env, Phase};
 use crate::mail;
+#[cfg(all(windows, feature = "sdk-material"))]
+use crate::material::ControlRole;
 use crate::paint::{self, capsule, mix, Card, H};
 use crate::smtc::Transport;
 use crate::theme::{self, size, W};
@@ -101,6 +103,8 @@ impl App {
         let np=self.media.clone();
         let has=!np.title.is_empty();
         let with_lyrics=has && self.show_lyrics;
+        let glassy=self.glassy();
+        let glass_gpu=c.live && self.glass_controls_ready();
         let ctx=c.ui.ctx().clone();
         let playing_t=ctx.animate_bool_with_time(egui::Id::new("np-playing"),np.playing,0.22);
         let art_size=if with_lyrics {44.0}else{62.0};
@@ -131,6 +135,9 @@ impl App {
         } else {
             c.fill(44.0,13.0,62.0,62.0,13.0,Color32::from_rgb(25,25,27));
             paint::note(c,75.0,44.0,26.0,Color32::from_rgb(110,110,114));
+        }
+        if glassy && has {
+            c.stroke(44.0,art_y,art_size,art_size,10.0,1.2,Color32::from_white_alpha(70));
         }
 
         if !has {
@@ -166,14 +173,27 @@ impl App {
             _=>np.position,
         });
         let frac=if np.duration>0.0 {(position/np.duration).clamp(0.0,1.0) as f32}else{0.0};
+        #[cfg(all(windows, feature = "sdk-material"))]
+        if has && np.duration>0.0 {
+            let x=bx+bw*frac;
+            if glass_gpu {
+                c.material_control(&bar,c.rect(x-14.0,by-10.0,28.0,20.0),10.0,ControlRole::Seek);
+            } else if !glassy {
+                c.material_circle_with_role(&bar,x,by,4.5,ControlRole::Seek);
+            }
+        }
         let (time_y,time_size,right)=if with_lyrics {(100.0,10.0,220.0)}else{(97.0,15.0,375.0)};
         c.text(44.0,time_y,&mmss(position),time_size,W::Regular,tc,H::Left);
         c.text(right,time_y,&end_time(np.duration,has),time_size,W::Regular,tc,H::Right);
         let (bh,_)=c.hover_t(&bar);
         let bh=if has {bh}else{0.0};
         let th=lerp(3.5,5.0,bh);
-        c.fill(bx,by-th/2.0,bw,th,th/2.0,if has {Color32::from_gray(90)}else{theme::TRACK});
-        if self.settings.skin==crate::model::Skin::Fluid {
+        if glassy && has {
+            paint::glass_groove(c,bx,by-th/2.0,bw,th);
+        } else {
+            c.fill(bx,by-th/2.0,bw,th,th/2.0,if has {Color32::from_gray(90)}else{theme::TRACK});
+        }
+        if !glassy && self.effective_skin()==crate::model::Skin::Fluid {
             let head=bx+bw*frac;
             let hot=if bar.is_pointer_button_down_on(){1.0}else if np.playing{0.62}else{0.45};
             if has && frac>0.0 {
@@ -186,7 +206,7 @@ impl App {
             }
         }else{
         if frac>0.0 {c.fill(bx,by-th/2.0,(bw*frac).max(th),th,th/2.0,theme::WHITE);}
-        if bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
+        if !glass_gpu && bh>0.01 {c.faded(bh).circle(bx+bw*frac,by,4.5,theme::WHITE);}
         }
         if bar.clicked() || bar.drag_stopped() {
             if let Some(position)=seek_position {
@@ -201,33 +221,46 @@ impl App {
 
         let y=118.0;
         let ic=if has {theme::WHITE}else{Color32::from_rgb(88,88,92)};
-        let btn=|x:f32,w:f32,id:&str| {
+        let btn=|x:f32,w:f32,id:&str,enabled:bool,#[cfg(all(windows, feature = "sdk-material"))] role:ControlRole| {
             let response=c.hit(x-w/2.0,y-12.0,w,24.0,id);
             let (hover,pressed)=c.hover_t(&response);
-            if has && hover>0.01 {c.faded(hover).circle(x,y,12.5,Color32::from_white_alpha(20));}
-            (response,c.scaled(x,y,1.0-0.1*pressed))
+            let lens_enabled=enabled || (glassy && has);
+            let radius=if glassy {11.5}else{12.5};
+            #[cfg(all(windows, feature = "sdk-material"))]
+            if lens_enabled && (!glassy || glass_gpu) {
+                c.material_circle_with_role(&response,x,y,radius,role);
+            }
+            let card=c.scaled(x,y,if glassy {self.glass_control_scale(&response,pressed)}else{1.0-0.1*pressed});
+            if lens_enabled && glassy && !glass_gpu {
+                paint::glass_disc(&card,x,y,radius,0.16+hover*0.74);
+            } else if has && hover>0.01 {
+                let from=glass_gpu.then(||paint::chrome_mark(c));
+                c.faded(hover).circle(x,y,radius,Color32::from_white_alpha(if glass_gpu {14}else{20}));
+                if let Some(from)=from {paint::chrome_since(c,from);}
+            }
+            (response,card)
         };
-        let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr");
+        let (lyrics_button,lyrics_card)=btn(74.0,26.0,"m-lyr",has,#[cfg(all(windows, feature = "sdk-material"))] ControlRole::Lyric);
         lyrics_card.text(74.0,y+5.0,"词",14.0,W::Semibold,if !has {ic}else if self.show_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
         // 播放模式：网易云与 QQ 音乐都能从岛上点一下切到下一档；
         // QQ 音乐会短暂显示客户端、点开底栏模式菜单再复原窗口，约 1 秒。
         let mode_known=np.play_mode!=crate::smtc::PlayMode::Unknown;
         if has && (mode_known || crate::smtc::supports_play_mode(&np.source)) {
-            let (mode_button,mode_card)=btn(118.0,26.0,"m-mode");
+            let (mode_button,mode_card)=btn(118.0,26.0,"m-mode",has,#[cfg(all(windows, feature = "sdk-material"))] ControlRole::Lyric);
             paint::play_mode(&mode_card,118.0,y,np.play_mode,if mode_known {ic}else{theme::GRAY});
             let hint=if mode_known {format!("{}（点击切换）",np.play_mode.label())}else{"播放模式（点击切换）".into()};
             if mode_button.on_hover_text(hint).clicked() {
                 cmds.push(Cmd::CyclePlayMode);
             }
         }
-        let (previous,previous_card)=btn(162.0,30.0,"m-prev");
+        let (previous,previous_card)=btn(162.0,30.0,"m-prev",has,#[cfg(all(windows, feature = "sdk-material"))] ControlRole::Prev);
         paint::skip(&previous_card,162.0,y,-1.0,ic);
-        let (play,play_card)=btn(210.5,30.0,"m-play");
-        paint::play_pause(&play_card,211.0,y,15.0,playing_t,ic);
-        let (next,next_card)=btn(258.0,30.0,"m-next");
+        let (play,play_card)=btn(210.5,30.0,"m-play",has,#[cfg(all(windows, feature = "sdk-material"))] ControlRole::Play);
+        paint::play_pause(&play_card,211.0,y,if glassy {12.5}else{15.0},playing_t,ic);
+        let (next,next_card)=btn(258.0,30.0,"m-next",has,#[cfg(all(windows, feature = "sdk-material"))] ControlRole::Next);
         paint::skip(&next_card,258.0,y,1.0,ic);
         // 音量：跟网易云一样，鼠标移到喇叭上就浮出竖条；点喇叭本身是静音。
-        let (volume_button,volume_card)=btn(367.0,26.0,"m-volume");
+        let (volume_button,volume_card)=btn(367.0,26.0,"m-volume",has&&self.music_volume_ui.is_some(),#[cfg(all(windows, feature = "sdk-material"))] ControlRole::Volume);
         let (volume,muted)=self.music_volume_ui.unwrap_or((0,false));
         paint::speaker(&volume_card,367.0,y,muted,if self.music_volume_ui.is_some(){ic}else{theme::GRAY});
         let hint=if self.music_volume_ui.is_some(){format!("音乐应用音量 {volume}%{} · 点击展开 · 滚轮调节",if muted{"（已静音）"}else{""})}else{"暂无可调节的音乐音频会话".into()};
@@ -256,7 +289,16 @@ impl App {
         }
         // 岛上歌词是横向的，只在顶部停靠时提供。
         if has && !self.side() {
-            let (button,button_card)=capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",if self.settings.island_lyrics {Color32::from_gray(39)}else{Color32::from_gray(22)},Color32::from_gray(47));
+            let on=self.settings.island_lyrics;
+            let (button,button_card)=paint::material_capsule(c,279.0,108.0,68.0,20.0,"m-island-lyrics",
+                if on {Color32::from_gray(39)}else{Color32::from_gray(22)},Color32::from_gray(47),
+                glassy.then_some((glass_gpu,if on {0.62}else{0.10},if on {0.3}else{0.5})),
+                #[cfg(all(windows, feature = "sdk-material"))] ControlRole::IslandLyrics);
+            if glass_gpu && on {
+                let from=paint::chrome_mark(c);
+                button_card.fill(279.0,108.0,68.0,20.0,10.0,Color32::from_white_alpha(24));
+                paint::chrome_since(c,from);
+            }
             button_card.text(313.0,122.0,"岛上歌词",10.0,W::Semibold,if self.settings.island_lyrics {theme::WHITE}else{theme::GRAY},H::Center);
             if button.on_hover_text(if self.settings.island_lyrics {"关闭收起时的歌词"}else{"收起时显示当前歌词"}).clicked() {
                 self.settings.island_lyrics=!self.settings.island_lyrics;
@@ -332,10 +374,16 @@ impl App {
         cmds.push(Cmd::MusicVolume(command,self.media.source.clone()));
     }
 
+    pub(crate) fn music_volume_bounds(&self)->Rect {
+        // 顶栏固定时浮条靠在扬声器左侧，给图钉留下完整热区。
+        MUSIC_VOLUME_RECT.translate(egui::vec2(-43.0,27.0)*self.hold_slot)
+    }
+
     pub(crate) fn draw_music_volume(&mut self,c:&Card,cmds:&mut Vec<Cmd>){
         let ctx=c.ui.ctx();
+        let placed=self.music_volume_bounds();
         let bounds=MUSIC_VOLUME_RECT;
-        let panel=c.rect(bounds.min.x,bounds.min.y,bounds.width(),bounds.height());
+        let panel=c.rect(placed.min.x,placed.min.y,placed.width(),placed.height());
         let trigger=c.rect(354.0,106.0,26.0,24.0);
         if self.music_volume_open && ctx.input(|i|i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p|!panel.contains(p) && !trigger.contains(p))){
             self.music_volume_open=false;
@@ -343,12 +391,20 @@ impl App {
         let a=ctx.animate_bool_with_time(egui::Id::new("music-volume-open"),self.music_volume_open,0.12);
         let Some((volume,muted))=self.music_volume_ui else{return;};
         if a<0.01{return;}
-        let popup=c.faded(a);
+        let popup=c.shifted(placed.min.x-bounds.min.x,placed.min.y-bounds.min.y).faded(a);
         let popup=if self.music_volume_open{popup}else{popup.ghost()};
         // 浮条最后绘制并占据整块命中区域，防止点击穿到后面的翻页按钮。
         popup.hit(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),"m-volume-surface");
-        popup.fill(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),12.0,Color32::from_gray(36));
-        popup.stroke(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),12.0,1.0,Color32::from_gray(60));
+        let glassy=self.glassy();
+        if glassy {
+            let (x,y,w,h)=(bounds.min.x,bounds.min.y,bounds.width(),bounds.height());
+            // 浮层覆盖歌词，叠加同色填充补足深色玻璃调色后的透明度。
+            for _ in 0..4 { popup.fill(x,y,w,h,12.0,Color32::from_gray(26)); }
+            paint::glass_chip(&popup,x,y,w,h,12.0,0.0);
+        } else {
+            popup.fill(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),12.0,Color32::from_gray(36));
+            popup.stroke(bounds.min.x,bounds.min.y,bounds.width(),bounds.height(),12.0,1.0,Color32::from_gray(60));
+        }
         let track=popup.hit_drag(351.0,27.0,32.0,54.0,"m-volume-track");
         let mut command=None;
         if popup.live && (track.clicked() || track.dragged() || track.is_pointer_button_down_on()) {
@@ -366,11 +422,15 @@ impl App {
         let (volume,muted)=self.music_volume_ui.unwrap_or((volume,muted));
         let ink=if muted{theme::GRAY}else{theme::WHITE};
         popup.centered_text(367.0,20.0,&format!("{volume}%"),10.5,W::Semibold,ink,H::Center);
-        popup.fill(364.5,32.0,5.0,43.0,2.5,Color32::from_gray(68));
+        popup.fill(364.5,32.0,5.0,43.0,2.5,if glassy {Color32::from_black_alpha(66)}else{Color32::from_gray(68)});
         let head=75.0-43.0*volume as f32/100.0;
         if volume>0 {popup.fill(364.5,head,5.0,(75.0-head).max(2.5),2.5,ink);}
         popup.circle(367.0,head,if track.dragged(){5.5}else{4.5},ink);
-        popup.fill(353.0,82.0,28.0,20.0,6.0,paint::mix(theme::BTN,theme::BTN_HOVER,if muted{1.0}else{hover}));
+        if glassy {
+            paint::glass_chip(&popup,353.0,82.0,28.0,20.0,6.0,0.12+hover*0.6);
+        } else {
+            popup.fill(353.0,82.0,28.0,20.0,6.0,paint::mix(theme::BTN,theme::BTN_HOVER,if muted{1.0}else{hover}));
+        }
         popup.scaled(367.0,92.0,1.0-0.06*press).centered_text(367.0,92.0,if muted{"恢复"}else{"静音"},9.5,W::Semibold,theme::WHITE,H::Center);
     }
 
@@ -433,9 +493,9 @@ impl App {
     }
 
     // ================= 专注（番茄钟） =================
-    pub(crate) fn page_focus(&mut self, c: &Card, _env: &Env) {
-        if c.hit(90.0,8.0,42.0,21.0,"focus-settings").on_hover_text("专注设置").clicked(){self.open_settings_category(2);}
-        c.text(111.0,23.0,"设置",10.5,W::Regular,theme::GRAY,H::Center);
+    pub(crate) fn page_focus(&mut self, c: &Card, header: &Card, _env: &Env) {
+        if header.hit(90.0,8.0,42.0,21.0,"focus-settings").on_hover_text("专注设置").clicked(){self.open_settings_category(2);}
+        header.text(111.0,23.0,"设置",10.5,W::Regular,theme::GRAY,H::Center);
         let (rx, ry, rr) = (79.0, 74.0, 32.0);
         let frac = self.ring_shown.pos.clamp(0.0, 1.0);
         let run = c.ui.ctx().animate_bool_with_time(egui::Id::new("pomo-run"), self.pomo.running, 0.3);
@@ -479,16 +539,26 @@ impl App {
         rc.circle(329.0, 50.0, 11.0, mix(Color32::from_rgb(28, 28, 30), Color32::from_rgb(50, 50, 54), h));
         paint::reset(&rc, 329.0, 50.0, -self.reset_spin.pos, Color32::from_gray(230));
         if r.clicked() {
-            self.pomo.remaining = self.phase_secs(self.pomo.phase);
+            self.pomo.reset_remaining(self.phase_secs(self.pomo.phase));
             self.pomo.running = false;
             self.reset_spin.target += TAU;
         }
 
+        let glassy=self.glassy();
+        let glass_gpu=c.live && self.glass_controls_ready();
         for (phase,label,x,width,id) in [(Phase::Focus,"专注",148.0,88.0,"f-focus"),(Phase::Rest,"休息",292.0,88.0,"f-rest")] {
             let selected=self.pomo.phase==phase;
             let accent=if phase==Phase::Focus{theme::RED_TOP}else{theme::SOFT_GREEN};
             let background=if selected{mix(theme::BTN,accent,0.22)}else{theme::BTN};
-            let (response,button)=capsule(c,x,94.0,width,25.0,id,background,if selected{mix(theme::BTN_HOVER,accent,0.25)}else{theme::BTN_HOVER});
+            let (response,button)=paint::material_capsule(c,x,94.0,width,25.0,id,background,
+                if selected{mix(theme::BTN_HOVER,accent,0.25)}else{theme::BTN_HOVER},
+                glassy.then_some((glass_gpu,if selected {0.55}else{0.10},if selected {0.20}else{0.45})),
+                #[cfg(all(windows, feature = "sdk-material"))] if phase==Phase::Focus {ControlRole::Focus}else{ControlRole::Rest});
+            if glass_gpu && selected {
+                let from=paint::chrome_mark(c);
+                button.fill(x,94.0,width,25.0,12.5,paint::alpha(accent,0.28));
+                paint::chrome_since(c,from);
+            }
             button.text(x+width/2.0,110.0,label,size::BODY,W::Semibold,if selected{mix(accent,theme::WHITE,0.5)}else{theme::WHITE},H::Center);
             if response.clicked(){self.set_phase(phase);}
         }
@@ -497,7 +567,7 @@ impl App {
         let b2=b2.on_hover_text(if self.pomo.running{"暂停计时"}else{"开始计时"});
         if b2.clicked() {
             if self.pomo.remaining <= 0.0 {
-                self.pomo.remaining = self.phase_secs(self.pomo.phase);
+                self.pomo.reset_remaining(self.phase_secs(self.pomo.phase));
             }
             self.pomo.running = !self.pomo.running;
         }
@@ -506,7 +576,7 @@ impl App {
     fn set_phase(&mut self, ph: Phase) {
         if self.pomo.phase==ph {return;}
         self.pomo.phase = ph;
-        self.pomo.remaining = self.phase_secs(ph);
+        self.pomo.reset_remaining(self.phase_secs(ph));
         self.pomo.running = false;
     }
 
@@ -523,9 +593,9 @@ impl App {
     /// 健康页：标题「健康」后接「喝水 | 久坐」分段切换。两种模式是同一套版式——
     /// 大数字、右上开关、状态行、进度条、主按钮 + 设置、右侧进度环都在同一位置，
     /// 只换内容和主色（蓝 / 绿）。设置按钮、分隔线和开关本体不随切换闪动。
-    pub(crate) fn page_water(&mut self, c: &Card, env: &Env) {
+    pub(crate) fn page_water(&mut self, c: &Card, header: &Card, env: &Env) {
         let sv = self.sit_view_t.pos.clamp(0.0, 1.0);
-        self.health_tabs(c, 15.0, sv);
+        self.health_tabs(header, 15.0, sv);
 
         // 共用的开关：位置不变，颜色和旋钮图标随模式过渡。
         let sit = self.sit_mode;
@@ -557,7 +627,11 @@ impl App {
             }
         }
 
-        let (s, sc) = capsule(c, 111.0, 98.0, 66.0, 25.0, "w-set", theme::BTN, theme::BTN_HOVER);
+        let (s, sc) = if self.glassy() {
+            paint::glass_capsule(c, 111.0, 98.0, 66.0, 25.0, "w-set", 0.14, 0.42)
+        } else {
+            capsule(c, 111.0, 98.0, 66.0, 25.0, "w-set", theme::BTN, theme::BTN_HOVER)
+        };
         paint::sliders(&sc, 126.0, 110.5, theme::WHITE);
         sc.text(149.0, 114.0, "设置", size::BODY, W::Regular, theme::WHITE, H::Center);
         if s.clicked() { self.open_settings_category(1); }
@@ -799,7 +873,8 @@ impl App {
         let font = 12.0;
         let widths: Vec<f32> = labels.iter().map(|l| c.text_w(l, font, W::Bold) + 14.0).collect();
         let total = widths.iter().sum::<f32>() + 4.0;
-        c.fill(x, 9.5, total, 21.0, 10.5, theme::BTN);
+        if self.glassy() { paint::glass_chip(c,x,9.5,total,21.0,10.5,0.12); }
+        else { c.fill(x,9.5,total,21.0,10.5,theme::BTN); }
         let mut left = x + 2.0;
         for (i, (label, w)) in labels.iter().zip(&widths).enumerate() {
             let selected = self.shelf_tab == i;
@@ -821,18 +896,19 @@ impl App {
         x + total
     }
 
-    pub(crate) fn page_shelf(&mut self, c: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
+    pub(crate) fn page_shelf(&mut self, c: &Card, header: &Card, env: &Env, cmds: &mut Vec<Cmd>) {
         let n = self.shelf.items.len();
         let drag = self.drag_a;
         // 拖文件进来时回到「文件」分栏。
         if drag > 0.002 { self.shelf_tab = 0; }
-        self.shelf_tabs(c, 13.0);
+        self.shelf_tabs(header, 13.0);
+        let header=header.shifted(-self.header_music_shift(),0.0);
         if self.shelf_tab == 1 {
-            self.page_clipboard(c, env, cmds);
+            self.page_clipboard(c, &header, env, cmds);
             return;
         }
-        c.text(344.0,23.0,"添加",size::SMALL,W::Regular,theme::GRAY,H::Right);
-        if c.hit(311.0,8.0,38.0,22.0,"shelf-add").on_hover_text("从电脑选择文件").clicked(){cmds.push(Cmd::AddFiles);}
+        header.text(344.0,23.0,"添加",size::SMALL,W::Regular,theme::GRAY,H::Right);
+        if header.hit(311.0,8.0,38.0,22.0,"shelf-add").on_hover_text("从电脑选择文件").clicked(){cmds.push(Cmd::AddFiles);}
         if n>5 {c.text(209.5,121.0,&format!("{}–{} / {n} · 滚轮查看",self.shelf_first+1,(self.shelf_first+5).min(n)),10.5,W::Regular,theme::DIM,H::Center);}
 
         if n > 0 {
@@ -845,7 +921,12 @@ impl App {
             let hover = if confirming { Color32::from_rgb(150, 34, 44) } else { theme::BTN_HOVER };
             // 放在右下角：顶栏中间是日期时间，宽度随 12 小时制等设置变化。
             let (x, y) = (377.0 - lw, 109.0);
-            let (r, bc) = capsule(&c.faded(1.0 - drag), x, y, lw, 17.0, "shelf-clear", base, hover);
+            let card=c.faded(1.0-drag);
+            let (r, bc) = if self.glassy() && !confirming {
+                paint::glass_capsule(&card, x, y, lw, 17.0, "shelf-clear", 0.14, 0.42)
+            } else {
+                capsule(&card, x, y, lw, 17.0, "shelf-clear", base, hover)
+            };
             let r = if confirming { r.on_hover_text("再点一次清空置物架（文件本身不动）") } else { r.on_hover_text("清空置物架") };
             bc.text(x + lw / 2.0, y + 12.0, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
             if r.clicked() {
@@ -947,7 +1028,7 @@ impl App {
     }
 
     // ================= 剪贴板（置物架第二个分栏） =================
-    fn page_clipboard(&mut self, c: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
+    fn page_clipboard(&mut self, c: &Card, header: &Card, _env: &Env, _cmds: &mut Vec<Cmd>) {
         if !self.settings.clipboard_history {
             c.dashed(42.0, 32.0, 335.0, 91.0, 12.0, 1.2, Color32::from_gray(70), 0.0);
             c.text(209.5, 66.0, "剪贴板记录已关闭", 12.0, W::Semibold, theme::WHITE, H::Center);
@@ -971,7 +1052,11 @@ impl App {
             let base = if confirming { Color32::from_rgb(120, 28, 36) } else { theme::BTN };
             let hover = if confirming { Color32::from_rgb(150, 34, 44) } else { theme::BTN_HOVER };
             let x = 351.0 - lw;
-            let (r, bc) = capsule(c, x, 11.5, lw, 17.0, "clip-clear", base, hover);
+            let (r, bc) = if self.glassy() && !confirming {
+                paint::glass_capsule(header, x, 11.5, lw, 17.0, "clip-clear", 0.14, 0.42)
+            } else {
+                capsule(header, x, 11.5, lw, 17.0, "clip-clear", base, hover)
+            };
             bc.text(x + lw / 2.0, 23.5, label, size::SMALL, W::Regular, theme::WHITE, H::Center);
             let r = r.on_hover_text(if confirming { "再点一次清空未固定的记录" } else { "清空未固定的记录" });
             if r.clicked() {
@@ -1057,7 +1142,7 @@ impl App {
     }
 
     /// 拖入遮罩：流动虚线框 + 跟随光标的柔光 + 上下轻跳的托盘图标。
-    fn drag_overlay(&self, c: &Card) {
+    pub(crate) fn drag_overlay(&self, c: &Card) {
         let (x, y, w, h) = (42.0, 31.0, 335.0, 93.0);
         c.fill(x, y, w, h, 12.0, Color32::from_black_alpha(110));
         if let Some(p) = self.cursor_local {
@@ -1083,16 +1168,26 @@ impl App {
         hc.text(42.0 + w, 61.0, &format!("/{total}"), size::HERO, W::Bold, theme::WHITE, H::Left);
         c.text(42.0, 78.0, "已完成", size::SMALL, W::Regular, theme::GRAY, H::Left);
 
-        let (add, ac) = capsule(c, 41.0, 96.0, 74.0, 26.0, "t-add", theme::BTN, theme::BTN_HOVER);
+        let glassy=self.glassy();
+        let (add, ac) = if glassy {
+            paint::glass_capsule(c,41.0,96.0,74.0,26.0,"t-add",0.16,0.42)
+        } else {
+            capsule(c,41.0,96.0,74.0,26.0,"t-add",theme::BTN,theme::BTN_HOVER)
+        };
         paint::plus(&ac, 56.0, 109.0, 6.2, theme::WHITE, Color32::BLACK);
         ac.text(67.0, 112.5, "加一个", size::BODY, W::Regular, theme::WHITE, H::Left);
         let can_edit = !self.todos.items.is_empty() && !self.adding && self.editing.is_none();
         let ec = if can_edit { c.clone() } else { c.faded(0.45) };
-        let (edit, edc) = capsule(&ec, 121.0, 96.0, 68.0, 26.0, "t-edit", theme::BTN, if can_edit { theme::BTN_HOVER } else { theme::BTN });
+        let (edit, edc) = if glassy {
+            paint::glass_capsule(&ec,121.0,96.0,68.0,26.0,"t-edit",if can_edit {0.16}else{0.05},0.42)
+        } else {
+            capsule(&ec,121.0,96.0,68.0,26.0,"t-edit",theme::BTN,if can_edit {theme::BTN_HOVER}else{theme::BTN})
+        };
         if self.todo_choosing{paint::close(&edc,135.0,109.0,3.5,theme::WHITE);}else{paint::pencil(&edc,135.0,109.0,11.0,theme::WHITE);}
         edc.text(145.0, 112.5, if self.todo_choosing{"取消"}else{"改一下"}, size::BODY, W::Regular, theme::WHITE, H::Left);
 
-        c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
+        if glassy {paint::glass_chip(c,196.0,31.0,181.0,93.0,12.0,0.05);}
+        else {c.fill(196.0,31.0,181.0,93.0,12.0,theme::CARD);}
         let editing = self.adding || self.editing.is_some();
         if count == 0 && !editing {
             paint::checklist(c, 286.5, 64.0, 32.0, Color32::from_gray(150), Color32::from_rgb(52, 54, 58));
@@ -1230,12 +1325,16 @@ impl App {
         Rect::from_min_max(Pos2::new(left,54.0),Pos2::new(380.0,122.0))
     }
     pub(crate) fn page_mail(&mut self, c: &Card, _env: &Env, cmds: &mut Vec<Cmd>) {
+        let glassy=self.glassy();
         if self.mail.accounts.is_empty() {
             c.text(42.0, 60.0, "还没有邮箱", 13.0, W::Bold, theme::WHITE, H::Left);
             let hint = c.fit("在设置 → 邮箱里添加；授权码只存进系统凭据管理器", 10.5, W::Regular, 344.0);
             c.text(42.0, 77.0, &hint, 10.5, W::Regular, theme::GRAY, H::Left);
-            let (go, gc) = capsule(c, 42.0, 88.0, 84.0, 26.0, "mail-setup", theme::BTN, theme::BTN_HOVER);
-            gc.text(58.0, 105.0, "去添加", size::BODY, W::Regular, theme::WHITE, H::Left);
+            let (go, gc) = paint::material_capsule(c,42.0,88.0,84.0,26.0,"mail-setup",theme::BTN,theme::BTN_HOVER,
+                glassy.then_some((self.glass_controls_ready(),0.16,0.42)),
+                #[cfg(all(windows, feature = "sdk-material"))] ControlRole::MailSetup);
+            let (x,align)=if glassy {(84.0,H::Center)}else{(58.0,H::Left)};
+            gc.text(x,105.0,"去添加",size::BODY,W::Regular,theme::WHITE,align);
             if go.clicked() {
                 self.open_mail_settings();
             }
@@ -1259,7 +1358,8 @@ impl App {
         }
         let code=self.visible_mail_code().cloned();
         if let Some(raw)=&code {
-            c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);
+            if glassy {paint::glass_chip(c,36.0,36.0,140.0,86.0,11.0,0.05);}
+            else {c.fill(36.0,36.0,140.0,86.0,11.0,theme::CARD);}
             let hidden=self.mail_code_hidden(raw);
             let item=self.display_mail(raw);
             let value=item.code.as_deref().unwrap_or("••••••");
@@ -1421,8 +1521,8 @@ impl App {
                 }
             }
         });
-        if c.live {self.content_scroll=Some((scroll.id,scroll.state.offset.y));}
 
+        if c.live {self.content_scroll=Some((scroll.id,scroll.state.offset.y));}
         if !self.mail.manage.message.is_empty(){
             c.text(46.0,229.0,&c.fit(&self.mail.manage.message,8.0,W::Regular,130.0),8.0,W::Regular,theme::GRAY,H::Left);
             c.hit(44.0,219.0,132.0,15.0,"mail-detail-status").on_hover_text(&self.mail.manage.message);

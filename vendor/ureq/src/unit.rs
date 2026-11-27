@@ -481,7 +481,10 @@ fn request_path(agent: &Agent, url: &Url) -> String {
 }
 
 fn is_header_sensitive(header: &Header) -> bool {
-    header.is_name("Authorization") || header.is_name("Cookie") || header.is_name("X-QW-Api-Key")
+    header.sensitive
+        || header.is_name("Authorization")
+        || header.is_name("Cookie")
+        || header.is_name("X-QW-Api-Key")
 }
 
 struct PreludeBuilder {

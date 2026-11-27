@@ -1,0 +1,29 @@
+{
+  "id": "cayww.liquid-glass",
+  "name": "液态玻璃",
+  "author": "轻九九九（@cayww）",
+  "version": "1.0.2",
+  "api": 1,
+  "runtime": "material",
+  "entry": "material.wgsl",
+  "cover": "cover.png",
+  "owner": "appearance",
+  "capabilities": ["appearance.material", "settings"],
+  "dataVersion": 1,
+  "permissions": {"screen.backdrop": true},
+  "material": {
+    "controls": true,
+    "spring": {"stiffness": 1.0, "damping": 0.5},
+    "shadow": 1.0,
+    "foreground": "glass"
+  },
+  "settings": [
+    {"key": "refract", "label": "折射", "type": "number", "min": 0, "max": 120, "step": 1, "default": "48", "unit": "px", "precision": 0},
+    {"key": "chroma", "label": "色散", "type": "number", "min": 0, "max": 30, "step": 1, "default": "8", "unit": "px", "precision": 0},
+    {"key": "blur", "label": "内部模糊", "type": "number", "min": 0, "max": 4, "step": 0.1, "default": "1.5", "unit": "px", "precision": 1},
+    {"key": "band", "label": "折射带宽", "type": "number", "min": 10, "max": 140, "step": 1, "default": "87", "unit": "px", "precision": 0},
+    {"key": "edge-width", "label": "白边宽度", "type": "number", "min": 0, "max": 4, "step": 0.1, "default": "1.5", "unit": "px", "precision": 1},
+    {"key": "edge-opacity", "label": "白边不透明度", "type": "number", "min": 0, "max": 1, "step": 0.01, "default": "0.9", "precision": 2},
+    {"key": "morph", "label": "形变", "type": "number", "min": 0, "max": 3, "step": 0.01, "default": "1.0", "precision": 2}
+  ]
+}

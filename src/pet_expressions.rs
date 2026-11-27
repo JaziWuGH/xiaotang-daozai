@@ -14,6 +14,10 @@ pub(crate) enum Expression {
 impl Expression {
     pub const ALL:[Self;12]=[Self::Wink,Self::Smug,Self::Blush,Self::Delighted,Self::SideGlance,Self::Praised,
         Self::Heart,Self::Giggle,Self::ShyPeek,Self::Scan,Self::Peek,Self::Search];
+    #[cfg(feature="sdk-js")]
+    pub(crate) fn key(self)->&'static str {
+        ["wink","smug","blush","delighted","side-glance","praised","heart","giggle","shy-peek","scan","peek","search"][self as usize]
+    }
     fn times(self)->[f32;16] {
         if self as usize>=9 {[0.35,0.13,0.15,0.18,0.35,0.28,0.16,0.11,0.11,0.16,0.35,0.28,0.16,0.14,0.20,0.35]}
         else {[0.35,0.12,0.12,0.12,0.13,0.13,0.14,0.40,0.18,0.14,0.12,0.12,0.12,0.14,0.14,0.45]}
@@ -38,6 +42,9 @@ impl Expression {
     }
 }
 
+#[cfg(feature="sdk-js")]
+pub(crate) type ExpressionSheets = [Option<Vec<u8>>; Expression::ALL.len()];
+
 pub(crate) struct Expressions {
     clip:Option<(Expression,f32)>,
     wait:f32,
@@ -46,13 +53,38 @@ pub(crate) struct Expressions {
     next:[usize;4],
     /// 正在播放的表情序列图；换表情或换皮肤时原地替换内容，播完释放。
     sheet:Option<(Expression,Option<Palette>,TextureHandle)>,
+    #[cfg(feature="sdk-js")]
+    plugin_sheets:Option<std::sync::Arc<ExpressionSheets>>,
 }
 
 impl Default for Expressions {
-    fn default()->Self {Self{clip:None,wait:8.0,cooldown:0.0,hovered:false,next:[0;4],sheet:None}}
+    fn default()->Self {
+        Self{clip:None,wait:8.0,cooldown:0.0,hovered:false,next:[0;4],sheet:None,
+            #[cfg(feature="sdk-js")]
+            plugin_sheets:None,
+        }
+    }
 }
 
 impl Expressions {
+    #[cfg(feature="sdk-js")]
+    pub(crate) fn set_sheets(&mut self,sheets:Option<std::sync::Arc<ExpressionSheets>>) {
+        let unchanged=match (&self.plugin_sheets,&sheets) {
+            (None,None)=>true,
+            (Some(a),Some(b))=>std::sync::Arc::ptr_eq(a,b),
+            _=>false,
+        };
+        if !unchanged {self.plugin_sheets=sheets;self.sheet=None;}
+    }
+
+    fn sheet_bytes(&self,expression:Expression)->&[u8] {
+        #[cfg(feature="sdk-js")]
+        if let Some(sheet)=self.plugin_sheets.as_ref().and_then(|sheets|sheets[expression as usize].as_deref()) {
+            return sheet;
+        }
+        expression.sheet()
+    }
+
     pub fn current(&self)->Option<Expression> {self.clip.map(|clip|clip.0)}
     pub fn play(&mut self,expression:Expression) {self.clip=Some((expression,0.0));}
     pub fn play_at(&mut self,expression:Expression,time:f32) {self.clip=Some((expression,time));}
@@ -93,7 +125,8 @@ impl Expressions {
     pub fn draw(&mut self,c:&Card,cx:f32,palette:Option<Palette>)->bool {
         let Some((expression,time))=self.clip else{return false;};
         if self.sheet.as_ref().is_none_or(|(previous,previous_palette,_)|(*previous,*previous_palette)!=(expression,palette)) {
-            let decoded=image::load_from_memory(expression.sheet()).expect("内置表情序列图").into_rgba8();
+            let decoded=image::load_from_memory_with_format(self.sheet_bytes(expression),image::ImageFormat::Png)
+                .expect("已校验的表情序列图").into_rgba8();
             let mut image=egui::ColorImage::from_rgba_unmultiplied([decoded.width() as usize,decoded.height() as usize],decoded.as_raw());
             drop(decoded);
             if let Some(palette)=palette {for pixel in &mut image.pixels {if pixel.a()>0 {*pixel=crate::skin_paint::map_color(*pixel,&palette);}}}

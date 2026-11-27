@@ -4,7 +4,8 @@ use super::windows::*;
 use windows::{core::{w,PCWSTR},Win32::{Foundation::{HWND,LPARAM,WPARAM},System::{Registry::{HKEY_CLASSES_ROOT,HKEY_CURRENT_USER},Threading::{OpenProcess,PROCESS_QUERY_LIMITED_INFORMATION}},UI::WindowsAndMessaging::*}};
 use std::path::PathBuf;
 
-pub(crate) const ADAPTER:NativeAdapter=NativeAdapter{paths,main_frame,accounts:Some(accounts),ready,strict_window:true,open,taskbar:None};
+pub(crate) const ADAPTER:NativeAdapter=NativeAdapter{paths,main_frame,accounts:Some(accounts),ready,strict_window:true,
+    open:|target,paths,allow_tray|open(target.unread,paths,allow_tray).map(|_|target),taskbar:None};
 fn main_frame(class:&str,style:u32,extended:u32)->bool{matches!(class,"Chrome_WidgetWin_1"|"TXGuiFoundation") && frame_style(class,style,extended)}
 fn open(unread:Unread,paths:&[String],_:bool)->Result<(),OpenError>{unsafe{
     let window=HWND(unread.window as *mut _);

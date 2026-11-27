@@ -220,12 +220,16 @@ impl Cache {
             match read_slice(key.0,&key.1,&mut state,SLICE) {
                 Step::Found(value,base)=>{
                     log_scan(&key.1,"命中",&state,self.failures+1);
+                    super::music_compat::set("KuGou.exe",super::music_compat::Item::Duration,super::music_compat::Support::Ok);
                     self.value=Some(value);self.hint=Some((key.0,base));
                 }
                 Step::Pending=>self.scan=Some(state),
                 Step::Done=>{
                     self.failures+=1;self.checked=Some(Instant::now());self.resume=state.cursor;
                     log_scan(&key.1,"未找到",&state,self.failures);
+                    if self.failures>=RETRY.len() {
+                        super::music_compat::set("KuGou.exe",super::music_compat::Item::Duration,super::music_compat::Support::Unavailable("这首歌在酷狗内存里没有找到时长".into()));
+                    }
                 }
             }
             // 扫描期间可能已切歌，每一片之后都重新核对一次窗口。

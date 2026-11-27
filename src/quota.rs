@@ -14,8 +14,6 @@ mod claude;
 pub(crate) mod workbuddy;
 #[path="deepseek_quota.rs"]
 pub(crate) mod deepseek;
-#[path="zcode_quota.rs"]
-pub(crate) mod zcode;
 #[path="plan_quota.rs"]
 pub(crate) mod plans;
 #[path="relay_quota.rs"]
@@ -24,10 +22,13 @@ pub(crate) mod relay;
 pub(crate) mod api;
 #[path="kiro_quota.rs"]
 pub(crate) mod kiro;
+#[path="antigravity_quota/mod.rs"]
+pub(crate) mod antigravity;
 #[path="native_auth.rs"]
 mod native_auth;
 
 pub struct Discovery {pub added:usize,pub notes:Vec<String>}
+pub(crate) const ZCODE_RECONNECT:&str="请用 GLM Coding Plan 套餐 Key 重新连接。ZCode 体验额度可在官方客户端查看。";
 impl Discovery {
     pub fn message(&self)->String{
         let mut text=if self.added>0{format!("新增 {} 个账号",self.added)}else{"未发现新的本机账号".into()};
@@ -36,10 +37,10 @@ impl Discovery {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom }
+pub enum Provider { #[default] Codex, Claude, Kimi, GrokBot, Gemini, ZCode, WorkBuddy, DeepSeek, OpenCodeGo, MiniMax, Glm, NewApi, OneApi, Sub2Api, Kiro, Doubao, RelayGeneral, RelayCustom, Antigravity }
 impl Provider {
-    pub const ALL: [Self; 18] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom];
-    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::RelayGeneral=>"通用余额",Self::RelayCustom=>"自定义查询"} }
+    pub const ALL: [Self; 19] = [Self::Codex, Self::Claude, Self::Kimi, Self::GrokBot, Self::Gemini, Self::ZCode, Self::WorkBuddy, Self::DeepSeek, Self::OpenCodeGo, Self::MiniMax, Self::Glm, Self::NewApi, Self::OneApi, Self::Sub2Api, Self::Kiro, Self::Doubao, Self::RelayGeneral, Self::RelayCustom, Self::Antigravity];
+    pub fn name(self) -> &'static str { match self {Self::Codex=>"Codex",Self::Claude=>"Claude",Self::Kimi=>"Kimi",Self::GrokBot=>"Grok Bot",Self::Gemini=>"Gemini",Self::ZCode=>"ZCode",Self::WorkBuddy=>"WorkBuddy",Self::DeepSeek=>"DeepSeek",Self::OpenCodeGo=>"OpenCode Go",Self::MiniMax=>"MiniMax",Self::Glm=>"GLM",Self::NewApi=>"New API",Self::OneApi=>"One API",Self::Sub2Api=>"Sub2API",Self::Kiro=>"Kiro",Self::Doubao=>"豆包",Self::RelayGeneral=>"通用余额",Self::RelayCustom=>"自定义查询",Self::Antigravity=>"Antigravity"} }
     pub fn api_key(self)->bool{matches!(self,Self::OpenCodeGo|Self::MiniMax|Self::Glm)||self.relay()}
     pub fn relay(self)->bool{matches!(self,Self::NewApi|Self::OneApi|Self::Sub2Api|Self::RelayGeneral|Self::RelayCustom)}
     pub fn balance(self)->bool{matches!(self,Self::WorkBuddy|Self::DeepSeek)||self.relay()}
@@ -55,9 +56,51 @@ impl Accent {
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Account {pub id:String, pub provider:Provider, pub alias:String, pub source:PathBuf, pub slot:Option<String>, pub enabled:bool, pub pinned:bool}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RelayIcon {
+    #[default]
+    Key,
+    Layers,
+    Plane,
+    Bolt,
+    Link,
+    Arrows,
+    Box,
+}
+impl RelayIcon {
+    pub(crate) const ALL: [Self; 7] = [
+        Self::Key, Self::Layers, Self::Plane, Self::Bolt, Self::Link, Self::Arrows, Self::Box,
+    ];
+
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Layers => "layers",
+            Self::Plane => "plane",
+            Self::Bolt => "bolt",
+            Self::Link => "link",
+            Self::Arrows => "arrows",
+            Self::Box => "box",
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Key => "默认钥匙",
+            Self::Layers => "叠层",
+            Self::Plane => "纸飞机",
+            Self::Bolt => "闪电",
+            Self::Link => "连接",
+            Self::Arrows => "双向箭头",
+            Self::Box => "方盒",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>}
-impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new()}}}
+pub struct Config {pub enabled:bool, pub compact:bool, pub selected:String, pub accounts:Vec<Account>, pub colors:HashMap<String,Accent>, pub(crate) relay_icons:HashMap<String,RelayIcon>}
+impl Default for Config {fn default()->Self {Self{enabled:true,compact:true,selected:String::new(),accounts:vec![],colors:HashMap::new(),relay_icons:HashMap::new()}}}
 impl Config {
     pub fn load()->Self {
         let path=crate::model::config_dir().join("ai-quota.json");
@@ -65,13 +108,31 @@ impl Config {
         serde_json::from_slice(&raw).ok().map(|v|Self::from_json(&v)).unwrap_or_default()
     }
     fn from_json(v:&Value)->Self {
-        let accounts=v["accounts"].as_array().into_iter().flatten().filter_map(|a|Some(Account{
+        let accounts:Vec<_>=v["accounts"].as_array().into_iter().flatten().filter_map(|a|Some(Account{
             id:a["id"].as_str()?.into(),provider:Provider::parse(a["provider"].as_str()?)?,alias:a["alias"].as_str()?.into(),source:PathBuf::from(a["source"].as_str()?),slot:a["slot"].as_str().map(str::to_owned),enabled:a["enabled"].as_bool().unwrap_or(true),pinned:a["pinned"].as_bool().unwrap_or(false)
         })).collect();
         let colors=v["colors"].as_object().into_iter().flatten().filter_map(|(id,value)|{let color=Accent::parse(value.as_str()?);(color!=Accent::Brand).then(||(id.clone(),color))}).collect();
-        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors}
+        let relay_icons=accounts.iter().filter(|a|a.provider.relay()).filter_map(|a|{
+            let key=v["relay_icons"][a.id.as_str()].as_str()?;
+            let icon=RelayIcon::ALL.into_iter().find(|icon|icon.key()==key && *icon!=RelayIcon::Key)?;
+            Some((a.id.clone(),icon))
+        }).collect();
+        Self{enabled:v["enabled"].as_bool().unwrap_or(true),compact:v["compact"].as_bool().unwrap_or(true),selected:v["selected"].as_str().unwrap_or_default().into(),accounts,colors,relay_icons}
     }
-    fn json(&self)->Value {let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})}
+    fn json(&self)->Value {
+        let colors:serde_json::Map<String,Value>=self.colors.iter().map(|(id,color)|(id.clone(),json!(color.key()))).collect();
+        let relay_icons:serde_json::Map<String,Value>=self.relay_icons.iter().map(|(id,icon)|(id.clone(),json!(icon.key()))).collect();
+        json!({"enabled":self.enabled,"compact":self.compact,"selected":self.selected,"colors":colors,"relay_icons":relay_icons,"accounts":self.accounts.iter().map(|a|json!({"id":a.id,"provider":a.provider.name(),"alias":a.alias,"source":a.source,"slot":a.slot,"enabled":a.enabled,"pinned":a.pinned})).collect::<Vec<_>>()})
+    }
+    pub(crate) fn relay_icon(&self, account:&Account)->RelayIcon {
+        if account.provider.relay() {self.relay_icons.get(&account.id).copied().unwrap_or_default()}
+        else {RelayIcon::Key}
+    }
+    pub(crate) fn set_relay_icon(&mut self, account:&Account, icon:RelayIcon) {
+        if !account.provider.relay() {return;}
+        if icon==RelayIcon::Key {self.relay_icons.remove(&account.id);}
+        else {self.relay_icons.insert(account.id.clone(),icon);}
+    }
     pub fn save(&self) {let _=self.save_checked();}
     pub(crate) fn save_checked(&self)->Result<(),String>{
         let dir=crate::model::config_dir();fs::create_dir_all(&dir).map_err(|_|"无法创建额度配置目录")?;
@@ -80,7 +141,8 @@ impl Config {
     }
     pub fn add(&mut self,provider:Provider,alias:String,source:PathBuf)->Result<(),String>{
         if provider.api_key(){return Err("请使用 API Key 连接，无需登录 JSON".into());}
-        if provider==Provider::ZCode{return zcode::add(self,&source,&alias);}
+        if provider==Provider::ZCode{return Err(ZCODE_RECONNECT.into());}
+        if provider==Provider::Antigravity{return Err("请从当前 Antigravity CLI 登录连接".into());}
         if provider==Provider::Kiro{return kiro::add(self,&source,&alias);}
         if provider==Provider::WorkBuddy{return Err("请使用浏览器连接 WorkBuddy".into());}
         if provider==Provider::DeepSeek{return Err("请使用 API Key 连接 DeepSeek".into());}
@@ -113,6 +175,32 @@ impl Config {
         }
         let id=format!("WorkBuddy-{slot}");let pinned=true;
         self.selected=id.clone();self.accounts.push(Account{id:id.clone(),provider:Provider::WorkBuddy,alias,source:PathBuf::new(),slot:Some(slot),enabled:true,pinned});id
+    }
+    pub(crate) fn connect_antigravity(&mut self, alias: &str) -> Result<String, String> {
+        let source = antigravity::discover().ok_or(antigravity::CLI_MISSING)?;
+        Ok(self.bind_antigravity(alias, source))
+    }
+    fn bind_antigravity(&mut self, alias: &str, source: PathBuf) -> String {
+        let slot = Some(format!(
+            "cli-{}",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()
+        ));
+        if let Some(account) = self.accounts.iter_mut().find(|a| a.provider == Provider::Antigravity) {
+            account.source = source;
+            account.slot = slot;
+            if !alias.trim().is_empty() {
+                account.alias = alias.trim().into();
+            }
+            self.selected = account.id.clone();
+            return account.id.clone();
+        }
+        let id = "Antigravity-CLI".to_owned();
+        let alias = if alias.trim().is_empty() { "Antigravity".into() } else { alias.trim().into() };
+        self.selected = id.clone();
+        self.accounts.push(Account {
+            id: id.clone(), provider: Provider::Antigravity, alias, source, slot, enabled: true, pinned: false,
+        });
+        id
     }
     pub(crate) fn connect_gemini(&mut self,slot:String,alias:String)->String{
         if let Some(a)=self.accounts.iter_mut().find(|a|a.provider==Provider::Gemini && a.slot.as_deref()==Some(&slot)){
@@ -159,7 +247,6 @@ impl Config {
         candidates.extend(self.accounts.iter().filter(|a|matches!(a.provider,Provider::Codex|Provider::Kimi)||(a.provider==Provider::Claude&&a.slot.is_none())).map(|a|(a.provider,a.source.clone())));
         let before=self.accounts.len();
         let mut notes=self.discover_files(&candidates);
-        if let Some(path)=zcode::path().filter(|p|p.is_file()){if let Err(e)=zcode::add(self,&path,""){notes.push(e);}}
         if let (Some(roaming),Some(local))=(std::env::var_os("APPDATA"),std::env::var_os("LOCALAPPDATA")){
             for path in claude::paths(Path::new(&roaming),Path::new(&local)){
                 if claude::is_desktop(&path){if let Err(error)=self.import_claude(&path,""){notes.push(error);}}
@@ -224,18 +311,23 @@ impl Amount {
 fn number_text(v:f64)->String{let digits=if v<1.0{2}else{1};let factor=10f64.powi(digits);let rounded=(v*factor).round()/factor;if rounded>=1000.0||rounded.fract()==0.0{format!("{rounded:.0}")}else{format!("{rounded:.digits$}",digits=digits as usize)}}
 impl Window {
     /// 剩余量的书面写法：数值型额度给出“剩余 / 总额”，其余给出百分比。
-    pub fn value_text(&self)->String{self.amount.as_ref().map(Amount::full).unwrap_or_else(||format!("{:.0}%",self.remaining))}
+    pub fn value_text(&self)->String{self.amount.as_ref().map(Amount::full).unwrap_or_else(||{
+        if self.remaining>0.0 && self.remaining<1.0{"<1%".into()}else{format!("{:.0}%",self.remaining)}
+    })}
     /// 一句话额度摘要，用于小岛提示与设置页。
     pub fn summary(&self)->String{format!("{}剩余 {}",self.label,self.value_text())}
 }
 #[derive(Clone, Debug, Default)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Snapshot {#[serde(default)]pub kiro:Option<kiro::Details>,pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)] pub relay:Option<relay::Quota>}
+pub struct Snapshot {#[serde(default)]pub kiro:Option<kiro::Details>,pub plan:String,pub windows:Vec<Window>,pub extra:Vec<Window>,pub at:i64,pub wallet:Option<deepseek::Wallet>,pub credits:Option<workbuddy::Credits>,#[serde(default)] pub relay:Option<relay::Quota>,#[serde(default,skip_serializing_if="Option::is_none")] pub antigravity:Option<antigravity::Details>}
 impl Account {
+    pub(crate) fn can_refresh(&self)->bool{self.enabled&&self.provider!=Provider::ZCode}
+
     pub(crate) fn cache_identity_marker(&self)->Value {
         if claude::is_desktop(&self.source){json!(2)}else{json!(true)}
     }
     pub(crate) fn cached_snapshot(&self,cache:&Value)->Option<Snapshot>{
+        if matches!(self.provider,Provider::ZCode|Provider::Antigravity){return None;}
         let entry=&cache[&self.id];
         if entry["provider"].as_str()!=Some(self.provider.name()) || entry["slot"].as_str()!=self.slot.as_deref(){return None;}
         if self.provider.api_key() && entry["source"].as_str()!=self.source.to_str(){return None;}
@@ -246,7 +338,16 @@ impl Account {
     }
 }
 impl Snapshot {
-    pub fn rings(&self)->Vec<&Window>{let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all}
+    pub(crate) fn antigravity_windows(&self) -> Vec<&Window> {
+        let mut all: Vec<_> = self.windows.iter().chain(&self.extra).collect();
+        all.sort_by(|a,b| a.remaining.total_cmp(&b.remaining)
+            .then_with(|| a.seconds.unwrap_or(i64::MAX).cmp(&b.seconds.unwrap_or(i64::MAX))));
+        all
+    }
+    pub fn rings(&self)->Vec<&Window>{
+        if self.antigravity.is_some(){return self.antigravity_windows().into_iter().take(2).collect();}
+        let mut all:Vec<_>=self.windows.iter().collect();all.sort_by_key(|w|w.seconds.unwrap_or(i64::MAX));all.truncate(2);all
+    }
 }
 fn number(v:&Value)->Option<f64>{v.as_f64().or_else(||v.as_str()?.parse().ok()).filter(|n|n.is_finite())}
 fn reset(v:&Value)->Option<i64>{v.as_i64().filter(|n|*n>0).or_else(||chrono::DateTime::parse_from_rfc3339(v.as_str()?).ok().map(|d|d.timestamp()))}
@@ -328,7 +429,7 @@ pub struct Event {pub id:String,pub result:Result<Snapshot,String>}
 #[derive(Default)]
 struct Pending {accounts:Option<Vec<Account>>,running:bool,cooldowns:HashMap<(String,Option<String>,PathBuf),(Instant,String)>}
 type PendingAccounts = std::sync::Arc<std::sync::Mutex<Pending>>;
-fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi|Provider::RelayGeneral|Provider::RelayCustom=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,_=>0}}
+fn service_group(provider:Provider)->usize{match provider{Provider::DeepSeek=>1,Provider::WorkBuddy=>2,Provider::OpenCodeGo=>3,Provider::MiniMax=>4,Provider::Glm=>5,Provider::NewApi|Provider::RelayGeneral|Provider::RelayCustom=>6,Provider::OneApi=>7,Provider::Sub2Api=>8,Provider::Kiro=>9,Provider::Antigravity=>10,_=>0}}
 struct Worker {pending:PendingAccounts,wake:mpsc::SyncSender<()>}
 pub struct Service {
     workers:HashMap<usize,Worker>,
@@ -339,8 +440,8 @@ impl Service {
     pub fn start()->Self{let(results,rx)=mpsc::channel();Self{workers:HashMap::new(),results,rx}}
     pub fn refresh(&mut self,accounts:Vec<Account>)->bool{self.refresh_with(accounts,fetch)}
     fn refresh_with(&mut self,accounts:Vec<Account>,run:impl Fn(&ureq::Agent,&Account)->Result<Snapshot,(String,u64)>+Clone+Send+'static)->bool{
-        let mut groups:Vec<Vec<Account>>=(0..10).map(|_|Vec::new()).collect();
-        for account in accounts.into_iter().filter(|account|account.enabled){groups[service_group(account.provider)].push(account);}
+        let mut groups:Vec<Vec<Account>>=(0..11).map(|_|Vec::new()).collect();
+        for account in accounts.into_iter().filter(Account::can_refresh){groups[service_group(account.provider)].push(account);}
         for (group,accounts) in groups.into_iter().enumerate(){
             if let Some(worker)=self.workers.get(&group){
                 let Ok(mut pending)=worker.pending.lock()else{return false;};
@@ -398,7 +499,7 @@ impl Service {
         None
     }
 }
-fn http_agent()->ureq::Agent{
+pub(crate) fn http_agent()->ureq::Agent{
     http_agent_with_connect_timeout(Duration::from_secs(30))
 }
 fn http_agent_with_connect_timeout(timeout:Duration)->ureq::Agent{
@@ -421,13 +522,14 @@ fn http_agent_with_connect_timeout(timeout:Duration)->ureq::Agent{
 fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     if account.provider.api_key(){return api::fetch(agent,account);}
     if account.provider==Provider::Claude{return claude::fetch(account).map_err(|e|(e,0));}
-    if account.provider==Provider::ZCode{return zcode::fetch(agent,account).map_err(|e|(e,60));}
+    if account.provider==Provider::ZCode{return Err((ZCODE_RECONNECT.into(),0));}
     if account.provider==Provider::WorkBuddy{return workbuddy::fetch(agent,account);}
     if account.provider==Provider::DeepSeek{return deepseek::fetch(agent,account);}
     if account.provider==Provider::GrokBot{return grok::fetch(agent,account);}
     if account.provider==Provider::Gemini{return gemini::fetch(agent,account);}
     if account.provider==Provider::Kiro{return kiro::fetch(agent,account);}
     if account.provider==Provider::Doubao{return doubao::fetch(agent,account);}
+    if account.provider==Provider::Antigravity{return antigravity::fetch(&account.source);}
     let url=match account.provider{Provider::Codex=>"https://chatgpt.com/backend-api/wham/usage",Provider::Kimi=>"https://api.kimi.com/coding/v1/usages",_=>unreachable!()};
     fetch_subscription_at(agent,account,url)
 }
@@ -455,6 +557,27 @@ fn fetch_subscription_at(agent:&ureq::Agent,account:&Account,url:&str)->Result<S
 
 #[cfg(test)] mod tests {
     use super::*;
+
+    #[test]
+    fn antigravity_reconnect_preserves_preferences_and_refuses_old_cache() {
+        let mut config = Config::default();
+        let id = config.bind_antigravity("当前 CLI", "agy.exe".into());
+        config.accounts[0].pinned = true;
+        config.accounts[0].enabled = false;
+        config.colors.insert(id.clone(), Accent::Blue);
+        config.accounts[0].slot = Some("old-connection".into());
+        assert_eq!(config.bind_antigravity("", "new-path/agy.exe".into()), id);
+        let account = &config.accounts[0];
+        assert_eq!(config.accounts.len(), 1);
+        assert_eq!(account.alias, "当前 CLI");
+        assert!(account.pinned && !account.enabled);
+        assert_ne!(account.slot.as_deref(), Some("old-connection"));
+        assert_eq!(config.colors[&id], Accent::Blue);
+        assert_eq!(Config::from_json(&config.json()), config);
+        let cache = json!({(id): {"provider": "Antigravity", "slot": account.slot, "source": account.source,
+            "snapshot": Snapshot { at: 1, ..Default::default() }}});
+        assert!(account.cached_snapshot(&cache).is_none());
+    }
     #[test]
     fn kimi_expired_login_recovers_on_the_next_poll() {
         use std::io::{BufRead, BufReader, Write};
@@ -576,12 +699,22 @@ fn fetch_subscription_at(agent:&ureq::Agent,account:&Account,url:&str)->Result<S
         assert!(config.json().get("manual_resets").is_none(),"保存配置不应继续保留已撤回的手动时间");
         assert_eq!(Config::from_json(&config.json()),config);
     }
-    #[test] #[ignore="连接本机 ZCode 并只读核验套餐"]
-    fn zcode_connect_local(){
-        let mut config=Config::load();let path=zcode::path().unwrap();
-        zcode::add(&mut config,&path,"").unwrap();config.save();
-        let a=config.accounts.iter().find(|a|a.provider==Provider::ZCode).unwrap();
-        match zcode::fetch(&http_agent(),a){Ok(s)=>println!("ZCode 返回 {} 个周期",s.windows.len()),Err(msg)=>println!("ZCode 查询状态：{msg}")}
+    #[test]
+    fn legacy_zcode_config_stays_editable_without_reading_login_or_refreshing(){
+        let legacy=json!({"accounts":[{"id":"old","provider":"ZCode","alias":"个人","source":"synthetic/credentials.json","slot":"old-reference","enabled":true,"pinned":true}],"selected":"old","colors":{"old":"gold"}});
+        let mut config=Config::from_json(&legacy);
+        let original=config.clone();
+        let account=&original.accounts[0];
+        assert_eq!(Config::from_json(&config.json()),original);
+        let cache=json!({"old":{"provider":"ZCode","slot":"old-reference","snapshot":Snapshot{at:1900000000,..Default::default()}}});
+        assert!(account.cached_snapshot(&cache).is_none());
+        let mut service=Service::start();
+        assert!(service.refresh_with(original.accounts,|_,_|panic!("旧 ZCode 账号不应创建查询任务")));
+        assert!(service.workers.is_empty());
+        let agent=ureq::AgentBuilder::new().middleware(|_:ureq::Request,_:ureq::MiddlewareNext|panic!("旧 ZCode 账号不应发请求")).build();
+        assert_eq!(fetch(&agent,&config.accounts[0]).unwrap_err().0,ZCODE_RECONNECT);
+        assert_eq!(config.add(Provider::ZCode,String::new(),"synthetic/credentials.json".into()).unwrap_err(),ZCODE_RECONNECT);
+        assert_eq!(config,Config::from_json(&legacy));
     }
     #[test]
     #[ignore="只读验证本机开启的 AI 账号"]
@@ -692,5 +825,29 @@ fn fetch_subscription_at(agent:&ureq::Agent,account:&Account,url:&str)->Result<S
         assert!(parse(Provider::Kimi,&json!({})).unwrap_err().contains("已登录"));
     }
     #[test] fn claude_null_window_and_kimi_string_numbers(){let c=parse(Provider::Claude,&json!({"five_hour":null,"seven_day":{"utilization":60,"resets_at":"2030-01-01T12:00:00Z"}})).unwrap();assert_eq!(c.rings().len(),1);assert!(c.windows[0].reset.is_some());let k=parse(Provider::Kimi,&json!({"usage":{"limit":"100","remaining":"70"},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"limit":"20","used":"5"}}]})).unwrap();assert_eq!(k.rings().len(),2);assert_eq!(k.rings()[0].remaining,75.0);}
+    #[test]
+    fn relay_icon_preferences_are_per_account_and_compatible_with_old_config() {
+        let legacy=json!({"accounts":[
+            {"id":"a","provider":"New API","alias":"日常","source":"https://daily.example"},
+            {"id":"b","provider":"New API","alias":"备用","source":"https://backup.example"},
+            {"id":"c","provider":"Codex","alias":"本机","source":"auth.json"}
+        ]});
+        let mut config=Config::from_json(&legacy);
+        let accounts=config.accounts.clone();
+        assert!(accounts.iter().all(|account|config.relay_icon(account)==RelayIcon::Key));
+        config.set_relay_icon(&accounts[0],RelayIcon::Plane);
+        config.set_relay_icon(&accounts[1],RelayIcon::Arrows);
+        config.set_relay_icon(&accounts[2],RelayIcon::Box);
+        let mut saved=config.json();
+        assert_eq!(Config::from_json(&saved),config);
+        assert!(saved["relay_icons"]["c"].is_null());
+        saved["relay_icons"]["b"]=json!("unknown");
+        let mut restored=Config::from_json(&saved);
+        assert_eq!(restored.relay_icon(&accounts[0]),RelayIcon::Plane);
+        assert_eq!(restored.relay_icon(&accounts[1]),RelayIcon::Key);
+        restored.set_relay_icon(&accounts[0],RelayIcon::Key);
+        assert!(restored.relay_icons.is_empty());
+    }
+
     #[test] fn multi_account_config_keeps_sources_and_selection_separate(){let mut c=Config::default();for n in 1..=2{c.accounts.push(Account{id:n.to_string(),provider:Provider::Codex,alias:format!("账号 {n}"),source:PathBuf::from(format!("profile-{n}/auth.json")),slot:None,enabled:true,pinned:true});}c.selected="2".into();let raw=c.json();assert_eq!(Config::from_json(&raw),c);assert_eq!(c.selected_index(),Some(1));assert_eq!(c.pinned_indices(),vec![0,1]);assert!(!raw.to_string().contains("access_token"));}
 }

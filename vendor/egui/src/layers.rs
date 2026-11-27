@@ -200,6 +200,22 @@ impl PaintList {
 pub struct GraphicLayers([IdMap<PaintList>; Order::COUNT]);
 
 impl GraphicLayers {
+    pub(crate) fn paint_bounds(&self, to_global: &ahash::HashMap<LayerId, TSTransform>) -> Rect {
+        let mut bounds = Rect::NOTHING;
+        for (order, layers) in Order::ALL.into_iter().zip(&self.0) {
+            for (&id, list) in layers {
+                let transform = to_global.get(&LayerId::new(order, id)).copied().unwrap_or(TSTransform::IDENTITY);
+                for clipped in list.all_entries() {
+                    let rect = clipped.shape.visual_bounding_rect().intersect(clipped.clip_rect);
+                    if rect.is_positive() {
+                        bounds = bounds.union(transform * rect);
+                    }
+                }
+            }
+        }
+        bounds
+    }
+
     /// Get or insert the [`PaintList`] for the given [`LayerId`].
     pub fn entry(&mut self, layer_id: LayerId) -> &mut PaintList {
         self.0[layer_id.order as usize]

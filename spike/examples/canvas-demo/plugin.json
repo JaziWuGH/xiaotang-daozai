@@ -1,0 +1,20 @@
+{
+  "id": "example.canvas-demo",
+  "name": "画布图元",
+  "titleAccent": "图元",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "status",
+  "capabilities": ["status.page", "status.canvas"],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [],
+  "statusLayout": {
+    "components": [{"type": "canvas"}, {"type": "summary"}],
+    "style": {"accent": "#347F69", "surface": "plain"}
+  }
+}

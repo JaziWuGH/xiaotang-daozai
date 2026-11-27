@@ -312,6 +312,14 @@ impl Request {
         self
     }
 
+    /// 设置请求头，调试输出会隐藏它的值。
+    pub fn set_sensitive(mut self, header: &str, value: &str) -> Self {
+        let mut header = Header::new(header, value);
+        header.sensitive = true;
+        header::add_header(&mut self.headers, header);
+        self
+    }
+
     /// Returns the value for a set header.
     ///
     /// ```

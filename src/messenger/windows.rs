@@ -8,9 +8,12 @@ use windows::{core::{w,PCWSTR,PWSTR},Win32::{
     UI::WindowsAndMessaging::*,
 }};
 
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub(crate) struct TaskbarNotice {pub(crate) pid:u32,pub(crate) window:isize,pub(crate) started:Option<u64>}
+
 pub(crate) trait TaskbarSource {
     fn registered(&self)->bool;
-    fn take(&self)->Vec<(u32,isize)>;
+    fn take(&self)->Vec<TaskbarNotice>;
     fn forget(&self,pid:u32);
 }
 pub(crate) struct NativeAdapter {
@@ -19,7 +22,7 @@ pub(crate) struct NativeAdapter {
     pub accounts:Option<fn(&[String])->Option<Vec<Target>>>,
     pub ready:fn(Target)->bool,
     pub strict_window:bool,
-    pub open:fn(Unread,&[String],bool)->Result<(),OpenError>,
+    pub open:fn(Target,&[String],bool)->Result<Target,OpenError>,
     pub taskbar:Option<fn(eframe::egui::Context)->Result<Box<dyn TaskbarSource>,String>>,
 }
 pub(crate) fn client_paths(source:Messenger)->Vec<String>{(source.adapter().native.paths)()}
@@ -42,8 +45,8 @@ pub(crate) fn describe_window(window:HWND)->String{unsafe{
     format!("{:#x} {}{}{} 进程 {}",window.0 as usize,class_name(window),
         if IsWindowVisible(window).as_bool(){""}else{" 隐藏"},if IsIconic(window).as_bool(){" 最小化"}else{""},window_pid(window))
 }}
-fn wake_line(head:&str,steps:&[String],result:&Result<(),OpenError>,elapsed:Duration)->String{
-    let outcome=match result{Ok(())=>"已发出打开请求".to_string(),Err(error)=>format!("失败 {error:?}")};
+fn wake_line(head:&str,steps:&[String],error:Option<&OpenError>,elapsed:Duration)->String{
+    let outcome=match error{None=>"已发出打开请求".to_string(),Some(error)=>format!("失败 {error:?}")};
     let steps=if steps.is_empty(){"-".to_string()}else{steps.join(" → ")};
     format!("{head} → {steps} → 结果:{outcome} 用时{}ms",elapsed.as_millis())
 }
@@ -119,7 +122,10 @@ pub(crate) fn window_pid(hwnd:HWND)->u32{
 }
 
 pub(crate) unsafe fn foreground_main_pid(source:Messenger,paths:&[String])->Option<u32>{
-    let hwnd=GetForegroundWindow();
+    main_pid_at_window(GetForegroundWindow(),source,paths)
+}
+
+unsafe fn main_pid_at_window(hwnd:HWND,source:Messenger,paths:&[String])->Option<u32>{
     if IsIconic(hwnd).as_bool() || !visible_main_frame(hwnd,source) || !matches(hwnd,paths){return None;}
     if Messenger::OFFICE.contains(&source) && !super::desktop::main_window(hwnd,source){return None;}
     let pid=window_pid(hwnd);
@@ -162,10 +168,6 @@ pub(crate) fn ancestors(pid:u32,parents:&std::collections::HashMap<u32,u32>)->Ve
         match parents.get(&current){Some(&parent) if parent!=0 && parent!=current && parent!=pid && !chain.contains(&parent)=>{chain.push(parent);current=parent;},_=>break}
     }
     chain
-}
-
-pub(crate) fn foreground_client(sources:&[Messenger])->Option<(Messenger,u32)>{
-    sources.iter().find_map(|&source|unsafe{foreground_main_pid(source,&client_paths(source))}.map(|pid|(source,pid)))
 }
 
 pub(crate) fn class_name(hwnd:HWND)->String{
@@ -245,7 +247,7 @@ pub(crate) fn client_processes(source:Messenger)->Option<Vec<u32>>{
     }
 }
 
-pub enum TaskbarEvent {Status(Messenger,String),Message(Unread)}
+pub enum TaskbarEvent {Status(Messenger,String),Message(Unread,Option<Target>)}
 struct TaskbarEntry {client:Messenger,source:Option<Box<dyn TaskbarSource>>,retry:Option<Instant>,status:String}
 struct ToastEntry {client:Messenger,paths:Vec<String>,history:AccountHistory}
 pub struct ToastAccounts {entries:Vec<ToastEntry>}
@@ -281,15 +283,24 @@ impl Default for Runtime {
 }
 impl Runtime {
     pub fn foreground(&self,sources:&[Messenger])->Option<(Messenger,u32)>{
-        let (client,pid)=foreground_client(sources)?;
+        let window=unsafe{GetForegroundWindow()};
+        let account=sources.iter().find_map(|&client|{
+            self.foreground_at(window,client,&client_paths(client)).map(|pid|(client,pid))
+        })?;
+        (unsafe{GetForegroundWindow()}==window).then_some(account)
+    }
+    fn foreground_at(&self,window:HWND,client:Messenger,paths:&[String])->Option<u32>{
+        let pid=unsafe{main_pid_at_window(window,client,paths)}?;
         let pid=if client==Messenger::Qq{
-            let accounts=(client.adapter().native.accounts?)(&client_paths(client))?;
+            let accounts=(client.adapter().native.accounts?)(paths)?;
             self.qq_account_pid(pid,&accounts,&parent_processes())?
         }else{pid};
-        if client.adapter().keep_unidentified && !self.targets.values().any(|target|target.unread.source==client && target.unread.pid==pid){return None;}
-        if self.targets.values().filter(|target|target.unread.source==client && target.unread.pid==pid)
-            .any(|target|!(client.adapter().native.ready)(*target)){return None;}
-        Some((client,pid))
+        let mut targets=self.targets.values().copied().filter(|target|target.unread.source==client && target.unread.pid==pid).peekable();
+        if client.adapter().keep_unidentified && targets.peek().is_none(){return None;}
+        let ready=targets.all(|target|if Messenger::OFFICE.contains(&client){
+            super::desktop::matches_foreground(target,window,paths)
+        }else{(client.adapter().native.ready)(target)});
+        ready.then_some(pid)
     }
     fn qq_account_pid(&self,pid:u32,accounts:&[Target],parents:&HashMap<u32,u32>)->Option<u32>{
         let mut pids:Vec<_>=accounts.iter().filter(|target|target.unread.source==Messenger::Qq).map(|target|target.unread.pid).collect();
@@ -316,8 +327,9 @@ impl Runtime {
             };
             if entry.status!=status{entry.status=status.clone();events.push(TaskbarEvent::Status(entry.client,status));}
             if let Some(source)=&entry.source{
-                for (pid,window) in source.take().into_iter().filter(|(pid,_)|*pid!=0 || entry.client.adapter().keep_unidentified){
-                    events.push(TaskbarEvent::Message(Unread{source:entry.client,pid,window}));
+                for notice in source.take().into_iter().filter(|notice|notice.pid!=0 || entry.client.adapter().keep_unidentified){
+                    let unread=Unread{source:entry.client,pid:notice.pid,window:notice.window};
+                    events.push(TaskbarEvent::Message(unread,notice.started.map(|started|Target{unread,started})));
                 }
             }
         }
@@ -329,10 +341,37 @@ impl Runtime {
         for entry in &self.taskbar{if entry.client==client{if let Some(source)=&entry.source{source.forget(pid);}}}
     }
     pub fn track(&mut self,target:Target)->Result<(),OpenError>{
-        let process=check_target(target)?;
+        let process=check_process(target)?;
+        let unread=target.unread;
+        // 办公客户端的闪动已提供原进程代际。原窗口随后关闭时仍可登记，点击时再核对是否有唯一的替换主窗。
+        if unread.source.adapter().native.strict_window && (unread.window==0
+            || !Messenger::OFFICE.contains(&unread.source) && !original_window_exists(unread)){return Err(OpenError::Unavailable);}
         self.processes.insert(target.unread.pid,Some(process));self.targets.insert(target.unread,target);Ok(())
     }
-    pub fn track_unread(&mut self,unread:Unread)->Result<(),OpenError>{
+    pub fn register_taskbar(&mut self,unread:Unread,target:Option<Target>)->Option<Unread>{
+        if unread.pid==0{return Some(unread);}
+        if !Messenger::OFFICE.contains(&unread.source){
+            return (self.track_unread(unread)!=Err(OpenError::Exited)).then_some(unread);
+        }
+        // 无法将登记失败的闪动显示成已确认账号，也不能事后按 PID 重新认领一个进程。
+        match target.filter(|target|target.unread==unread).map_or(Err(OpenError::Unavailable),|target|self.track(target)){
+            Ok(())=>Some(unread),
+            Err(OpenError::Exited)=>None,
+            Err(error)=>{
+                if !cfg!(test){trace(format!("登记 {} 账号 {} · 窗口 {:#x}：{error:?}",unread.source.name(),unread.pid,unread.window));}
+                Some(Unread::of(unread.source))
+            }
+        }
+    }
+    pub fn replace_opened(&mut self,old:Unread,opened:Target)->Result<(),OpenError>{
+        let previous=self.targets.get(&old).ok_or(OpenError::Unavailable)?;
+        if old.source!=opened.unread.source || old.pid!=opened.unread.pid || previous.started!=opened.started
+            || original_window_exists(old) || !original_window_exists(opened.unread){return Err(OpenError::Unavailable);}
+        self.track(opened)?;
+        self.targets.remove(&old);
+        Ok(())
+    }
+    fn track_unread(&mut self,unread:Unread)->Result<(),OpenError>{
         use windows::Win32::System::Threading::PROCESS_SYNCHRONIZE;
         if unread.pid==0{return Err(OpenError::Unidentified);}
         let process=unsafe{OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_SYNCHRONIZE,false,unread.pid)}.map_err(process_error)?;
@@ -369,45 +408,57 @@ impl Runtime {
 fn process_error(error:windows::core::Error)->OpenError{
     if error.code()==windows::core::HRESULT::from_win32(windows::Win32::Foundation::ERROR_INVALID_PARAMETER.0){OpenError::Exited}else{OpenError::Unavailable}
 }
-fn check_target(target:Target)->Result<windows::core::Owned<windows::Win32::Foundation::HANDLE>,OpenError>{unsafe{
+fn check_process(target:Target)->Result<windows::core::Owned<windows::Win32::Foundation::HANDLE>,OpenError>{unsafe{
     use windows::Win32::{Foundation::{WAIT_OBJECT_0,WAIT_TIMEOUT},System::Threading::{WaitForSingleObject,PROCESS_SYNCHRONIZE}};
     let process=windows::core::Owned::new(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_SYNCHRONIZE,false,target.unread.pid).map_err(process_error)?);
     let started=process_started(*process).ok_or(OpenError::Unavailable)?;
-    if started!=target.started || WaitForSingleObject(*process,0)==WAIT_OBJECT_0{return Err(OpenError::Exited);}
-    if WaitForSingleObject(*process,0)!=WAIT_TIMEOUT{return Err(OpenError::Unavailable);}
-    if target.unread.source.adapter().native.strict_window{
-        let window=HWND(target.unread.window as *mut _);
-        if target.unread.window==0 || !IsWindow(window).as_bool() || window_pid(window)!=target.unread.pid{return Err(OpenError::Unavailable);}
-    }
+    let state=WaitForSingleObject(*process,0);
+    if started!=target.started || state==WAIT_OBJECT_0{return Err(OpenError::Exited);}
+    if state!=WAIT_TIMEOUT{return Err(OpenError::Unavailable);}
     Ok(process)
 }}
+fn original_window_exists(unread:Unread)->bool{
+    let window=HWND(unread.window as *mut _);
+    unsafe{IsWindow(window).as_bool() && window_pid(window)==unread.pid}
+}
+fn resolve_open_target(target:Target,paths:&[String])->Result<Target,OpenError>{
+    if !target.unread.source.adapter().native.strict_window || original_window_exists(target.unread){return Ok(target);}
+    if Messenger::OFFICE.contains(&target.unread.source){
+        if let Some(replacement)=super::desktop::rebuild_target(target,paths){
+            wake_step(format!("原主窗口已重建 · {:#x} → {:#x}",target.unread.window,replacement.unread.window));
+            return Ok(replacement);
+        }
+    }
+    wake_step("原窗口已失效，无法确认唯一的替换主窗");
+    Err(OpenError::Unavailable)
+}
 
 #[derive(Clone,Copy)]
 pub struct OpenRequest {unread:Unread,target:Option<Target>,allow_tray:bool}
 static OPEN:crate::resources::Lane=crate::resources::Lane::new("daozai-messenger-open",1);
 impl OpenRequest {
-    pub fn start(self,ctx:eframe::egui::Context)->Result<mpsc::Receiver<Result<(),OpenError>>,OpenError>{
+    pub fn start(self,ctx:eframe::egui::Context)->Result<mpsc::Receiver<Result<Target,OpenError>>,OpenError>{
         let lease=OPEN.acquire().ok_or(OpenError::Busy)?;
         if self.unread.unidentified(){return Err(OpenError::Unidentified);}
         let (tx,rx)=mpsc::channel();
         lease.spawn(move||{let _=tx.send(self.run());ctx.request_repaint();}).ok_or(OpenError::Unavailable)?;
         Ok(rx)
     }
-    fn run(self)->Result<(),OpenError>{self.run_with_paths(&client_paths(self.unread.source))}
-    pub(crate) fn run_with_paths(self,paths:&[String])->Result<(),OpenError>{
+    fn run(self)->Result<Target,OpenError>{self.run_with_paths(&client_paths(self.unread.source))}
+    pub(crate) fn run_with_paths(self,paths:&[String])->Result<Target,OpenError>{
         WAKE_STEPS.with(|steps|steps.borrow_mut().clear());
         let started=Instant::now();
         let head=format!("唤起 {} 账号 {} · 提醒窗口 {} · 允许托盘={}",
             self.unread.source.name(),self.unread.pid,describe_window(HWND(self.unread.window as *mut _)),self.allow_tray);
         let result=self.attempt(paths);
         let steps=WAKE_STEPS.with(|steps|std::mem::take(&mut *steps.borrow_mut()));
-        let line=wake_line(&head,&steps,&result,started.elapsed());
+        let line=wake_line(&head,&steps,result.as_ref().err(),started.elapsed());
         #[cfg(test)] LAST_WAKE.with(|last|*last.borrow_mut()=line.clone());
         // 测试时不写，免得把模拟数据混进用户的真实诊断日志。
         if !cfg!(test){trace(line);}
         result
     }
-    fn attempt(self,paths:&[String])->Result<(),OpenError>{
+    fn attempt(self,paths:&[String])->Result<Target,OpenError>{
         use windows::Win32::{Foundation::WAIT_OBJECT_0,System::Threading::WaitForSingleObject};
         let Some(target)=self.target else{
             wake_step("提醒未登记到账号进程");
@@ -416,10 +467,11 @@ impl OpenRequest {
         };
         if target.unread!=self.unread{wake_step("登记的账号与提醒不一致");return Err(OpenError::Unavailable);}
         // 句柄保留到整个唤起结束，不能因提醒被关闭而提前允许进程号复用。
-        let process=check_target(target).inspect_err(|error|wake_step(format!("账号进程检查未通过 {error:?}")))?;
+        let process=check_process(target).inspect_err(|error|wake_step(format!("账号进程检查未通过 {error:?}")))?;
+        let target=resolve_open_target(target,paths)?;
         let adapter=self.unread.source.adapter().native;
         if !(adapter.ready)(target){wake_step("客户端尚未就绪");return Err(OpenError::Unavailable);}
-        let result=(adapter.open)(self.unread,paths,self.allow_tray);
+        let result=(adapter.open)(target,paths,self.allow_tray);
         if unsafe{WaitForSingleObject(*process,0)==WAIT_OBJECT_0}{wake_step("唤起过程中账号进程已退出");Err(OpenError::Exited)}else{result}
     }
 }
@@ -432,7 +484,7 @@ fn validate_unread_with(unread:Unread,discover:impl FnMut(Messenger)->Option<Vec
 pub(crate) fn open_unread_with_paths(unread:Unread,paths:&[String])->Result<(),OpenError>{
     let mut runtime=Runtime::default();
     if unread.pid!=0{runtime.track_unread(unread)?;}
-    runtime.request(unread,&Settings::default()).run_with_paths(paths)
+    runtime.request(unread,&Settings::default()).run_with_paths(paths).map(|_|())
 }
 
 #[cfg(test)]
@@ -458,7 +510,7 @@ mod tests {
         impl Drop for Source{fn drop(&mut self){self.dropped.set(true);}}
         impl TaskbarSource for Source{
             fn registered(&self)->bool{true}
-            fn take(&self)->Vec<(u32,isize)>{self.taken.set(self.taken.get()+1);vec![(100,11),(0,12)]}
+            fn take(&self)->Vec<TaskbarNotice>{self.taken.set(self.taken.get()+1);vec![TaskbarNotice{pid:100,window:11,started:None},TaskbarNotice{pid:0,window:12,started:None}]}
             fn forget(&self,_:u32){}
         }
         let dropped=Rc::new(Cell::new(false));let taken=Rc::new(Cell::new(0));
@@ -467,7 +519,7 @@ mod tests {
         }]};
         let mut settings=Settings::default();settings.notifications=true;settings.wechat_notifications=true;
         let ctx=eframe::egui::Context::default();let events=runtime.poll_taskbar(&ctx,&settings);
-        let messages=events.into_iter().filter_map(|event|if let TaskbarEvent::Message(unread)=event{Some(unread)}else{None}).collect::<Vec<_>>();
+        let messages=events.into_iter().filter_map(|event|if let TaskbarEvent::Message(unread,_)=event{Some(unread)}else{None}).collect::<Vec<_>>();
         assert_eq!(messages,[Unread{source:Messenger::Wechat,pid:100,window:11}]);
         settings.notifications=false;let events=runtime.poll_taskbar(&ctx,&settings);
         assert!(dropped.get());assert_eq!(taken.get(),1,"关闭总开关后不能继续取消息");
@@ -494,7 +546,7 @@ mod tests {
         struct Source{client:Messenger,seen:Rc<RefCell<Vec<(Messenger,u32)>>>}
         impl TaskbarSource for Source{
             fn registered(&self)->bool{true}
-            fn take(&self)->Vec<(u32,isize)>{vec![]}
+            fn take(&self)->Vec<TaskbarNotice>{vec![]}
             fn forget(&self,pid:u32){self.seen.borrow_mut().push((self.client,pid));}
         }
         let seen=Rc::new(RefCell::new(vec![]));let mut runtime=Runtime::default();
@@ -526,8 +578,85 @@ mod tests {
         runtime.exited_with(&[wx.unread],|_|None);DestroyWindow(window).unwrap();
         assert_eq!(wrong,Err(OpenError::Unavailable));assert_eq!(runtime.targets.len(),1);assert!(runtime.targets.contains_key(&wx.unread));
     }}
+    #[test]
+    fn office_registration_keeps_the_verified_process_when_the_original_window_is_destroyed(){unsafe{
+        use windows::Win32::System::{LibraryLoader::GetModuleHandleW,Threading::GetCurrentProcess};
+        unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
+        let class=w!("QtDaozaiRebuildQWindowIcon");
+        let instance=GetModuleHandleW(None).unwrap().into();
+        RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:class,..Default::default()});
+        let create=||CreateWindowExW(WINDOW_EX_STYLE(0x100),class,w!(""),WINDOW_STYLE(0x860f0000),-10000,-10000,800,600,None,None,instance,None).unwrap();
+        let window=create();
+        let target=Target{unread:Unread{source:Messenger::DingTalk,pid:std::process::id(),window:window.0 as isize},started:process_started(GetCurrentProcess()).unwrap()};
+        DestroyWindow(window).unwrap();
+        let window=create();
+        let replacement=Target{unread:Unread{window:window.0 as isize,..target.unread},..target};
+        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        let mut runtime=Runtime::default();
+        assert_eq!(runtime.register_taskbar(target.unread,None),Some(Unread::of(Messenger::DingTalk)),"缺少原闪动的代际证据时，不能把提醒显示为已确认账号");
+        assert_eq!(runtime.register_taskbar(target.unread,Some(Target{started:target.started+1,..target})),None,"不能把旧进程的提醒交给复用 PID 的进程");
+        assert_eq!(runtime.register_taskbar(target.unread,Some(target)),Some(target.unread),"窗口重建后仍可登记原进程代际");
+        assert_eq!(runtime.request(target.unread,&Settings::default()).target,Some(target));
+        assert_eq!(resolve_open_target(target,&paths),Ok(replacement));
+        let ambiguous=create();
+        assert_eq!(resolve_open_target(target,&paths),Err(OpenError::Unavailable),"同进程多个候选不能猜替换窗口");
+        DestroyWindow(ambiguous).unwrap();
+        assert_eq!(runtime.replace_opened(target.unread,Target{started:target.started+1,..replacement}),Err(OpenError::Unavailable));
+        runtime.replace_opened(target.unread,replacement).unwrap();
+        assert_eq!(runtime.targets.get(&target.unread),None);
+        assert_eq!(runtime.targets.get(&replacement.unread),Some(&replacement));
+        DestroyWindow(window).unwrap();
+    }}
+    #[test]
+    fn manual_foreground_accepts_only_the_original_office_accounts_rebuilt_main_window(){unsafe{
+        use windows::Win32::System::{LibraryLoader::GetModuleHandleW,Threading::GetCurrentProcess};
+        unsafe extern "system" fn proc(h:HWND,m:u32,w:WPARAM,l:LPARAM)->LRESULT{DefWindowProcW(h,m,w,l)}
+        let instance=GetModuleHandleW(None).unwrap().into();
+        let pid=std::process::id();
+        let started=process_started(GetCurrentProcess()).unwrap();
+        let paths=[normalized(&std::env::current_exe().unwrap().to_string_lossy())];
+        for (client,class,title) in [
+            (Messenger::Feishu,w!("Chrome_WidgetWin_1"),w!("飞书")),
+            (Messenger::DingTalk,w!("StandardFrame_DingTalk"),w!("钉钉")),
+            (Messenger::WeCom,w!("WeWorkWindow"),w!("企业微信")),
+        ]{
+            RegisterClassW(&WNDCLASSW{lpfnWndProc:Some(proc),hInstance:instance,lpszClassName:class,..Default::default()});
+            let create=||{
+                let window=CreateWindowExW(WINDOW_EX_STYLE(0),class,title,WS_OVERLAPPEDWINDOW,-10000,-10000,800,600,None,None,instance,None).unwrap();
+                let _=ShowWindow(window,SW_SHOWNOACTIVATE);
+                window
+            };
+            let old=create();
+            let original=Target{unread:Unread{source:client,pid,window:old.0 as isize},started};
+            let mut runtime=Runtime::default();
+            assert_eq!(runtime.foreground_at(old,client,&paths),None,"没有原账号登记时不得认领前台窗口");
+            assert_eq!(runtime.register_taskbar(original.unread,Some(original)),Some(original.unread));
+            assert_eq!(runtime.foreground_at(old,client,&paths),Some(pid));
+            let rebuilt=create();
+            assert_eq!(runtime.foreground_at(rebuilt,client,&paths),None,"原窗口仍在时不得把另一个主窗当成重建");
+            DestroyWindow(old).unwrap();
+            let extra=create();
+            assert_eq!(runtime.foreground_at(rebuilt,client,&paths),None,"同进程多个合格候选时保留提醒");
+            DestroyWindow(extra).unwrap();
+            let popup=CreateWindowExW(WS_EX_TOOLWINDOW,class,title,WS_VISIBLE|WS_POPUP,-10000,-10000,800,600,None,None,instance,None).unwrap();
+            assert_eq!(runtime.foreground_at(popup,client,&paths),None,"同进程的辅助窗不能触发清理");
+            DestroyWindow(popup).unwrap();
+            let _=ShowWindow(rebuilt,SW_SHOWMINNOACTIVE);
+            assert_eq!(runtime.foreground_at(rebuilt,client,&paths),None,"新窗口仍最小化时保留提醒");
+            let _=ShowWindow(rebuilt,SW_SHOWNOACTIVATE);
+            assert_eq!(runtime.foreground_at(rebuilt,client,&paths),Some(pid),"原账号唯一的新主窗可确认查看");
+            assert_eq!(runtime.request(original.unread,&Settings::default()).target,Some(original),"确认查看不应改写已登记的原提醒");
+            let other=Target{unread:Unread{pid:pid+1,..original.unread},..original};
+            runtime.targets.remove(&original.unread);
+            runtime.targets.insert(other.unread,other);
+            assert_eq!(runtime.foreground_at(rebuilt,client,&paths),None,"前台的新窗口不能清另一个账号");
+            runtime.targets.insert(original.unread,Target{started:started+1,..original});
+            assert_eq!(runtime.foreground_at(rebuilt,client,&paths),None,"相同 PID 的新进程不能清旧提醒");
+            DestroyWindow(rebuilt).unwrap();
+        }
+    }}
     fn open_qq_target(target:Target)->Result<(),String>{
-        OpenRequest{unread:target.unread,target:Some(target),allow_tray:true}.run().map_err(|error|error.message(target.unread.source))
+        OpenRequest{unread:target.unread,target:Some(target),allow_tray:true}.run().map(|_|()).map_err(|error|error.message(target.unread.source))
     }
     struct ClientProcess(std::process::Child);
     impl ClientProcess {
@@ -666,9 +795,9 @@ mod tests {
     }}
     #[test]
     fn wake_line_reports_success_and_steps_in_order(){
-        let ok=wake_line("唤起 钉钉 账号 7",&["切前台 0x1 StandardFrame_DingTalk 进程 7".into(),"系统已接受".into()],&Ok(()),Duration::from_millis(12));
+        let ok=wake_line("唤起 钉钉 账号 7",&["切前台 0x1 StandardFrame_DingTalk 进程 7".into(),"系统已接受".into()],None,Duration::from_millis(12));
         assert_eq!(ok,"唤起 钉钉 账号 7 → 切前台 0x1 StandardFrame_DingTalk 进程 7 → 系统已接受 → 结果:已发出打开请求 用时12ms");
-        let failed=wake_line("唤起 微信 账号 9",&[],&Err(OpenError::Failed("未能唤起微信（T3）".into())),Duration::ZERO);
+        let failed=wake_line("唤起 微信 账号 9",&[],Some(&OpenError::Failed("未能唤起微信（T3）".into())),Duration::ZERO);
         assert!(failed.contains("→ - →") && failed.contains("失败 Failed(\"未能唤起微信（T3）\")"));
     }
     #[test]

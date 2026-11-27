@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>岛仔 · 无线设备电池预览</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100svh;display:grid;place-items:center;background:radial-gradient(ellipse at 40% 25%,#d4dadc,#aeb8bc);color:#edf1f3;font:13px "Segoe UI","Microsoft YaHei UI",sans-serif}
+main{width:min(440px,94vw)}
+button,select{font:inherit}button{cursor:pointer;color:inherit}
+button:focus-visible,select:focus-visible{outline:2px solid #82d3ff;outline-offset:2px}
+.bar,.panel{border:1px solid #42494e;background:#171a1d;box-shadow:0 10px 30px #2637412b}
+.bar{display:flex;align-items:center;gap:9px;margin:0 auto 12px;border-radius:24px;padding:6px 13px}
+.bar b,.count{font-size:11px;font-weight:450;color:#bec6ca}
+.bar strong,.num{font-variant-numeric:tabular-nums}
+.panel{border-radius:19px;padding:12px 13px 10px}.panel[hidden]{display:none}
+.head,.detail,.controls{display:flex;align-items:center;gap:8px}
+.head h1{margin:0;font-size:14px}.close{margin-left:auto;border:0;background:none;color:#a7b1b6;font-size:18px}
+.rack{display:flex;justify-content:center;gap:3px;margin:9px 0;border-radius:12px;background:#101215;padding:4px}
+.cell{flex:1;min-width:0;display:flex;flex-direction:column;align-items:center;gap:3px;border:0;background:transparent;border-radius:9px;padding:10px 2px 7px}
+.cell[aria-pressed=true]{background:#22282c}
+.battery{position:relative;isolation:isolate;display:inline-grid;place-items:center;width:min(70px,85%);height:34px;border:1px solid color-mix(in srgb,var(--tone) 48%,#424649);border-radius:8px;background:linear-gradient(#24292d,#1a1d20);margin-right:3px}
+.battery::after{content:"";position:absolute;left:calc(100% + 2px);width:3px;height:11px;border-radius:0 2px 2px 0;background:var(--tone);opacity:.6}
+.chamber{position:absolute;inset:2px;border-radius:5px;overflow:hidden}
+.charge{height:100%;width:var(--level);display:block;border-radius:4px 2px 2px 4px;background:linear-gradient(160deg,color-mix(in srgb,var(--tone) 62%,#24272a),color-mix(in srgb,var(--tone) 30%,#1a1d20));box-shadow:inset -1px 0 var(--tone);transition:width .35s ease}
+.device-icon{z-index:1;width:21px;height:21px;color:#f1f5f6;filter:drop-shadow(0 1px 1px #0c1418)}
+.unknown .battery{border-style:dashed}.unknown .device-icon,.offline .battery{opacity:.65}
+.charging .charge{background-image:linear-gradient(105deg,transparent 30%,#d4ffe540 48%,transparent 66%),linear-gradient(150deg,#43785d,#224333);background-size:220% 100%,100% 100%;animation:charging 2.8s ease-in-out infinite}
+@keyframes charging{from{background-position:150% 0,0 0}to{background-position:-60% 0,0 0}}
+@media(prefers-reduced-motion:reduce){.charging .charge{animation:none}.charge{transition:none}}
+.bar .battery{width:31px;height:17px;border-radius:4px}.bar .chamber{inset:1px;border-radius:3px}.bar .device-icon{width:12px;height:12px}.bar .battery::after{height:6px;width:2px}
+.num{font-size:17px;font-weight:650;color:var(--tone);margin-top:2px}.name{max-width:100%;font-size:10px;color:#c1c8cc;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.detail{min-height:18px;font-size:11px;color:#bbc5c9}.detail strong{color:#edf1f3;font-weight:550}.detail i{width:5px;height:5px;border-radius:50%}
+.controls{justify-content:center;margin-top:15px;font-size:11px;color:#37464d}.controls select{border:1px solid #89979e;border-radius:6px;background:#dbe1e3;color:inherit;padding:3px}
+</style><!-- Solar Icons by 480 Design: https://www.figma.com/community/file/1166831539721848736
+Licensed under Creative Commons Attribution 4.0 International:
+https://creativecommons.org/licenses/by/4.0/ -->
+<svg width="0" height="0" aria-hidden="true" style="position:absolute"><defs><symbol id="device-headphones" viewBox="0 0 24 24"><path fill="currentColor" d="M2 12.124C2 6.53269 6.47713 2 11.9999 2C17.5228 2 21.9999 6.53269 21.9999 12.124L21.9999 17.3675C22.0002 18.1844 22.0004 18.7446 21.8568 19.2364C21.576 20.1982 20.9046 20.9937 20.01 21.4245C19.5525 21.6449 19.0059 21.732 18.2088 21.8591L18.0789 21.8799C17.7954 21.9252 17.5532 21.9639 17.3522 21.9839C17.1431 22.0047 16.9299 22.0111 16.7118 21.9676C15.9942 21.8245 15.4024 21.3126 15.1508 20.6172C15.0744 20.4059 15.0474 20.1916 15.035 19.9793C15.0232 19.7753 15.0232 19.527 15.0232 19.2365L15.0231 15.0641C15.0226 14.6386 15.0222 14.2725 15.1195 13.959C15.3422 13.2416 15.9238 12.6975 16.6477 12.5292C16.9641 12.4556 17.3246 12.4849 17.7435 12.5189L17.8367 12.5264L17.9465 12.5352C18.7302 12.5975 19.2664 12.6402 19.7216 12.8106C20.0415 12.9304 20.3381 13.0953 20.6046 13.2976V12.124C20.6046 7.31288 16.7521 3.41266 11.9999 3.41266C7.24776 3.41266 3.39534 7.31288 3.39534 12.124V13.2976C3.66176 13.0953 3.95843 12.9304 4.27829 12.8106C4.73345 12.6402 5.26965 12.5975 6.05335 12.5352L6.16318 12.5264L6.25641 12.5189C6.67534 12.4849 7.03581 12.4556 7.35224 12.5292C8.07612 12.6975 8.65766 13.2416 8.88039 13.959C8.97774 14.2725 8.9773 14.6386 8.97678 15.0641L8.97671 19.2365C8.97671 19.527 8.97672 19.7753 8.96487 19.9793C8.95254 20.1916 8.9255 20.4059 8.84906 20.6172C8.59754 21.3126 8.00574 21.8245 7.28812 21.9676C7.07001 22.0111 6.85675 22.0047 6.64768 21.9839C6.44671 21.9639 6.20449 21.9252 5.92102 21.8799L5.79106 21.8591C4.99399 21.732 4.44737 21.6449 3.98991 21.4245C3.09534 20.9937 2.42388 20.1982 2.14308 19.2364C2.02467 18.8309 2.00404 18.3788 2.0006 17.7747L2 17.5803V12.124Z"/></symbol><symbol id="device-mouse" viewBox="0 0 24 24"><path fill="currentColor" d="M19 8.97414V14.9861C19 18.8598 15.866 22 12 22C8.13401 22 5 18.8598 5 14.9861V8.97414C5 5.35433 7.73668 2.37497 11.25 2V5.38542C10.6588 5.66685 10.25 6.27067 10.25 6.97016V8.97414C10.25 9.94256 11.0335 10.7276 12 10.7276C12.9665 10.7276 13.75 9.94256 13.75 8.97414V6.97016C13.75 6.27067 13.3412 5.66685 12.75 5.38542V2C16.2633 2.37497 19 5.35433 19 8.97414Z"/></symbol><symbol id="device-keyboard" viewBox="0 0 24 24"><path fill="currentColor" fill-rule="evenodd" d="M8 5H16C18.8284 5 20.2426 5 21.1213 5.87868C22 6.75736 22 8.17157 22 11V13C22 15.8284 22 17.2426 21.1213 18.1213C20.2426 19 18.8284 19 16 19H8C5.17157 19 3.75736 19 2.87868 18.1213C2 17.2426 2 15.8284 2 13V11C2 8.17157 2 6.75736 2.87868 5.87868C3.75736 5 5.17157 5 8 5ZM6 10C6.55228 10 7 9.55228 7 9C7 8.44772 6.55228 8 6 8C5.44772 8 5 8.44772 5 9C5 9.55228 5.44772 10 6 10ZM6 13C6.55228 13 7 12.5523 7 12C7 11.4477 6.55228 11 6 11C5.44772 11 5 11.4477 5 12C5 12.5523 5.44772 13 6 13ZM9 13C9.55228 13 10 12.5523 10 12C10 11.4477 9.55228 11 9 11C8.44772 11 8 11.4477 8 12C8 12.5523 8.44772 13 9 13ZM9 10C9.55228 10 10 9.55228 10 9C10 8.44772 9.55228 8 9 8C8.44772 8 8 8.44772 8 9C8 9.55228 8.44772 10 9 10ZM12 10C12.5523 10 13 9.55228 13 9C13 8.44772 12.5523 8 12 8C11.4477 8 11 8.44772 11 9C11 9.55228 11.4477 10 12 10ZM12 13C12.5523 13 13 12.5523 13 12C13 11.4477 12.5523 11 12 11C11.4477 11 11 11.4477 11 12C11 12.5523 11.4477 13 12 13ZM15 10C15.5523 10 16 9.55228 16 9C16 8.44772 15.5523 8 15 8C14.4477 8 14 8.44772 14 9C14 9.55228 14.4477 10 15 10ZM15 13C15.5523 13 16 12.5523 16 12C16 11.4477 15.5523 11 15 11C14.4477 11 14 11.4477 14 12C14 12.5523 14.4477 13 15 13ZM18 10C18.5523 10 19 9.55228 19 9C19 8.44772 18.5523 8 18 8C17.4477 8 17 8.44772 17 9C17 9.55228 17.4477 10 18 10ZM18 13C18.5523 13 19 12.5523 19 12C19 11.4477 18.5523 11 18 11C17.4477 11 17 11.4477 17 12C17 12.5523 17.4477 13 18 13ZM17.75 16C17.75 16.4142 17.4142 16.75 17 16.75H7C6.58579 16.75 6.25 16.4142 6.25 16C6.25 15.5858 6.58579 15.25 7 15.25H17C17.4142 15.25 17.75 15.5858 17.75 16Z" clip-rule="evenodd"/></symbol><symbol id="device-speaker" viewBox="0 0 24 24"><g fill="currentColor"><path d="M12 6.25C11.3096 6.25 10.75 6.80964 10.75 7.5C10.75 8.19036 11.3096 8.75 12 8.75C12.6904 8.75 13.25 8.19036 13.25 7.5C13.25 6.80964 12.6904 6.25 12 6.25Z"/><path d="M9.75 15.5C9.75 14.2574 10.7574 13.25 12 13.25C13.2426 13.25 14.25 14.2574 14.25 15.5C14.25 16.7426 13.2426 17.75 12 17.75C10.7574 17.75 9.75 16.7426 9.75 15.5Z"/><path fill-rule="evenodd" d="M4 10C4 6.22876 4 4.34315 5.17157 3.17157C6.34315 2 8.22876 2 12 2C15.7712 2 17.6569 2 18.8284 3.17157C20 4.34315 20 6.22876 20 10V14C20 17.7712 20 19.6569 18.8284 20.8284C17.6569 22 15.7712 22 12 22C8.22876 22 6.34315 22 5.17157 20.8284C4 19.6569 4 17.7712 4 14V10ZM9.25 7.5C9.25 5.98122 10.4812 4.75 12 4.75C13.5188 4.75 14.75 5.98122 14.75 7.5C14.75 9.01878 13.5188 10.25 12 10.25C10.4812 10.25 9.25 9.01878 9.25 7.5ZM12 11.75C9.92893 11.75 8.25 13.4289 8.25 15.5C8.25 17.5711 9.92893 19.25 12 19.25C14.0711 19.25 15.75 17.5711 15.75 15.5C15.75 13.4289 14.0711 11.75 12 11.75Z" clip-rule="evenodd"/></g></symbol></defs></svg>
+<main><button class="bar" aria-controls="panel" aria-expanded="true"><span class="battery" aria-hidden="true"><span class="chamber"><i class="charge"></i></span><svg class="device-icon" aria-hidden="true"><use></use></svg></span><b></b><strong></strong></button>
+<section class="panel" id="panel"><header class="head"><h1>无线设备</h1><span class="count"></span><button class="close" aria-label="收起无线设备">⌃</button></header><div class="rack" aria-label="选择设备"></div><div class="detail"><i></i><strong></strong><span></span></div></section>
+<div class="controls"><label for="mode">示例场景</label><select id="mode"><option>桌面设备</option><option>鼠标开始充电</option><option>鼠标仅剩 4%</option><option>耳机已断开</option></select></div></main>
+<script>
+const $=s=>document.querySelector(s);
+const devices=[{kind:'headphones',name:'耳机',level:82},{kind:'mouse',name:'MX Master 3S',level:18},{kind:'keyboard',name:'MX Keys Mini',level:64,charging:true},{kind:'speaker',name:'桌面音箱',level:null}];
+let selected=1,hover=null;
+
+function sample(i){
+ const d={...devices[i]}, mode=$('#mode').selectedIndex;
+ if(i===1&&mode===1)d.charging=true;
+ if(i===1&&mode===2)d.level=4;
+ if(i===0&&mode===3)d.offline=true;
+ return d;
+}
+function tone(d){return d.offline||d.level===null?'#94a1aa':d.charging?'#69dfaa':d.level<=5?'#ff7277':d.level<20?'#f8b366':'#83c9ff'}
+function status(d){if(d.offline)return '已断开 · 上次 '+d.level+'%';if(d.level===null)return '未上报电量';if(d.charging)return '正在充电';return d.level<=5?'即将耗尽':d.level<20?'电量偏低':'已连接'}
+function display(d){return d.level===null?'—':(d.offline?'上次 ':'')+d.level+'%'}
+function setBattery(element,device){
+ element.style.setProperty('--level',(device.level??0)+'%');
+ element.style.setProperty('--tone',tone(device));
+ element.classList.toggle('charging',Boolean(device.charging&&!device.offline));
+ element.classList.toggle('offline',Boolean(device.offline));
+ element.classList.toggle('unknown',device.level===null);
+}
+const cells=devices.map((d,i)=>{
+ const b=document.createElement('button');b.className='cell';b.innerHTML='<span class="battery" aria-hidden="true"><span class="chamber"><i class="charge"></i></span><svg class="device-icon" aria-hidden="true"><use></use></svg></span><span class="num"></span><span class="name"></span>';b.querySelector('use').setAttribute('href','#device-'+d.kind);$('.rack').append(b);
+ b.onclick=()=>{selected=i;hover=null;render()};b.onpointerenter=()=>{hover=i;details()};b.onpointerleave=()=>{hover=null;details()};b.onfocus=()=>{hover=i;details()};b.onblur=()=>{hover=null;details()};return b
+});
+function details(){
+ const i=hover??selected,d=sample(i);$('.detail strong').textContent=d.name;$('.detail span').textContent=status(d);$('.detail i').style.background=tone(d);
+ cells.forEach((b,j)=>{b.style.opacity=hover===null||hover===j?'1':'.65'})
+}
+function render(){
+
+ cells.forEach((b,i)=>{const d=sample(i);setBattery(b,d);b.querySelector('.num').textContent=(d.charging?'ϟ ':'')+display(d);b.querySelector('.name').textContent=d.name;b.setAttribute('aria-pressed',i===selected);b.setAttribute('aria-label',[d.name,display(d),status(d)].join('，'))});
+ const d=sample(selected);setBattery($('.bar'),d);$('.bar use').setAttribute('href','#device-'+d.kind);$('.bar b').textContent=d.name;$('.bar strong').textContent=(d.charging?'ϟ ':'')+display(d);$('.bar strong').style.color=tone(d);$('.count').textContent=devices.filter((_,i)=>!sample(i).offline).length+' 台已连接';details()
+}
+function toggle(){const p=$('#panel');p.hidden=!p.hidden;$('.bar').setAttribute('aria-expanded',!p.hidden);hover=null;render()}
+$('.bar').onclick=toggle;$('.close').onclick=()=>{toggle();$('.bar').focus()};$('#mode').onchange=render;render();
+</script></html>

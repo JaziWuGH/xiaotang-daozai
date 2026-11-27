@@ -71,6 +71,19 @@ impl<'a> Card<'a> {
         c
     }
 
+    /// 控件靠近形变边缘时整颗淡出，避免露出半个按钮或留下半块热区。
+    pub(crate) fn edge_control(&self, x: f32, y: f32, w: f32, h: f32) -> Option<Self> {
+        let clip = self.painter.clip_rect();
+        let rect = self.rect(x, y, w, h);
+        let margin = (rect.left() - clip.left()).min(clip.right() - rect.right());
+        if margin <= 0.0 || rect.top() < clip.top() || rect.bottom() > clip.bottom() {
+            return None;
+        }
+        let alpha = crate::anim::smoothstep(0.0, 6.0 * self.s, margin);
+        let control = self.faded(alpha);
+        Some(if alpha < 0.8 { control.ghost() } else { control })
+    }
+
     // ---------- 文字（y 一律是基线，跨字体对齐稳定） ----------
     pub fn font(&self, size: f32, w: W) -> FontId {
         font(size * self.s, w)
@@ -180,6 +193,13 @@ impl<'a> Card<'a> {
     pub fn ring(&self, x: f32, y: f32, r: f32, width: f32, color: Color32) {
         self.painter.circle_stroke(self.pos(x, y), r * self.s, Stroke::new(width * self.s, color));
     }
+    /// 以半径为中线的圆环描边，和 arc 同一套几何。
+    /// egui 的 circle_stroke 把线宽整段画在半径外侧，和圆弧叠放时会错开半个线宽。
+    pub fn ring_centered(&self, x: f32, y: f32, r: f32, width: f32, color: Color32) {
+        let n = 96;
+        let v: Vec<Pos2> = (0..n).map(|i| {let a = TAU * i as f32 / n as f32; self.pos(x + r * a.cos(), y + r * a.sin())}).collect();
+        self.painter.add(egui::Shape::closed_line(v, Stroke::new(width * self.s, color)));
+    }
     pub fn seg(&self, a: (f32, f32), b: (f32, f32), width: f32, color: Color32) {
         self.painter.line_segment([self.pos(a.0, a.1), self.pos(b.0, b.1)], Stroke::new(width * self.s, color));
     }
@@ -190,6 +210,17 @@ impl<'a> Card<'a> {
     pub fn poly(&self, pts: &[(f32, f32)], color: Color32) {
         let v: Vec<Pos2> = pts.iter().map(|&(x, y)| self.pos(x, y)).collect();
         self.painter.add(egui::Shape::convex_polygon(v, color, Stroke::NONE));
+    }
+    /// 整圈描边，线宽以半径为中线向内外各占一半，和 [`Self::arc`] 的弧线完全重合。
+    /// （`ring` 用的 `circle_stroke` 把线宽整个画在半径外侧，做进度环的轨道会和弧错开半个线宽。）
+    pub fn track(&self, cx: f32, cy: f32, r: f32, width: f32, color: Color32) {
+        let pts: Vec<Pos2> = (0..96)
+            .map(|i| {
+                let a = i as f32 / 96.0 * TAU;
+                self.pos(cx + r * a.cos(), cy + r * a.sin())
+            })
+            .collect();
+        self.painter.add(egui::Shape::closed_line(pts, Stroke::new(width * self.s, color)));
     }
     /// 圆弧描边（角度单位弧度，0 = 正右，顺时针为正）。
     pub fn arc(&self, cx: f32, cy: f32, r: f32, a0: f32, a1: f32, width: f32, color: Color32) {
@@ -237,6 +268,22 @@ impl<'a> Card<'a> {
             }
         }
     }
+    /// 圆角水平渐变（左 → 右），同样沿用 egui 的边缘抗锯齿。
+    pub fn hgrad(&self, x: f32, y: f32, w: f32, h: f32, radius:f32, left: Color32, right: Color32) {
+        if w <= 0.0 {return;}
+        let r = self.rect(x, y, w, h);
+        let shapes=vec![egui::epaint::ClippedShape{clip_rect:self.painter.clip_rect(),shape:egui::Shape::rect_filled(r,radius*self.s,Color32::WHITE)}];
+        for primitive in self.ui.ctx().tessellate(shapes,self.ui.ctx().pixels_per_point()) {
+            if let egui::epaint::Primitive::Mesh(mut mesh)=primitive.primitive {
+                mesh.texture_id=egui::TextureId::default();
+                for vertex in &mut mesh.vertices {
+                    let t=((vertex.pos.x-r.left())/r.width()).clamp(0.0,1.0);
+                    vertex.color=alpha(mix(left,right,t),vertex.color.a() as f32/255.0);
+                }
+                self.painter.add(egui::Shape::mesh(mesh));
+            }
+        }
+    }
     /// 虚线圆角框；`phase` 让虚线沿边「流动」。
     pub fn dashed(&self, x: f32, y: f32, w: f32, h: f32, r: f32, width: f32, color: Color32, phase: f32) {
         let mut pts = Vec::new();
@@ -276,6 +323,18 @@ impl<'a> Card<'a> {
         let h = ctx.animate_bool_with_time(r.id.with("h"), self.live && r.hovered(), 0.14);
         let p = ctx.animate_bool_with_time(r.id.with("p"), self.live && r.is_pointer_button_down_on(), 0.07);
         (h, p)
+    }
+
+    #[cfg(all(windows, feature = "sdk-material"))]
+    pub(crate) fn material_circle_with_role(&self, response: &Response, x: f32, y: f32, radius: f32, role: crate::material::ControlRole) {
+        self.material_control(response, self.rect(x - radius, y - radius, 2.0 * radius, 2.0 * radius), radius, role);
+    }
+
+    #[cfg(all(windows, feature = "sdk-material"))]
+    pub(crate) fn material_control(&self, response: &Response, rect: Rect, radius: f32, role: crate::material::ControlRole) {
+        if self.live {
+            crate::material::control(response.id, rect.intersect(self.painter.clip_rect()), radius * self.s, role);
+        }
     }
 }
 
@@ -397,6 +456,107 @@ pub fn capsule<'a>(
     (r, inner)
 }
 
+pub(crate) fn material_capsule<'a>(
+    c: &Card<'a>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    id: &str,
+    base: Color32,
+    hover: Color32,
+    glass: Option<(bool, f32, f32)>,
+    #[cfg(all(windows, feature = "sdk-material"))] role: crate::material::ControlRole,
+) -> (Response, Card<'a>) {
+    let glass = glass.map(|(gpu, level, boost)| (gpu && c.live, level, boost));
+    let (response, inner) = match glass {
+        Some((true, _, _)) => {
+            let response = c.hit(x, y, w, h, id);
+            let (hover, press) = c.hover_t(&response);
+            #[cfg(all(windows, feature = "sdk-material"))]
+            let scale = crate::material::control_scale(c.ui.ctx(), response.id).unwrap_or(1.0 + 0.14 * press);
+            #[cfg(not(all(windows, feature = "sdk-material")))]
+            let scale = 1.0 + 0.14 * press;
+            let inner = c.scaled(x + w * 0.5, y + h * 0.5, scale);
+            if hover > 0.01 {
+                let from = chrome_mark(c);
+                inner.fill(x, y, w, h, h * 0.5, Color32::from_white_alpha((12.0 + 16.0 * hover) as u8));
+                chrome_since(c, from);
+            }
+            (response, inner)
+        }
+        Some((false, level, hover_boost)) => glass_capsule(c, x, y, w, h, id, level, hover_boost),
+        None => capsule(c, x, y, w, h, id, base, hover),
+    };
+    #[cfg(all(windows, feature = "sdk-material"))]
+    match glass {
+        Some((true, _, _)) => c.material_control(&response, c.rect(x, y, w, h), h * 0.5, role),
+        None => inner.material_control(&response, inner.rect(x, y, w, h), h * 0.5, role),
+        _ => {}
+    }
+    (response, inner)
+}
+
+pub(crate) fn chrome_mark(c: &Card) -> usize {
+    crate::skin_paint::shape_count(c.ui.ctx(), c.painter.layer_id())
+}
+
+pub(crate) fn chrome_since(c: &Card, from: usize) {
+    crate::skin_paint::tone_since(c.ui.ctx(), c.painter.layer_id(), from,
+                                  crate::skin_paint::keep_glass_chrome);
+}
+
+/// 玻璃片的白边、内高光和凹槽使用固定配色。
+pub(crate) fn glass_chip(c: &Card, x: f32, y: f32, w: f32, h: f32, r: f32, level: f32) {
+    if w < 2.0 || h < 2.0 { return; }
+    let from = chrome_mark(c);
+    let level = level.clamp(0.0, 1.0);
+    let r = r.min(w.min(h) * 0.5);
+    c.fill(x, y, w, h, r, Color32::from_white_alpha((10.0 + 30.0 * level) as u8));
+    c.vgrad(x, y, w, h, r, Color32::from_white_alpha((22.0 + 24.0 * level) as u8), Color32::TRANSPARENT);
+    if h >= 8.0 {
+        let inset = r * 0.8;
+        c.fill(x + inset, y + h - 1.0, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_black_alpha(28));
+    }
+    c.stroke(x + 0.75, y + 0.75, w - 1.5, h - 1.5, (r - 0.75).max(0.0), 1.5,
+             Color32::from_white_alpha((120.0 + 60.0 * level) as u8));
+    chrome_since(c, from);
+}
+
+/// 圆形按钮的矢量玻璃底。
+pub(crate) fn glass_disc(c: &Card, cx: f32, cy: f32, r: f32, level: f32) {
+    if r < 2.0 { return; }
+    let from = chrome_mark(c);
+    let level = level.clamp(0.0, 1.0);
+    c.circle(cx, cy, r, Color32::from_white_alpha((10.0 + 28.0 * level) as u8));
+    c.arc(cx, cy, r - 0.8, PI * 1.12, PI * 1.88, 1.1, Color32::from_white_alpha((26.0 + 30.0 * level) as u8));
+    c.ring(cx, cy, (r - 0.75).max(0.5), 1.5, Color32::from_white_alpha((110.0 + 60.0 * level) as u8));
+    chrome_since(c, from);
+}
+
+pub(crate) fn glass_groove(c: &Card, x: f32, y: f32, w: f32, h: f32) {
+    if w < 2.0 || h < 1.5 { return; }
+    let from = chrome_mark(c);
+    let r = h * 0.5;
+    let inset = (r * 0.9).min(w * 0.4);
+    c.fill(x, y, w, h, r, Color32::from_black_alpha(46));
+    if h >= 6.0 {
+        c.fill(x + inset, y, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_black_alpha(56));
+    }
+    c.fill(x + inset, y + h - 1.0, (w - inset * 2.0).max(1.0), 1.0, 0.5, Color32::from_white_alpha(26));
+    chrome_since(c, from);
+}
+
+pub(crate) fn glass_capsule<'a>(
+    c: &Card<'a>, x: f32, y: f32, w: f32, h: f32, id: &str, level: f32, hover_boost: f32,
+) -> (Response, Card<'a>) {
+    let response = c.hit(x, y, w, h, id);
+    let (hover, press) = c.hover_t(&response);
+    let inner = c.scaled(x + w * 0.5, y + h * 0.5, 1.0 - 0.05 * press);
+    glass_chip(&inner, x, y, w, h, h * 0.5, level + hover * hover_boost);
+    (response, inner)
+}
+
 // ======================= 图标 =======================
 
 pub fn close(c:&Card,cx:f32,cy:f32,r:f32,color:Color32) {
@@ -410,6 +570,13 @@ pub fn chevron(c: &Card, x: f32, y: f32, dir: f32, hover: f32, press: f32) {
     c.circle(x, y, 9.0, mix(theme::ARROW_BG, Color32::from_rgb(78, 78, 82), hover));
     let nudge = dir * 0.8 * hover;
     let (cx, s) = (x + nudge + dir * 0.6, 2.7);
+    c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, Color32::WHITE);
+}
+
+pub(crate) fn chevron_glass(c: &Card, x: f32, y: f32, dir: f32, hover: f32, scale: f32, gpu: bool) {
+    let c = c.scaled(x, y, scale);
+    if !gpu { glass_disc(&c, x, y, 12.0, 0.18 + hover * 0.82); }
+    let (cx, s) = (x + dir * (0.8 * hover + 0.6), 2.7);
     c.path(&[(cx - dir * s * 0.75, y - s), (cx + dir * s * 0.45, y), (cx - dir * s * 0.75, y + s)], 1.6, Color32::WHITE);
 }
 
@@ -546,6 +713,71 @@ pub fn note(c: &Card, cx: f32, cy: f32, size: f32, color: Color32) {
     c.seg((cx - s * 0.11, cy + s * 0.28), (cx - s * 0.11, cy - s * 0.30), 1.6, color);
     c.seg((cx + s * 0.39, cy + s * 0.18), (cx + s * 0.39, cy - s * 0.42), 1.6, color);
     c.poly(&[(cx - s * 0.11 - 0.8, cy - s * 0.30), (cx + s * 0.39 + 0.8, cy - s * 0.42), (cx + s * 0.39 + 0.8, cy - s * 0.30), (cx - s * 0.11 - 0.8, cy - s * 0.18)], color);
+}
+
+/// 底部快捷切换使用适合小尺寸的单色图标。
+pub(crate) fn page_shortcut_icon(c: &Card, page: usize, x: f32, y: f32, color: Color32) {
+    use crate::app::{BLUETOOTH_PAGE, CALENDAR_PAGE, FOCUS_PAGE, MAIL_PAGE, MUSIC_PAGE, PERFORMANCE_PAGE, QUOTA_PAGE, SHELF_PAGE, TODO_PAGE, WATER_PAGE, WEATHER_PAGE};
+
+    let c = c.shifted(x, y);
+    let stroke = 1.15;
+    let line = |a, b| c.seg(a, b, stroke, color);
+    let path = |points: &[(f32, f32)]| c.path(points, stroke, color);
+    let outline = |x, y, w, h| c.stroke(x, y, w, h, 1.0, stroke, color);
+
+    match page {
+        MUSIC_PAGE => note(&c, 0.0, 0.0, 12.0, color),
+        FOCUS_PAGE => {
+            c.ring(0.0, 1.0, 4.6, stroke, color);
+            line((-1.8, -5.8), (1.8, -5.8));
+            line((0.0, -5.8), (0.0, -3.8));
+            path(&[(0.0, -1.5), (0.0, 1.0), (1.7, 2.1)]);
+        }
+        WATER_PAGE => droplet(&c, 0.0, 0.0, 11.0, color),
+        SHELF_PAGE => {
+            outline(-5.2, -1.8, 10.4, 6.7);
+            outline(-6.0, -5.0, 12.0, 3.2);
+            line((-1.4, 0.5), (1.4, 0.5));
+        }
+        TODO_PAGE => {
+            outline(-4.4, -4.8, 8.8, 10.0);
+            line((-1.8, -5.4), (1.8, -5.4));
+            check(&c, 0.0, 0.2, 4.0, 1.0, stroke, color);
+        }
+        MAIL_PAGE => {
+            outline(-6.0, -4.2, 12.0, 8.4);
+            path(&[(-5.6, -3.5), (0.0, 0.8), (5.6, -3.5)]);
+        }
+        QUOTA_PAGE => path(&[
+            (0.0, -5.8), (1.6, -1.6), (5.8, 0.0), (1.6, 1.6),
+            (0.0, 5.8), (-1.6, 1.6), (-5.8, 0.0), (-1.6, -1.6), (0.0, -5.8),
+        ]),
+        CALENDAR_PAGE => {
+            outline(-5.2, -4.2, 10.4, 9.7);
+            line((-5.2, -1.3), (5.2, -1.3));
+            line((-2.5, -5.5), (-2.5, -3.0));
+            line((2.5, -5.5), (2.5, -3.0));
+            c.circle(-2.1, 1.6, 0.65, color);
+            c.circle(0.0, 1.6, 0.65, color);
+            c.circle(2.1, 1.6, 0.65, color);
+        }
+        WEATHER_PAGE => {
+            c.ring(0.0, 0.0, 2.8, stroke, color);
+            for i in 0..8 {
+                let (sin, cos) = (i as f32 * TAU / 8.0).sin_cos();
+                line((cos * 4.4, sin * 4.4), (cos * 6.0, sin * 6.0));
+            }
+        }
+        PERFORMANCE_PAGE => {
+            outline(-5.8, -4.6, 11.6, 9.2);
+            path(&[(-4.1, 0.5), (-2.2, 0.5), (-1.0, -2.3), (1.0, 2.4), (2.0, 0.2), (4.1, 0.2)]);
+        }
+        BLUETOOTH_PAGE => {
+            path(&[(0.0, -6.0), (4.0, -2.9), (-3.8, 3.2)]);
+            path(&[(0.0, -6.0), (0.0, 6.0), (4.0, 2.9), (-3.8, -3.2)]);
+        }
+        _ => outline(-5.5, -4.5, 11.0, 9.0),
+    }
 }
 
 pub fn stopwatch(c: &Card, cx: f32, cy: f32, r: f32, hand: f32, color: Color32) {
@@ -851,6 +1083,22 @@ pub fn clock(c:&Card,x:f32,y:f32,text:&str,size:f32) {
         (digits,x+c.text_w(period,size*0.72,W::Semibold)+4.0)
     }else{(text,x)};
     c.text(x,y,digits,size,W::Bold,theme::WHITE,H::Left);
+}
+
+/// 顶栏图钉由倾斜轮廓转为竖直实心，剪贴板行内图标保持独立。
+pub fn hold_pin(c:&Card,cx:f32,cy:f32,active:f32,color:Color32) {
+    let (sin,cos)=((1.0-active)*0.55).sin_cos();
+    let point=|x:f32,y:f32|(cx+x*cos-y*sin,cy+x*sin+y*cos);
+    let head=[point(-2.7,-5.8),point(2.7,-5.8),point(2.0,-4.5),point(2.0,-0.8),
+        point(3.9,1.5),point(-3.9,1.5),point(-2.0,-0.8),point(-2.0,-4.5)];
+    if active>0.0 {
+        let ink=c.faded(active);
+        ink.poly(&[head[0],head[1],head[2],head[7]],color);
+        ink.poly(&[head[7],head[2],head[3],head[6]],color);
+        ink.poly(&[head[6],head[3],head[4],head[5]],color);
+    }
+    for i in 0..head.len(){c.seg(head[i],head[(i+1)%head.len()],1.2,color);}
+    c.seg(point(0.0,1.5),point(0.0,6.0),1.2,color);
 }
 
 /// 图钉：固定的剪贴板条目。

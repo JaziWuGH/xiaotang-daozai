@@ -83,7 +83,7 @@ pub(crate) fn atomic_write(path:&Path,body:&[u8])->std::io::Result<()> {
     result
 }
 
-fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
+pub(crate) fn replace_file(tmp:&Path,path:&Path)->std::io::Result<()> {
     let result=fs::rename(tmp,path);
     #[cfg(windows)]
     if result.as_ref().is_err_and(|e|e.kind()==std::io::ErrorKind::CrossesDevices) {
@@ -161,7 +161,7 @@ impl IslandShape {
     }
 }
 
-/// 岛体停靠的屏幕边缘：顶部 / 底部为横向刘海，左右两侧为竖向排列。
+/// 岛体停靠的屏幕边缘：上下为横向刘海 / 胶囊，左右两侧为竖向排列。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Dock {
     #[default]
@@ -172,18 +172,18 @@ pub enum Dock {
 }
 
 impl Dock {
-    pub const ALL: [Dock; 4] = [Dock::Top, Dock::Left, Dock::Right, Dock::Bottom];
+    pub const ALL: [Dock; 4] = [Dock::Top, Dock::Bottom, Dock::Left, Dock::Right];
     pub fn key(self) -> &'static str {
-        match self { Self::Top => "top", Self::Left => "left", Self::Right => "right", Self::Bottom => "bottom" }
+        match self { Self::Top => "top", Self::Bottom => "bottom", Self::Left => "left", Self::Right => "right" }
     }
     pub fn parse(value: &str) -> Self {
-        match value { "left" => Self::Left, "right" => Self::Right, "bottom" => Self::Bottom, _ => Self::Top }
+        match value { "bottom" => Self::Bottom, "left" => Self::Left, "right" => Self::Right, _ => Self::Top }
     }
     pub fn label(self) -> &'static str {
-        match self { Self::Top => "顶部", Self::Left => "左侧", Self::Right => "右侧", Self::Bottom => "底部" }
+        match self { Self::Top => "顶部", Self::Bottom => "底部", Self::Left => "左侧", Self::Right => "右侧" }
     }
-    /// 只有左右两侧是竖向胶囊；底部与顶部共用横向布局。
     pub fn is_side(self) -> bool { matches!(self, Self::Left | Self::Right) }
+    /// 底部与顶部共用横向布局，但竖直锚点相反。
     pub fn is_bottom(self) -> bool { self == Self::Bottom }
 }
 
@@ -200,6 +200,35 @@ pub const ISLAND_OFFSET_MAX: i32 = 100;
 pub fn island_size_value(value: u32) -> u32 {
     let value = value.clamp(ISLAND_SIZE_MIN, ISLAND_SIZE_MAX);
     (value + ISLAND_SIZE_STEP / 2) / ISLAND_SIZE_STEP * ISLAND_SIZE_STEP
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResidentDate {
+    #[default]
+    Off,
+    Gregorian,
+    LunarOnly,
+    Lunar,
+}
+
+impl ResidentDate {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Gregorian => "gregorian",
+            Self::LunarOnly => "lunar-only",
+            Self::Lunar => "lunar",
+        }
+    }
+
+    fn parse(value: &str) -> Self {
+        match value {
+            "gregorian" => Self::Gregorian,
+            "lunar-only" => Self::LunarOnly,
+            "lunar" => Self::Lunar,
+            _ => Self::Off,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -222,11 +251,17 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 10],
-    pub page_order: [usize; 10],
+    pub visible_pages: [bool; 12],
+    pub page_order: [usize; 12],
+    pub show_page_shortcuts: bool,
     pub show_clock: bool,
+    pub resident_date: ResidentDate,
     pub show_battery: bool,
     pub show_weather: bool,
+    pub show_performance: bool,
+    pub performance_bar: crate::performance::BarStyle,
+    pub performance_metrics: u16,
+    pub performance_view: crate::performance::View,
     pub clock_12h: bool,
     pub clock_period: u8,
     /// 主时钟显示时区（IANA 名；空串 = 跟随系统）。只影响岛仔显示，不改系统时区。
@@ -247,6 +282,15 @@ pub struct Settings {
     pub resident_order: Vec<usize>,
     pub system_hud: bool,
     pub bluetooth_notifications: bool,
+    pub show_bluetooth: bool,
+    /// 自定义常驻的设备；常驻条放不下时先显示其中电量低的。
+    pub bluetooth_pinned: Vec<String>,
+    /// 常驻样式：0 环 + 数字，1 只显示环（偏低或充电时才显示数字）。
+    pub bluetooth_resident_style: u8,
+    /// false 自动挑电量最低的设备常驻；true 只在 bluetooth_pinned 里挑。
+    pub bluetooth_resident_custom: bool,
+    /// 接上电源、充满、电量偏低时在岛上提示。
+    pub bluetooth_battery_notifications: bool,
     pub read_notifications:bool,
     pub wechat_notifications:bool,
     pub wecom_notifications:bool,
@@ -265,6 +309,7 @@ pub struct Settings {
     pub island_lyrics:bool,
     pub lyric_delay_ms:i32,
     pub hide_fullscreen: bool,
+    pub exclude_from_capture: bool,
     /// 启用顶栏适配，按显示方式避让顶栏或保持岛体在顶栏上方。
     pub avoid_top_bar: bool,
     pub top_bar_on_top: bool,
@@ -284,7 +329,9 @@ pub struct Settings {
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
     pub mail_sync_operations:bool,
+    pub mail_code_only_notifications: bool,
     pub mail_code: bool,
+    pub mail_code_popup: bool,
     pub mail_code_hide_seconds:u32,
     pub mail_interval: u32,
     pub mail_ics: u32,
@@ -309,7 +356,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 10], page_order: [0,1,2,3,4,5,6,7,8,9], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), time_resident: true, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true,true,true,true,true,true,true,true,true,false,true,true], page_order: [0,1,2,3,4,5,6,7,8,9,10,11], show_page_shortcuts: true, show_clock: true, resident_date: ResidentDate::Off, show_battery: true, show_weather: true, show_performance: true, performance_bar: Default::default(), performance_metrics: 7, performance_view: Default::default(), clock_12h: false, clock_period: 0, time_zone: String::new(), world_clocks: crate::timezone::default_cities(), time_sync: true, time_offset_ms: 0, time_sync_at: String::new(), time_sync_note: String::new(), time_resident: true, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, show_bluetooth:true, bluetooth_pinned:Vec::new(), bluetooth_resident_style:0, bluetooth_resident_custom:false, bluetooth_battery_notifications:true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, exclude_from_capture: false, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code_only_notifications: false, mail_code: true, mail_code_popup: false, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -342,6 +389,7 @@ impl Settings {
 
     pub fn load() -> Self {
         let mut s = Self::default();
+        let mut resident_custom_seen=false;
         for (k, v) in read_kv(&config_dir().join("settings.txt")) {
             match k.as_str() {
                 "settings_theme" => s.settings_theme=crate::settings_theme::SettingsTheme::parse(&v),
@@ -367,14 +415,28 @@ impl Settings {
                     if order.len()==6 && !order.contains(&crate::bar_layout::WEATHER) {
                         if let Some(clock)=order.iter().position(|slot|*slot==crate::bar_layout::CLOCK){order.insert(clock+1,crate::bar_layout::WEATHER);}
                     }
+                    if order.len()==7 && !order.contains(&crate::bar_layout::PERFORMANCE) {order.push(crate::bar_layout::PERFORMANCE);}
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
+                "show_page_shortcuts" => s.show_page_shortcuts = v == "1",
                 "page_order" => {
                     if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        // 旧配置缺页：先补官方的天气页（8），再补本定制的世界时钟页（9）。
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) { order.extend([8,9]); }
-                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) { order.push(9); }
-                        if order.len()==10 && (0..10).all(|page|order.contains(&page)) {
+                        // 旧配置缺页时补齐到当前页数：官方 8 页会多出天气、系统性能、无线设备，
+                        // 本定制的 10 页配置再多出世界时钟页；已有顺序原样保留。
+                        let saved=order.len();
+                        if saved==10 {
+                            // 旧 10 页布局里第 9 页是本定制的世界时钟；新版世界时钟挪到最后一页，
+                            // 中间插进官方的系统性能、无线设备，顺序也要跟着搬。
+                            if let Some(at)=order.iter().position(|page|*page==9) {
+                                order[at]=11;
+                                order.insert(at,10);
+                                order.insert(at,9);
+                            }
+                        }
+                        if saved<s.page_order.len() && (0..saved).all(|page|order.contains(&page)) {
+                            order.extend(saved..s.page_order.len());
+                        }
+                        if order.len()==s.page_order.len() && (0..order.len()).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
@@ -391,10 +453,23 @@ impl Settings {
                 "time_resident" => s.time_resident = v != "0",
                 "show_battery" => s.show_battery = v != "0",
                 "show_clock" => s.show_clock = v != "0",
+                "resident_date" => s.resident_date = ResidentDate::parse(&v),
                 "show_weather" => s.show_weather = v != "0",
-                "visible_pages" if (6..=10).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "show_performance" => s.show_performance = v != "0",
+                "performance_bar" => s.performance_bar = crate::performance::BarStyle::parse(&v),
+                "performance_metrics" => s.performance_metrics = v.parse::<u16>().unwrap_or(s.performance_metrics) & 0x1ff,
+                "performance_view" => s.performance_view = crate::performance::View::parse(&v),
+                "visible_pages" if (6..=12).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
-                    for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
+                    if v.len()==10 {
+                        // 旧 10 页布局：第 9 页是世界时钟。新版把世界时钟挪到最后一页，
+                        // 中间新增的系统性能（默认关）与无线设备（默认开）按默认值补齐。
+                        s.visible_pages[11]=s.visible_pages[9];
+                        s.visible_pages[9]=false;
+                        s.visible_pages[10]=true;
+                    } else {
+                        for enabled in s.visible_pages[..9].iter_mut().skip(v.len()){*enabled=v.bytes().any(|b|b==b'1');}
+                    }
                 }
                 "read_notifications" => s.read_notifications=v=="1",
                 "wechat_notifications" => s.wechat_notifications=v=="1",
@@ -406,6 +481,15 @@ impl Settings {
                 "notification_preview" => s.notification_preview=v=="1",
                 "system_hud" => s.system_hud = v != "0",
                 "bluetooth_notifications" => s.bluetooth_notifications = v != "0",
+                "show_bluetooth" => s.show_bluetooth=v!="0",
+                "bluetooth_pinned" => {
+                    s.bluetooth_pinned=serde_json::from_str::<Vec<String>>(&v).unwrap_or_default();
+                    // 旧版只有“固定”这一种方式：固定过设备的沿用为自定义。
+                    if !resident_custom_seen {s.bluetooth_resident_custom=!s.bluetooth_pinned.is_empty();}
+                }
+                "bluetooth_resident_style" => s.bluetooth_resident_style=v.parse::<u8>().unwrap_or(0).min(1),
+                "bluetooth_resident_custom" => {resident_custom_seen=true;s.bluetooth_resident_custom=v=="1";}
+                "bluetooth_battery_notifications" => s.bluetooth_battery_notifications=v!="0",
                 "notifications" => s.notifications = v != "0",
                 "system_notify" => s.system_notify = v != "0",
                 "sound" => s.sound = v == "1",
@@ -413,6 +497,7 @@ impl Settings {
                 "island_lyrics" => s.island_lyrics=v=="1",
                 "lyric_delay_ms" => s.lyric_delay_ms=v.parse::<i32>().unwrap_or(-350).clamp(-5000,5000),
                 "hide_fullscreen" => s.hide_fullscreen = v != "0",
+                "exclude_from_capture" => s.exclude_from_capture = v == "1",
                 "avoid_top_bar" => s.avoid_top_bar = v != "0",
                 "top_bar_on_top" => s.top_bar_on_top = v == "1",
                 "focus_minutes" => s.focus_minutes = v.parse::<u32>().unwrap_or(25).clamp(1, 180),
@@ -428,7 +513,9 @@ impl Settings {
                 "lunch_end" => s.lunch_end = v.parse::<u32>().unwrap_or(810).min(1439),
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_sync_operations" => s.mail_sync_operations=v=="1",
+                "mail_code_only_notifications" => s.mail_code_only_notifications = v == "1",
                 "mail_code" => s.mail_code = v != "0",
+                "mail_code_popup" => s.mail_code_popup = v == "1",
                 "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
                 "mail_interval" => s.mail_interval = match v.parse::<u32>().unwrap_or(120) { 60 => 60, 300 => 300, _ => 120 },
                 "ignored_mail_events" => s.ignored_mail_events = serde_json::from_str(&v).unwrap_or_default(),
@@ -450,11 +537,9 @@ impl Settings {
             if !s.weather_saved.contains(&position) {s.weather_saved.insert(0,position);}
         }
         s.weather_saved.dedup();s.weather_saved.truncate(crate::weather::MAX_CITIES);
-        // 「时间」与「时间常驻」在本定制里是同一个开关：任一为关就一起关，
-        // 避免旧配置里出现「时间常驻开着、显示时钟却关着」这种自相矛盾的状态。
-        let clock_on = s.show_clock && s.time_resident;
-        s.show_clock = clock_on;
-        s.time_resident = clock_on;
+        // 「时间常驻」要在岛上常驻时间，就必须允许画时钟；反过来关掉「显示时钟」
+        // 不再回头改「时间常驻」，两处设置页各自写回，存档也保持原样（上游按独立开关测）。
+        if s.time_resident { s.show_clock = true; }
         s
     }
 
@@ -478,6 +563,11 @@ impl Settings {
                 ("avoid_apps".into(), serde_json::to_string(&self.avoid_apps).unwrap_or_default()),
                 ("visible_pages".into(), self.visible_pages.iter().map(|enabled|if *enabled {'1'}else{'0'}).collect()),
                 ("page_order".into(),self.page_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
+                ("show_page_shortcuts".into(), (self.show_page_shortcuts as u8).to_string()),
+                ("show_performance".into(),u8::from(self.show_performance).to_string()),
+                ("performance_bar".into(),self.performance_bar.key().into()),
+                ("performance_metrics".into(),self.performance_metrics.to_string()),
+                ("performance_view".into(),self.performance_view.key().into()),
                 ("resident_order".into(),self.resident_order.iter().map(usize::to_string).collect::<Vec<_>>().join(",")),
                 ("clock_period".into(), self.clock_period.to_string()),
                 ("clock_12h".into(), (self.clock_12h as u8).to_string()),
@@ -491,6 +581,7 @@ impl Settings {
                 ("time_resident".into(), (self.time_resident as u8).to_string()),
                 ("show_battery".into(), (self.show_battery as u8).to_string()),
                 ("show_clock".into(), (self.show_clock as u8).to_string()),
+                ("resident_date".into(), self.resident_date.key().into()),
                 ("show_weather".into(), (self.show_weather as u8).to_string()),
                 ("read_notifications".into(),(self.read_notifications as u8).to_string()),
                 ("wechat_notifications".into(),(self.wechat_notifications as u8).to_string()),
@@ -502,6 +593,11 @@ impl Settings {
                 ("notification_preview".into(),(self.notification_preview as u8).to_string()),
                 ("system_hud".into(), (self.system_hud as u8).to_string()),
                 ("bluetooth_notifications".into(), (self.bluetooth_notifications as u8).to_string()),
+                ("show_bluetooth".into(),(self.show_bluetooth as u8).to_string()),
+                ("bluetooth_resident_custom".into(),(self.bluetooth_resident_custom as u8).to_string()),
+                ("bluetooth_pinned".into(),serde_json::to_string(&self.bluetooth_pinned).unwrap_or_default()),
+                ("bluetooth_resident_style".into(),self.bluetooth_resident_style.to_string()),
+                ("bluetooth_battery_notifications".into(),(self.bluetooth_battery_notifications as u8).to_string()),
                 ("notifications".into(), (self.notifications as u8).to_string()),
                 ("system_notify".into(), (self.system_notify as u8).to_string()),
                 ("sound".into(), (self.sound as u8).to_string()),
@@ -509,6 +605,7 @@ impl Settings {
                 ("island_lyrics".into(),(self.island_lyrics as u8).to_string()),
                 ("lyric_delay_ms".into(),self.lyric_delay_ms.to_string()),
                 ("hide_fullscreen".into(), (self.hide_fullscreen as u8).to_string()),
+                ("exclude_from_capture".into(), (self.exclude_from_capture as u8).to_string()),
                 ("avoid_top_bar".into(), (self.avoid_top_bar as u8).to_string()),
                 ("top_bar_on_top".into(), (self.top_bar_on_top as u8).to_string()),
                 ("focus_minutes".into(), self.focus_minutes.to_string()),
@@ -524,7 +621,9 @@ impl Settings {
                 ("lunch_end".into(), self.lunch_end.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
                 ("mail_sync_operations".into(),(self.mail_sync_operations as u8).to_string()),
+                ("mail_code_only_notifications".into(), (self.mail_code_only_notifications as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
+                ("mail_code_popup".into(), (self.mail_code_popup as u8).to_string()),
                 ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),
                 ("mail_interval".into(), self.mail_interval.to_string()),
                 ("mail_ics".into(), self.mail_ics.to_string()),
@@ -907,6 +1006,38 @@ pub fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_exclusion_defaults_to_disabled_and_round_trips() {
+        let _guard = crate::ui_tests::ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("daozai-capture-settings-{}-{nonce}", std::process::id()));
+        fs::create_dir(&dir).unwrap();
+        let path = dir.join("settings.txt");
+        fs::write(&path, b"hide_fullscreen=0\n").unwrap();
+
+        let previous = std::env::var_os("DAOZAI_DATA_DIR");
+        std::env::set_var("DAOZAI_DATA_DIR", &dir);
+        let mut settings = Settings::load();
+        let legacy_disabled = !settings.exclude_from_capture && !settings.hide_fullscreen;
+        settings.exclude_from_capture = true;
+        settings.save();
+        let enabled = Settings::load();
+        settings.exclude_from_capture = false;
+        settings.save();
+        let disabled = Settings::load();
+        match previous {
+            Some(previous) => std::env::set_var("DAOZAI_DATA_DIR", previous),
+            None => std::env::remove_var("DAOZAI_DATA_DIR"),
+        }
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+
+        assert!(!Settings::default().exclude_from_capture);
+        assert!(legacy_disabled);
+        assert!(enabled.exclude_from_capture && !enabled.hide_fullscreen);
+        assert!(!disabled.exclude_from_capture && !disabled.hide_fullscreen);
+    }
 
     #[test]
     fn island_appearance_values_are_normalized() {

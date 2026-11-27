@@ -1,41 +1,77 @@
-//! 经典蓝牙与低功耗蓝牙设备的连接状态和电量。
+//! 蓝牙设备连接与多来源电量监控。
+mod state;
+pub use state::{Device,DeviceKind,BatterySource,BatteryReading,FRESH_FOR};
 
-use std::time::{Duration,Instant};
+mod bas;
+pub mod compat;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+mod receivers;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Device {
-    pub id: String,
-    pub name: String,
-    pub battery: Option<u8>,
-    pub kind: DeviceKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DeviceKind { Bone, Earbuds, Headphones, Speaker, Keyboard, Mouse, Gamepad, Phone, Other }
-
+/// 识别顺序：具体型号词 → 通用名称词 → 蓝牙类别码 → 兜底名称词。
+/// 短词（pen、mic、band…）按整词匹配，避免 OpenRun 里的 pen 被认成触控笔。
 fn device_kind(name: &str, classic: bool, class: Option<u32>) -> DeviceKind {
     use DeviceKind::*;
     let name = name.to_lowercase();
-    if ["shokz", "aftershokz", "openmove", "openrun", "骨传导"].iter().any(|s| name.contains(s)) { return Bone; }
-    if ["earbuds", "airpods", "buds", "earphones", "入耳"].iter().any(|s| name.contains(s)) { return Earbuds; }
-    if ["keyboard", "键盘"].iter().any(|s| name.contains(s)) { return Keyboard; }
-    if ["mouse", "鼠标"].iter().any(|s| name.contains(s)) { return Mouse; }
-    if ["gamepad", "controller", "手柄"].iter().any(|s| name.contains(s)) { return Gamepad; }
-    if ["speaker", "音箱", "音响"].iter().any(|s| name.contains(s)) { return Speaker; }
+    let words: Vec<&str> = name.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    let word = |w: &str| words.contains(&w);
+    let any = |list: &[&str]| list.iter().any(|s| name.contains(s));
+    if name.contains("airpods") { return if word("max") { Headphones } else if word("pro") { EarbudsStemTips } else { EarbudsStem }; }
+    if name.contains("freebuds") && word("pro") { return EarbudsStemTips; }
+    if any(&["joy-con", "joycon"]) { return JoyCon; }
+    // Shokz 的开放式耳机不是骨传导，要先于骨传导规则。
+    if any(&["openfit", "opendots", "freeclip", "ultra open", "耳夹"]) { return OpenEar; }
+    if any(&["shokz", "aftershokz", "openmove", "openrun", "openswim", "骨传导"]) { return Bone; }
+    if word("wf") || any(&["earbuds", "buds", "earphones", "入耳"]) { return Earbuds; }
+    if word("wh") { return Headphones; }
+    if any(&["hearing", "助听"]) { return HearingAid; }
+    if any(&["trackpad", "touchpad", "触控板"]) { return Trackpad; }
+    if any(&["keyboard", "键盘"]) { return Keyboard; }
+    if any(&["mouse", "鼠标"]) { return Mouse; }
+    if any(&["stylus", "手写笔", "触控笔"]) || word("pen") || word("pencil") { return Pen; }
+    if any(&["presenter", "spotlight", "翻页"]) { return Presenter; }
+    if any(&["gamepad", "controller", "dualsense", "dualshock", "手柄"]) { return Gamepad; }
+    if any(&["speaker", "soundlink", "音箱", "音响"]) { return Speaker; }
+    if any(&["microphone", "麦克风"]) || word("mic") { return Mic; }
+    if any(&["遥控"]) || word("remote") { return Remote; }
+    if any(&["ipad", "tablet", "matepad", "平板"]) { return Tablet; }
+    if any(&["手表"]) || words.iter().any(|w| w.starts_with("watch")) { return Watch; }
+    if any(&["手环"]) || word("band") { return Band; }
+    if any(&["心率"]) || word("hrm") || word("heart") { return Health; }
     if let Some(class) = class {
         if classic {
+            let minor = (class >> 2) & 0x3f;
             match (class >> 8) & 0x1f {
+                1 if minor == 7 => return Tablet,
                 2 => return Phone,
-                4 => return if matches!((class >> 2) & 0x3f, 5 | 7 | 10) { Speaker } else { Headphones },
-                5 => return match (class >> 6) & 3 { 1 => Keyboard, 2 => Mouse, 3 => Keyboard, _ => Other },
+                4 => return match minor { 4 => Mic, 5 | 7 | 10 => Speaker, _ => Headphones },
+                5 => return match ((class >> 6) & 3, (class >> 2) & 0xf) {
+                    (1 | 3, _) => Keyboard, (2, _) => Mouse,
+                    (_, 1 | 2) => Gamepad, (_, 3) => Remote, (_, 5 | 7) => Pen, _ => Other,
+                },
+                7 if minor == 1 => return Watch,
+                9 => return Health,
                 _ => {}
             }
         } else {
+            // 低功耗蓝牙外观值：高 10 位是类别，低 6 位是子类别。
             match (class >> 6, class & 0x3f) {
                 (15, 1) => return Keyboard,
                 (15, 2) => return Mouse,
                 (15, 3 | 4) => return Gamepad,
+                (15, 5 | 7) => return Pen,
+                (15, 9) => return Trackpad,
+                (15, 10) => return Presenter,
                 (1, _) => return Phone,
+                (2, 7) => return Tablet,
+                (3, _) => return Watch,
+                (6, _) => return Remote,
+                (12 | 13 | 14 | 16 | 17 | 18 | 49 | 50, _) => return Health,
+                (33, _) => return Speaker,
+                (37, 1) => return Earbuds,
+                (37, _) => return Headphones,
+                (41, _) => return HearingAid,
                 _ => {}
             }
         }
@@ -43,221 +79,85 @@ fn device_kind(name: &str, classic: bool, class: Option<u32>) -> DeviceKind {
     if ["headphone", "headset", "耳机"].iter().any(|s| name.contains(s)) { Headphones } else { Other }
 }
 
-impl Device {
-    /// 通知条正文：`名称 · 电量 80%`，设备没上报电量时只写名称。
-    pub fn summary(&self) -> String {
-        match self.battery {
-            Some(b) => format!("{} · 电量 {b}%", self.name),
-            None => self.name.clone(),
-        }
-    }
-}
 
-#[derive(Default)]
-struct Cache {devices:Vec<Device>,battery_at:Option<Instant>}
-impl Cache {
-    fn update(&mut self,mut devices:Vec<Device>,now:Instant,read:impl FnOnce(&[Device])->Result<Vec<(String,u8)>,()>)->Vec<Device>{
-        let changed=devices.len()!=self.devices.len() || devices.iter().any(|d|!self.devices.iter().any(|old|old.id==d.id));
-        for device in &mut devices {device.battery=self.devices.iter().find(|old|old.id==device.id).and_then(|old|old.battery);}
-        if devices.is_empty(){self.battery_at=None;}
-        else if changed || self.battery_at.is_none_or(|at|now.duration_since(at)>=Duration::from_secs(60)) {
-            // 失败同样限频，避免设备驱动异常时每两秒重新枚举整机。
-            self.battery_at=Some(now);
-            if let Ok(levels)=read(&devices){for device in &mut devices {device.battery=levels.iter().find(|(id,_)|id==&device.id).map(|(_,level)|*level);}}
-        }
-        self.devices=devices.clone();devices
-    }
-}
-
-/// 释放服务时唤醒后台线程，停止后续扫描。
+/// 释放服务会唤醒后台线程并取消未完成的蓝牙读取。
 pub struct Service {
     pub rx: std::sync::mpsc::Receiver<Vec<Device>>,
-    stop: std::sync::mpsc::Sender<()>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl Drop for Service {
-    fn drop(&mut self) {let _=self.stop.send(());}
+    fn drop(&mut self) {self.stop.store(true,std::sync::atomic::Ordering::Relaxed);}
 }
-
-pub fn spawn() -> Service {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    let (stop, stopped)=std::sync::mpsc::channel();
-    std::thread::Builder::new().name("daozai-bluetooth".into()).spawn(move || {
-        #[cfg(windows)]
-        let mut cache=Cache::default();
-        loop {
-            if stopped.try_recv()!=Err(std::sync::mpsc::TryRecvError::Empty) {return;}
-            #[cfg(windows)]
-            if let Ok(found)=query(&mut cache) {
-                if matches!(tx.try_send(found),Err(std::sync::mpsc::TrySendError::Disconnected(_))) {return;}
-            }
-            #[cfg(not(windows))]
-            let _=&tx;
-            if stopped.recv_timeout(Duration::from_secs(2))!=Err(std::sync::mpsc::RecvTimeoutError::Timeout) {return;}
-        }
-    }).ok();
-    Service {rx,stop}
-}
-
-#[cfg(windows)]
-fn query(cache:&mut Cache) -> Result<Vec<Device>, ()> {
-    use windows::Devices::Bluetooth::{BluetoothConnectionStatus, BluetoothDevice, BluetoothLEDevice};
-    use windows::Devices::Enumeration::DeviceInformation;
-    let selectors = [
-        (true, BluetoothDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).map_err(|_| ())?),
-        (false, BluetoothLEDevice::GetDeviceSelectorFromConnectionStatus(BluetoothConnectionStatus::Connected).map_err(|_| ())?),
-    ];
-    let mut devices = Vec::new();
-    for (classic, selector) in selectors {
-        let selector = windows::core::HSTRING::from(format!("({selector}) AND System.Devices.Aep.IsConnected:=System.StructuredQueryType.Boolean#True"));
-        let found = DeviceInformation::FindAllAsyncAqsFilter(&selector).map_err(|_| ())?.get().map_err(|_| ())?;
-        for info in found {
-            let Ok(id) = info.Id() else { continue };
-            let Ok(name) = info.Name() else { continue };
-            let name = name.to_string();
-            if name.trim().is_empty() { continue; }
-            let address = id.to_string().rsplit('-').next().unwrap_or_default().replace(':', "").to_ascii_uppercase();
-            if devices.iter().any(|d: &Device| d.id == address) { continue; }
-            let kind=if let Some(old)=cache.devices.iter().find(|old|old.id==address && old.name==name){old.kind}else{
-                let class=if classic {
-                    BluetoothDevice::FromIdAsync(&id).ok().and_then(|a|a.get().ok()).and_then(|d|{
-                        let class=d.ClassOfDevice().ok().and_then(|c|c.RawValue().ok());let _=d.Close();class
-                    })
-                }else{
-                    BluetoothLEDevice::FromIdAsync(&id).ok().and_then(|a|a.get().ok()).and_then(|d|{
-                        let class=d.Appearance().ok().and_then(|c|c.RawValue().ok()).map(u32::from);let _=d.Close();class
-                    })
-                };
-                device_kind(&name,classic,class)
-            };
-            devices.push(Device { id: address, kind, name, battery: None });
-        }
+pub fn spawn()->Service {
+    let (tx,rx)=std::sync::mpsc::sync_channel(1);
+    let stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    #[cfg(windows)] {
+        let stopped=stop.clone();
+        let _=std::thread::Builder::new().name("daozai-bluetooth".into()).spawn(move||windows::run(tx,stopped));
     }
-    devices.sort_by(|a,b|a.id.cmp(&b.id));
-    Ok(cache.update(devices,Instant::now(),read_batteries))
+    #[cfg(not(windows))] let _=tx;
+    Service{rx,stop}
 }
 
 #[cfg(windows)]
-fn read_batteries(devices:&[Device])->Result<Vec<(String,u8)>,()> {
-    use windows::core::{GUID, PCWSTR};
-    use windows::Win32::Devices::DeviceAndDriverInstallation::*;
-    use windows::Win32::Devices::Properties::DEVPROPKEY;
-    use windows::Win32::Foundation::HWND;
-
-    // DEVPKEY_Bluetooth_Battery {104EA319-6EE2-4701-BD47-8DDBF425BBE5}, 2
-    const BATTERY: DEVPROPKEY = DEVPROPKEY {
-        fmtid: GUID::from_u128(0x104ea319_6ee2_4701_bd47_8ddbf425bbe5),
-        pid: 2,
-    };
-    let mut batteries: Vec<(String, u8)> = Vec::new();
-    unsafe {
-        let set = SetupDiGetClassDevsW(None, PCWSTR::null(), HWND::default(), DIGCF_PRESENT | DIGCF_ALLCLASSES)
-            .map_err(|_| ())?;
-        for i in 0..u32::MAX {
-            let mut data = SP_DEVINFO_DATA {
-                cbSize: std::mem::size_of::<SP_DEVINFO_DATA>() as u32,
-                ..Default::default()
-            };
-            if SetupDiEnumDeviceInfo(set, i, &mut data).is_err() {
-                break;
-            }
-            let Some(instance) = instance_id(set, &data) else { continue };
-            let upper = instance.to_ascii_uppercase();
-            if !devices.iter().any(|device|upper.contains(&device.id)){continue;}
-            if let Some(level) = byte_prop(set, &data, &BATTERY).filter(|b| *b <= 100) {
-                batteries.push((upper.clone(), level));
-            }
-        }
-        // 每次枚举后释放设备列表句柄。
-        let _ = SetupDiDestroyDeviceInfoList(set);
-    }
-    Ok(devices.iter().filter_map(|device|batteries.iter().find(|(node,_)|node.contains(&device.id)).map(|(_,level)|(device.id.clone(),*level))).collect())
+pub fn spawn_receivers(store:compat::Store,wake:impl Fn()+Send+'static)->Service {
+    let (tx,rx)=std::sync::mpsc::sync_channel(1);
+    let stop=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped=stop.clone();
+    let _=std::thread::Builder::new().name("daozai-usb-receivers".into()).spawn(move||receivers::run(tx,stopped,store,wake));
+    Service{rx,stop}
 }
-
-#[cfg(windows)]
-unsafe fn instance_id(
-    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
-    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
-) -> Option<String> {
-    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDeviceInstanceIdW;
-    let mut buf = [0u16; 512];
-    let mut need = 0u32;
-    SetupDiGetDeviceInstanceIdW(set, data, Some(&mut buf), Some(&mut need)).ok()?;
-    Some(String::from_utf16_lossy(&buf[..(need as usize).saturating_sub(1)]))
-}
-
-#[cfg(windows)]
-unsafe fn byte_prop(
-    set: windows::Win32::Devices::DeviceAndDriverInstallation::HDEVINFO,
-    data: &windows::Win32::Devices::DeviceAndDriverInstallation::SP_DEVINFO_DATA,
-    key: &windows::Win32::Devices::Properties::DEVPROPKEY,
-) -> Option<u8> {
-    use windows::Win32::Devices::DeviceAndDriverInstallation::SetupDiGetDevicePropertyW;
-    use windows::Win32::Devices::Properties::DEVPROPTYPE;
-    // DEVPROP_TYPE_BYTE
-    const BYTE: DEVPROPTYPE = DEVPROPTYPE(0x3);
-    let mut ty = DEVPROPTYPE::default();
-    let mut buf = [0u8; 1];
-    let mut size = 0u32;
-    SetupDiGetDevicePropertyW(set, data, key, &mut ty, Some(&mut buf), Some(&mut size), 0).ok()?;
-    (ty == BYTE && size == 1).then_some(buf[0])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn device(id:&str)->Device {Device{id:id.into(),name:id.into(),battery:None,kind:DeviceKind::Mouse}}
-
-    #[test]
-    fn idle_bluetooth_does_not_rescan_all_hardware_every_two_seconds(){
-        let start=std::time::Instant::now();let mut cache=Cache::default();let mut scans=0;
-        for second in (0..360).step_by(2){
-            let found=cache.update(vec![device("AA")],start+Duration::from_secs(second),|_|{scans+=1;Ok(vec![("AA".into(),80)])});
-            assert_eq!(found[0].battery,Some(80));
-        }
-        assert_eq!(scans,6,"六分钟内同一设备的电量扫描应最多每分钟一次");
-    }
-
-    #[test]
-    fn bluetooth_connection_change_refreshes_immediately_and_failed_scans_back_off(){
-        let now=std::time::Instant::now();let mut cache=Cache::default();
-        cache.update(vec![device("AA")],now,|_|Ok(vec![("AA".into(),80)]));
-        let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(2),|_|Ok(vec![("AA".into(),79),("BB".into(),60)]));
-        assert_eq!(found[1].battery,Some(60));
-        let found=cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(62),|_|Err(()));
-        assert_eq!(found[0].battery,Some(79));
-        cache.update(vec![device("AA"),device("BB")],now+Duration::from_secs(64),|_|panic!("失败后不能立即重复扫描"));
-        assert!(cache.update(vec![],now+Duration::from_secs(66),|_|panic!("无设备不能扫描整机")).is_empty());
-        cache.update(vec![device("AA")],now+Duration::from_secs(68),|_|Ok(vec![("AA".into(),78)]));
-        assert_eq!(cache.devices[0].battery,Some(78));
-    }
-
     #[test]
     fn identifies_connected_audio_and_input_devices() {
         assert_eq!(device_kind("OpenMove by Shokz", true, Some(0x240418)), DeviceKind::Bone);
         assert_eq!(device_kind("QingLong 87 Ultra 8K", false, Some(961)), DeviceKind::Keyboard);
         assert_eq!(device_kind("MX Anywhere", false, Some(962)), DeviceKind::Mouse);
         assert_eq!(device_kind("耳机", true, Some(0x0404)), DeviceKind::Headphones);
-        assert_eq!(device_kind("AirPods", true, None), DeviceKind::Earbuds);
+        assert_eq!(device_kind("AirPods", true, None), DeviceKind::EarbudsStem);
         assert_eq!(device_kind("未知设备", false, None), DeviceKind::Other);
     }
 
     #[test]
+    fn recognizes_specific_models_before_generic_words() {
+        use DeviceKind::*;
+        for (name, kind) in [
+            ("小明的 AirPods Pro", EarbudsStemTips), ("AirPods Max", Headphones), ("AirPods", EarbudsStem),
+            ("HUAWEI FreeBuds Pro 3", EarbudsStemTips), ("Galaxy Buds2 Pro", Earbuds), ("WF-1000XM5", Earbuds),
+            ("WH-1000XM5", Headphones), ("Shokz OpenFit", OpenEar), ("OpenRun Pro by Shokz", Bone),
+            ("Joy-Con (L)", JoyCon), ("Xbox Wireless Controller", Gamepad), ("Magic Trackpad", Trackpad),
+            ("Surface Slim Pen 2", Pen), ("HUAWEI M-Pencil", Pen), ("Logi Spotlight", Presenter),
+            ("DJI Mic 2", Mic), ("Galaxy Watch6", Watch), ("HUAWEI WATCH GT 4", Watch), ("Mi Smart Band 8", Band),
+            ("小米手环 8", Band), ("MatePad Pro", Tablet), ("JBL Flip 6 speaker", Speaker),
+        ] { assert_eq!(device_kind(name, false, None), kind, "{name}"); }
+    }
+
+    #[test]
+    fn recognizes_class_and_appearance_codes() {
+        use DeviceKind::*;
+        // 经典蓝牙：音频 · 麦克风、电脑 · 平板、外设 · 手柄 / 遥控 / 数字笔、可穿戴 · 手表。
+        assert_eq!(device_kind("X", true, Some(0x0410)), Mic);
+        assert_eq!(device_kind("X", true, Some(0x011C)), Tablet);
+        assert_eq!(device_kind("X", true, Some(0x0508)), Gamepad);
+        assert_eq!(device_kind("X", true, Some(0x050C)), Remote);
+        assert_eq!(device_kind("X", true, Some(0x051C)), Pen);
+        assert_eq!(device_kind("X", true, Some(0x0704)), Watch);
+        // 低功耗外观值：触控板、演示遥控、数字笔、助听器、入耳耳机、心率。
+        assert_eq!(device_kind("X", false, Some(15 << 6 | 9)), Trackpad);
+        assert_eq!(device_kind("X", false, Some(15 << 6 | 10)), Presenter);
+        assert_eq!(device_kind("X", false, Some(15 << 6 | 7)), Pen);
+        assert_eq!(device_kind("X", false, Some(41 << 6)), HearingAid);
+        assert_eq!(device_kind("X", false, Some(37 << 6 | 1)), Earbuds);
+        assert_eq!(device_kind("X", false, Some(13 << 6)), Health);
+    }
+
+    #[test]
     fn summary_omits_missing_battery() {
-        let d = Device { id: "1".into(), name: "Headset".into(), battery: None, kind: DeviceKind::Headphones };
+        let d = Device { id: "1".into(), name: "Headset".into(), battery: None, kind: DeviceKind::Headphones, ..Default::default() };
         assert_eq!(d.summary(), "Headset");
         let d = Device { battery: Some(80), ..d };
         assert_eq!(d.summary(), "Headset · 电量 80%");
-    }
-}
-
-#[cfg(test)]
-mod lifecycle_tests {
-    #[test]
-    fn dropping_service_signals_stop_even_without_successful_scans(){
-        let (_tx,rx)=std::sync::mpsc::channel();
-        let (stop,stopped)=std::sync::mpsc::channel();
-        drop(super::Service {rx,stop});
-        assert_eq!(stopped.recv_timeout(std::time::Duration::from_millis(100)),Ok(()));
     }
 }

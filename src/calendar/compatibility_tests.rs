@@ -37,6 +37,50 @@ fn mock_fetch(provider:Provider,nested:bool,broken:bool)->Result<Fetched,Failure
     let result=fetch_month(&cfg,"mock","2026-11-01".parse().unwrap());stop.send(()).unwrap();worker.join().unwrap();result
 }
 
+pub(crate) fn mock_caldav_connection(
+    provider: Provider, username: &str, status: u16, content_type: &str, report: &str,
+) -> Event {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/", listener.local_addr().unwrap());
+    let report = report.to_owned();
+    let content_type = content_type.to_owned();
+    let worker = std::thread::spawn(move || {
+        let discovery = r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:response><d:href>/calendar/</d:href><d:resourcetype><c:calendar/></d:resourcetype></d:response></d:multistatus>"#;
+        for (method, code, mime, body) in [("PROPFIND", 207, "application/xml", discovery), ("REPORT", status, &content_type, &report)] {
+            let (mut socket, _) = listener.accept().unwrap();
+            assert!(read_request(&mut socket).starts_with(method));
+            write!(socket, "HTTP/1.1 {code} Test\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    let service = Service::start();
+    let cfg = Config { provider, username: username.into(), href: None, server: Some(base) };
+    service.test(cfg, "test-password".into());
+    let result = service.ev.recv_timeout(Duration::from_secs(3)).unwrap();
+    worker.join().unwrap();
+    result
+}
+
+#[test]
+fn caldav_connection_test_accepts_parse_errors_but_requires_read_access() {
+    let invalid = "BEGIN:VEVENT\nUID:bad\nDTSTART;TZID=Unsupported/Zone:20261112T100000\nEND:VEVENT";
+    let start = (chrono::Utc::now() + chrono::Duration::minutes(30)).format("%Y%m%dT%H%M%SZ");
+    let mixed = format!("{invalid}\nBEGIN:VEVENT\nUID:good\nDTSTART:{start}\nEND:VEVENT");
+    for provider in [Provider::DingTalk, Provider::Feishu, Provider::ICloud, Provider::Custom] {
+        for (status, ics, count) in [(207, invalid, 0), (207, mixed.as_str(), 1), (207, "", 0), (401, "", 0), (403, "", 0)] {
+            let data = if ics.is_empty() { String::new() } else { format!("<d:response><d:href>/calendar/1.ics</d:href><c:calendar-data>{ics}</c:calendar-data></d:response>") };
+            let xml = format!(r#"<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{data}</d:multistatus>"#);
+            let result = mock_caldav_connection(provider, "mock", status, "application/xml", &xml);
+            let Event::Test { ok, message, count: actual, config } = result else { panic!("应返回连接测试结果"); };
+            assert_eq!(ok, status == 207, "{provider:?} {status} {message}");
+            assert_eq!(actual, count);
+            assert_eq!(config.is_some(), ok);
+            if let Some(cfg) = config { assert_eq!(cfg.href, Some(format!("{}calendar/", cfg.base()))); }
+            if status != 207 { assert!(message.contains(&status.to_string())); }
+            else { assert_eq!(message.contains("1 条日程无法解析"), !ics.is_empty()); }
+        }
+    }
+}
+
 #[test]
 fn discovery_keeps_root_events_and_follows_calendar_home_for_every_caldav_provider(){
     for provider in [Provider::DingTalk,Provider::Feishu,Provider::ICloud,Provider::Custom]{
@@ -98,7 +142,7 @@ fn mixed_caldav_response_preserves_readable_events_and_reports_resource_errors()
     let listener=TcpListener::bind("127.0.0.1:0").unwrap();let base=format!("http://{}/",listener.local_addr().unwrap());
     let worker=std::thread::spawn(move||{
         let (mut socket,_)=listener.accept().unwrap();let _=read_request(&mut socket);
-        let xml="<d:multistatus><d:response><d:href>/good.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:good\nDTSTART:20261112T020000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:bad\nDTSTART;TZID=Unsupported/Zone:20261112T100000\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response><d:response><d:href>/private.ics</d:href><d:status>HTTP/1.1 403 Forbidden</d:status></d:response></d:multistatus>";
+        let xml="<d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\"><d:response><d:href>/good.ics</d:href><c:calendar-data>BEGIN:VCALENDAR\nBEGIN:VEVENT\nUID:good\nDTSTART:20261112T020000Z\nEND:VEVENT\nBEGIN:VEVENT\nUID:bad\nDTSTART;TZID=Unsupported/Zone:20261112T100000\nEND:VEVENT\nEND:VCALENDAR</c:calendar-data></d:response><d:response><d:href>/private.ics</d:href><d:status>HTTP/1.1 403 Forbidden</d:status></d:response></d:multistatus>";
         write!(socket,"HTTP/1.1 207 Result\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{xml}",xml.len()).unwrap();
     });
     let config=Config{provider:Provider::DingTalk,username:"mock".into(),href:None,server:Some(base.clone())};
@@ -133,12 +177,12 @@ fn inaccessible_home_does_not_block_other_homes_or_hide_the_warning(){
             let(mut socket,_)=loop{if let Ok(socket)=listener.accept(){break socket;}assert!(Instant::now()<until,"缺少预期请求 {expected}");std::thread::sleep(Duration::from_millis(2));};
             let request=read_request(&mut socket);assert_eq!(request.split_whitespace().nth(1),Some(expected));
             let(status,body)=match expected{
-                "/"=>(207,"<response><href>/</href><calendar-home-set><href>/denied/</href><href>/home/</href></calendar-home-set></response>"),
+                "/"=>(207,"<response><href>/</href><c:calendar-home-set><href>/denied/</href><href>/home/</href></c:calendar-home-set></response>"),
                 "/denied/"=>(403,""),
-                "/home/"=>(207,"<response><href>/work/</href><resourcetype><calendar/></resourcetype></response>"),
-                _=>(207,"<response><href>/work/one.ics</href><calendar-data>BEGIN:VEVENT\nUID:work\nDTSTART:20261112T020000Z\nEND:VEVENT</calendar-data></response>"),
+                "/home/"=>(207,"<response><href>/work/</href><resourcetype><c:calendar/></resourcetype></response>"),
+                _=>(207,"<response><href>/work/one.ics</href><c:calendar-data>BEGIN:VEVENT\nUID:work\nDTSTART:20261112T020000Z\nEND:VEVENT</c:calendar-data></response>"),
             };
-            let body=format!("<multistatus>{body}</multistatus>");write!(socket,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
+            let body=format!(r#"<multistatus xmlns="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">{body}</multistatus>"#);write!(socket,"HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).unwrap();
         }
     });
     let cfg=Config{provider:Provider::Custom,username:"mock".into(),href:None,server:Some(base)};

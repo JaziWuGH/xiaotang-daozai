@@ -144,7 +144,7 @@ fn thumbnail(path: &Path, size: i32, flags: windows::Win32::UI::Shell::SIIGBF) -
 }
 
 #[cfg(windows)]
-fn shell_icon(path: &Path) -> Option<ColorImage> {
+pub(crate) fn shell_icon(path: &Path) -> Option<ColorImage> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{

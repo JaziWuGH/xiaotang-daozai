@@ -1,0 +1,1049 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "岛仔 SDK v1 插件清单（评审稿）",
+  "type": "object",
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 64,
+      "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "titleAccent": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "description": "状态页标题要着色的末尾文字，必须是 name 的一部分。颜色使用 statusLayout.style.accent。"
+    },
+    "navigationIcon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "background"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[ \\t\\n\\r]*[Mm][-MmLlHhVvQqCcZz0-9Ee+., \\t\\n\\r]*$",
+          "description": "24×24 坐标内的描边轮廓，包含可绘制的线段或曲线，最多 64 条路径命令。"
+        },
+        "background": {
+          "type": "string",
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "description": "设置侧栏图标的背景色。"
+        }
+      },
+      "description": "独立插件功能在设置侧栏和岛上快捷导航使用的图标。"
+    },
+    "author": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+    },
+    "api": {
+      "const": 1,
+      "description": "插件要求的接口主版本。高于宿主支持版本时，安装提示需要更新岛仔。"
+    },
+    "runtime": {
+      "enum": [
+        "js",
+        "wasm",
+        "assets",
+        "material"
+      ]
+    },
+    "entry": {
+      "type": "string",
+      "pattern": "^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.[A-Za-z0-9]+$"
+    },
+    "cover": {
+      "const": "cover.png",
+      "description": "包根目录的 PNG 封面，最大 256 KiB，宽高不超过 1920×1080，建议 16:9。"
+    },
+    "owner": {
+      "enum": [
+        "self",
+        "general",
+        "appearance",
+        "pages",
+        "tasks",
+        "focus",
+        "calendar",
+        "music",
+        "quota",
+        "status",
+        "notifications",
+        "weather",
+        "wireless"
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "settings",
+          "card",
+          "calendar.marker",
+          "module",
+          "calendar.source",
+          "lyrics.source",
+          "quota.source",
+          "status.page",
+          "status.canvas",
+          "island.pinned",
+          "appearance.skin",
+          "appearance.material",
+          "navigation.shortcuts",
+          "wireless.receivers",
+          "storage",
+          "timer",
+          "action",
+          "event",
+          "notice",
+          "network",
+          "file.read",
+          "appearance.pet",
+          "appearance.icon",
+          "appearance.font"
+        ]
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    },
+    "refreshSeconds": {"type":"integer","minimum":60,"maximum":86400,"default":60},
+    "network": {
+      "type": "object",
+      "properties": {
+        "hosts": {
+          "type": "array", "minItems": 1, "maxItems": 4, "uniqueItems": true,
+          "items": {
+            "type": "string", "maxLength": 253,
+            "pattern": "^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+          }
+        },
+        "url": {"type": "string", "maxLength": 2048, "pattern": "^[Hh][Tt][Tt][Pp][Ss]://"},
+        "sources": {
+          "description": "实验。每个来源的 key 须唯一。URL 占位符只能出现在路径和查询串。",
+          "type": "array", "minItems": 1, "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"},
+              "url": {"type": "string", "maxLength": 2048, "pattern": "^[Hh][Tt][Tt][Pp][Ss]://"}
+            },
+            "required": ["key", "url"],
+            "additionalProperties": false
+          }
+        },
+        "minRefreshSeconds": {"type": "integer", "minimum": 60, "maximum": 86400},
+        "credential": {
+          "type": "object",
+          "properties": {
+            "label": {"type": "string", "minLength": 1, "maxLength": 80},
+            "header": {"type": "string", "maxLength": 64, "pattern": "^[A-Za-z0-9!#$%&'*+.^_\u0060|~-]+$"},
+            "prefix": {"type": "string", "maxLength": 80, "pattern": "^[ -~]*$"}
+          },
+          "required": ["label", "header"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["hosts"],
+      "not": {"required": ["url", "sources"]},
+      "additionalProperties": false
+    },
+    "attribution": {
+      "description": "实验。HTTPS 数据来源标注，链接域名须在 network.hosts 内。",
+      "type": "object",
+      "properties": {
+        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+        "url": {"type": "string", "maxLength": 2048, "pattern": "^[Hh][Tt][Tt][Pp][Ss]://"}
+      },
+      "required": ["label"],
+      "additionalProperties": false
+    },
+    "statusLayout": {
+      "type": "object",
+      "description": "状态详情页的组件顺序与样式。缺省时使用默认模板。",
+      "properties": {
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {"type": {"enum": ["state", "summary", "alert", "updated_at", "actions", "fields", "list", "chart", "text", "badge", "counter", "clock", "countdown", "canvas"]}},
+                "required": ["type"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "progress"},
+                  "variant": {"enum": ["ring", "bar"], "default": "ring"}
+                },
+                "required": ["type"],
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "type": {"const": "metrics"},
+                  "columns": {"enum": [1, 2], "default": 2}
+                },
+                "required": ["type"],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "allOf": [
+            {"contains": {"properties": {"type": {"const": "state"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "summary"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "progress"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "metrics"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "list"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "chart"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "text"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "badge"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "alert"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "updated_at"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "actions"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "fields"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "canvas"}}}, "minContains": 0, "maxContains": 1},
+            {"contains": {"properties": {"type": {"const": "counter"}}}, "minContains": 0, "maxContains": 4},
+            {"contains": {"properties": {"type": {"const": "clock"}}}, "minContains": 0, "maxContains": 4},
+            {"contains": {"properties": {"type": {"const": "countdown"}}}, "minContains": 0, "maxContains": 4}
+          ]
+        },
+        "style": {
+          "type": "object",
+          "properties": {
+            "accent": {"type": "string", "pattern": "^#[0-9A-Fa-f]{6}$", "minLength": 7, "maxLength": 7},
+            "density": {"enum": ["comfortable", "compact"], "default": "comfortable"},
+            "surface": {"enum": ["card", "plain"], "default": "card"},
+            "emphasis": {"enum": ["normal", "strong"], "default": "normal"},
+            "icon": {"enum": ["battery", "cup", "clock", "chart", "cloud", "calendar"]}
+          },
+          "additionalProperties": false
+        },
+        "canvasFields": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "properties": {
+              "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"},
+              "rect": {
+                "type": "array",
+                "prefixItems": [
+                  {"type": "integer", "minimum": 0, "maximum": 386},
+                  {"type": "integer", "minimum": 0, "maximum": 359},
+                  {"type": "integer", "minimum": 1, "maximum": 387},
+                  {"type": "integer", "minimum": 1, "maximum": 360}
+                ],
+                "minItems": 4,
+                "items": false
+              },
+              "placeholder": {"type": "string", "minLength": 1, "maxLength": 80},
+              "action": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"}
+            },
+            "required": ["key", "rect"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": ["components"],
+      "additionalProperties": false
+    },
+    "events": {
+      "description": "订阅宿主事件，声明 event 能力时必填。",
+      "const": ["focus.finished"]
+    },
+    "actions": {
+      "description": "待宿主实现。列出可供用户点击或提交的动作名称。",
+      "type": "array", "uniqueItems": true, "maxItems": 32,
+      "items": {"type":"string","pattern":"^[a-z][a-z0-9_-]{0,39}$"}
+    },
+    "dataVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "source.read": {
+          "enum": ["file", "loopback", "https"],
+          "description": "Windows 试用版 JS 插件的单一只读来源，由用户在安装后授权本地文件、本机 HTTP 或白名单内的 HTTPS 地址。"
+        },
+        "hosts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 253,
+            "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "files": {
+          "type": "array",
+          "items": {
+            "const": "user-selected-read"
+          },
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "screen.backdrop": {
+          "const": true
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "material": {
+      "type": "object",
+      "properties": {
+        "controls": {"type": "boolean"},
+        "spring": {
+          "type": "object",
+          "properties": {
+            "stiffness": {"type": "number", "minimum": 0.2, "maximum": 3},
+            "damping": {"type": "number", "minimum": 0.1, "maximum": 1}
+          },
+          "required": ["stiffness", "damping"],
+          "additionalProperties": false
+        },
+        "shadow": {"type": "number", "minimum": 0, "maximum": 1.5},
+        "foreground": {"enum": ["skin", "glass"], "default": "skin"}
+      },
+      "required": ["controls", "spring"],
+      "additionalProperties": false
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/setting",
+        "not": {"properties": {"type": {"enum": ["icon", "color"]}}}
+      },
+      "maxItems": 32
+    },
+    "data": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[^./\\\\:*?\"<>|][^/\\\\:*?\"<>|]*\\.json$"},
+      "description": "实验。包根目录的 UTF-8 JSON 文件，单个最多 64 KiB，合计最多 256 KiB。"
+    },
+    "timezones": {
+      "type": "boolean",
+      "description": "实验。为设置中的 IANA 时区名提供当前偏移和夏令时状态。"
+    },
+    "assets": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.[A-Za-z0-9]+$"
+      },
+      "maxItems": 32,
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "id",
+    "name",
+    "author",
+    "version",
+    "api",
+    "runtime",
+    "cover",
+    "owner",
+    "capabilities",
+    "dataVersion",
+    "permissions"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "fontPackEntry": {
+      "type": "object", "required": ["fonts"], "additionalProperties": false,
+      "properties": {
+        "fonts": {
+          "type": "array", "minItems": 1, "maxItems": 4,
+          "items": {
+            "type": "object", "required": ["name", "file"], "additionalProperties": false,
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "file": {"type": "string", "description": "包内相对路径，用 / 分隔。文件格式为 TTF 或 OTF。"}
+            }
+          }
+        }
+      }
+    },
+    "canvas": {
+      "description": "脚本输出的 canvas 字段。全画布节点数、嵌套深度、文字总量、绑定关联和包内图片由宿主进一步校验。",
+      "type": "object",
+      "required": ["height", "nodes"],
+      "additionalProperties": false,
+      "properties": {
+        "height": {"type": "number", "minimum": 40, "maximum": 360},
+        "nodes": {"type": "array", "maxItems": 1500, "items": {"$ref": "#/$defs/canvasNode"}},
+        "binds": {"type": "object", "additionalProperties": {"$ref": "#/$defs/canvasBinding"}}
+      }
+    },
+    "canvasTimestamp": {"type": "integer", "minimum": 0, "maximum": 253402300799},
+    "canvasBinding": {
+      "type": "object",
+      "oneOf": [
+        {"required": ["counter"], "maxProperties": 1},
+        {"required": ["countdown"], "maxProperties": 1},
+        {"required": ["progress"], "maxProperties": 1},
+        {"required": ["clock_angle"], "maxProperties": 1},
+        {"required": ["now"], "propertyNames": {"enum": ["now", "zone"]}},
+        {"required": ["daylight"], "maxProperties": 1}
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "counter": {
+          "type": "object",
+          "required": ["start_value", "per_second", "start_at", "decimals"],
+          "additionalProperties": false,
+          "properties": {
+            "start_value": {"type": "number"},
+            "per_second": {"type": "number"},
+            "start_at": {"$ref": "#/$defs/canvasTimestamp"},
+            "until": {"$ref": "#/$defs/canvasTimestamp"},
+            "decimals": {"type": "integer", "minimum": 0, "maximum": 4}
+          }
+        },
+        "countdown": {
+          "type": "object",
+          "required": ["target_at", "format"],
+          "additionalProperties": false,
+          "properties": {
+            "target_at": {"$ref": "#/$defs/canvasTimestamp"},
+            "format": {"enum": ["HH:mm:ss", "d天 HH:mm"]}
+          }
+        },
+        "progress": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/canvasTimestamp"}},
+        "clock_angle": {
+          "type": "object",
+          "required": ["zone", "hand"],
+          "additionalProperties": false,
+          "properties": {
+            "zone": {"type": "string", "minLength": 1},
+            "hand": {"enum": ["hour", "minute"]}
+          }
+        },
+        "now": {"enum": ["HH:mm", "HH:mm:ss"]},
+        "zone": {"type": "string", "minLength": 1},
+        "daylight": {
+          "type": "object",
+          "required": ["zone", "hours"],
+          "additionalProperties": false,
+          "properties": {
+            "zone": {"type": "string", "minLength": 1},
+            "hours": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "prefixItems": [
+                {"type": "integer", "minimum": 0, "maximum": 23},
+                {"type": "integer", "minimum": 0, "maximum": 24}
+              ]
+            }
+          }
+        }
+      }
+    },
+    "canvasNumber": {
+      "oneOf": [
+        {"type": "number", "minimum": -2000, "maximum": 2000},
+        {
+          "type": "object",
+          "required": ["bind"],
+          "properties": {
+            "bind": {"type": "string", "minLength": 1},
+            "map": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "minimum": -2000, "maximum": 2000}}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "canvasPoint": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/canvasNumber"}},
+    "canvasLine": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/canvasNumber"}},
+    "canvasBounds": {
+      "type": "array", "minItems": 4, "maxItems": 4,
+      "prefixItems": [
+        {"$ref": "#/$defs/canvasNumber"}, {"$ref": "#/$defs/canvasNumber"},
+        {"$ref": "#/$defs/canvasNumber", "minimum": 0}, {"$ref": "#/$defs/canvasNumber", "minimum": 0}
+      ]
+    },
+    "canvasColorName": {"type": "string", "pattern": "^(?:#[0-9A-Fa-f]{6}(?:[0-9A-Fa-f]{2})?|\\$(?:accent|text|muted|dim|card|track|bg))$"},
+    "canvasColor": {
+      "oneOf": [
+        {"$ref": "#/$defs/canvasColorName"},
+        {
+          "type": "object",
+          "required": ["bind", "pick"],
+          "properties": {
+            "bind": {"type": "string", "minLength": 1},
+            "pick": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/canvasColorName"}}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "canvasPaint": {
+      "oneOf": [
+        {"$ref": "#/$defs/canvasColor"},
+        {
+          "type": "object",
+          "required": ["stops"],
+          "oneOf": [{"required": ["linear"]}, {"required": ["radial"]}],
+          "properties": {
+            "linear": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"$ref": "#/$defs/canvasPoint"}},
+            "radial": {
+              "type": "array", "minItems": 2, "maxItems": 2,
+              "anyOf": [
+                {"prefixItems": [{"$ref": "#/$defs/canvasPoint"}, {"$ref": "#/$defs/canvasNumber", "exclusiveMinimum": 0}]},
+                {"items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number", "minimum": -2000, "maximum": 2000}}}
+              ]
+            },
+            "stops": {
+              "type": "array", "minItems": 2,
+              "items": {
+                "type": "array", "minItems": 2, "maxItems": 2,
+                "prefixItems": [{"type": "number", "minimum": 0, "maximum": 1}, {"$ref": "#/$defs/canvasColor"}]
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "pinnedCanvas": {
+      "type": "object",
+      "required": ["width", "nodes"],
+      "additionalProperties": false,
+      "properties": {
+        "width": {"type": "number", "minimum": 1, "maximum": 156},
+        "fit_width": {"type": "boolean"},
+        "height": {"const": 22},
+        "nodes": {"type": "array", "maxItems": 60, "items": {"$ref": "#/$defs/canvasNode"}},
+        "binds": {"$ref": "#/$defs/canvas/properties/binds"}
+      }
+    },
+    "pinnedOutput": {
+      "type": "object",
+      "oneOf": [
+        {"required": ["text"], "not": {"required": ["canvas"]}},
+        {"required": ["canvas"], "not": {"anyOf": [{"required": ["text"]}, {"required": ["value"]}, {"required": ["icon"]}]}}
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1, "maxLength": 12},
+        "value": {"type": ["string", "number", "object", "null"]},
+        "icon": {"enum": ["clock", "chart", "coin", "calendar", "cup", "cloud"]},
+        "sensitive": {"type": "boolean"},
+        "canvas": {"oneOf": [
+          {"$ref": "#/$defs/pinnedCanvas"},
+          {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/pinnedCanvas"}}
+        ]}
+      }
+    },
+    "canvasNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "oneOf": [
+        {"required": ["rect"], "not": {"anyOf": [{"required": ["image"]}, {"required": ["icon"]}]}},
+        {"required": ["circle"]},
+        {"required": ["arc"]},
+        {"required": ["line"]},
+        {"required": ["points"]},
+        {"required": ["path"]},
+        {"required": ["text"]},
+        {"required": ["image"]},
+        {"required": ["icon"]},
+        {"required": ["pet"]},
+        {"required": ["group"]}
+      ],
+      "dependentRequired": {
+        "text": ["at", "size"],
+        "color": ["text"],
+        "image": ["rect"],
+        "icon": ["rect"],
+        "burst": ["id"],
+        "scroll": ["group", "clip"]
+      },
+      "not": {"required": ["fill", "color"]},
+      "properties": {
+        "rect": {"$ref": "#/$defs/canvasBounds"},
+        "r": {
+          "oneOf": [
+            {"$ref": "#/$defs/canvasNumber", "minimum": 0},
+            {"type": "array", "minItems": 4, "maxItems": 4, "items": {"$ref": "#/$defs/canvasNumber", "minimum": 0}}
+          ]
+        },
+        "circle": {
+          "type": "array", "minItems": 3, "maxItems": 3,
+          "prefixItems": [
+            {"$ref": "#/$defs/canvasNumber"}, {"$ref": "#/$defs/canvasNumber"}, {"$ref": "#/$defs/canvasNumber", "exclusiveMinimum": 0}
+          ]
+        },
+        "arc": {
+          "type": "object",
+          "required": ["c", "r", "start", "sweep"],
+          "properties": {
+            "c": {"$ref": "#/$defs/canvasPoint"},
+            "r": {"$ref": "#/$defs/canvasNumber", "exclusiveMinimum": 0},
+            "start": {"$ref": "#/$defs/canvasNumber"},
+            "sweep": {"$ref": "#/$defs/canvasNumber"}
+          },
+          "additionalProperties": false
+        },
+        "line": {"$ref": "#/$defs/canvasLine"},
+        "points": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/canvasPoint"}},
+        "area": {"$ref": "#/$defs/canvasNumber"},
+        "path": {"type": "string", "pattern": "^\\s*[Mm][MmLlHhVvQqCcZz0-9eE+.,\\s-]+$"},
+        "text": {"type": "string", "maxLength": 2000},
+        "at": {"$ref": "#/$defs/canvasPoint"},
+        "size": {"$ref": "#/$defs/canvasNumber", "minimum": 6, "maximum": 96},
+        "weight": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "align": {"enum": ["left", "center", "right"], "default": "left"},
+        "max_width": {"$ref": "#/$defs/canvasNumber", "exclusiveMinimum": 0},
+        "lines": {"type": "integer", "minimum": 1, "maximum": 255, "default": 1},
+        "font": {"type": "string", "minLength": 1},
+        "image": {
+          "type": "string",
+          "description": "包内相对路径，使用 / 分隔，单张最多 1024×1024。可引用尺寸合规的 cover.png。",
+          "pattern": "^(?!.*\\.\\.)(?!.*[. ]/)(?!.*[\\u0000-\\u001F\\u007F-\\u009F])[^/\\\\:<>\"|?*]+(?:/[^/\\\\:<>\"|?*]+)*\\.(?:[Pp][Nn][Gg]|[Ss][Vv][Gg])$"
+        },
+        "fit": {"enum": ["cover", "contain"], "default": "contain"},
+        "icon": {"enum": ["heart", "cake", "ring", "plane", "star", "gift", "flag", "calendar", "coffee", "coin", "sun", "moon"]},
+        "pet": {
+          "type": "object", "required": ["at", "size"], "additionalProperties": false,
+          "properties": {
+            "at": {"$ref": "#/$defs/canvasPoint"},
+            "size": {"$ref": "#/$defs/canvasNumber", "minimum": 12, "maximum": 96},
+            "mood": {"enum": ["expressions", "sleeping", "happy", "wink", "smug", "blush", "delighted", "side-glance", "praised", "heart", "giggle", "shy-peek", "scan", "peek", "search"], "default": "expressions"},
+            "motion": {"enum": ["none", "run", "bob"], "default": "none"},
+            "id": {"type": "string", "minLength": 1}
+          }
+        },
+        "group": {"type": "array", "maxItems": 1500, "items": {"$ref": "#/$defs/canvasNode"}},
+        "clip": {"$ref": "#/$defs/canvasBounds"},
+        "translate": {"$ref": "#/$defs/canvasPoint"},
+        "rotate": {"$ref": "#/$defs/canvasNumber"},
+        "scale": {"$ref": "#/$defs/canvasNumber", "exclusiveMinimum": 0},
+        "fill": {"$ref": "#/$defs/canvasPaint"},
+        "color": {"$ref": "#/$defs/canvasPaint"},
+        "stroke": {"$ref": "#/$defs/canvasPaint"},
+        "width": {"$ref": "#/$defs/canvasNumber", "minimum": 0},
+        "cap": {"enum": ["round", "butt"], "default": "butt"},
+        "dash": {
+          "type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"$ref": "#/$defs/canvasNumber", "exclusiveMinimum": 0}
+        },
+        "opacity": {"$ref": "#/$defs/canvasNumber", "minimum": 0, "maximum": 1},
+        "shadow": {"enum": ["sm", "md", "lg"]},
+        "glow": {"oneOf": [{"const": true}, {"$ref": "#/$defs/canvasColor"}]},
+        "id": {"type": "string", "minLength": 1},
+        "roll": {"type": "boolean"},
+        "animate": {
+          "type": "object", "required": ["ms"], "additionalProperties": false,
+          "properties": {
+            "ms": {"type": "integer", "minimum": 120, "maximum": 1200},
+            "ease": {"enum": ["linear", "spring"], "default": "linear"}
+          }
+        },
+        "loop": {
+          "type": "object", "required": ["kind", "period_ms"], "additionalProperties": false,
+          "properties": {
+            "kind": {"enum": ["pulse", "flow", "bob", "spin"]},
+            "period_ms": {"type": "integer", "minimum": 800, "maximum": 4294967295}
+          }
+        },
+        "burst": {"const": "confetti"},
+        "hit": {
+          "type": "object", "minProperties": 1, "maxProperties": 1, "additionalProperties": false,
+          "properties": {
+            "action": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"},
+            "open": {"type": "string", "minLength": 1, "maxLength": 2048, "pattern": "^[Hh][Tt][Tt][Pp][Ss]://"},
+            "copy": {"type": "string", "maxLength": 2000}
+          }
+        },
+        "hover": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "opacity": {"$ref": "#/$defs/canvasNumber", "minimum": 0, "maximum": 1},
+            "lift": {"$ref": "#/$defs/canvasNumber"},
+            "fill": {"$ref": "#/$defs/canvasColor"},
+            "hint": {"type": "string", "minLength": 1, "maxLength": 40}
+          }
+        },
+        "scroll": {
+          "type": "object", "required": ["axis", "content"], "additionalProperties": false,
+          "properties": {
+            "axis": {"const": "y"},
+            "content": {"type": "number", "exclusiveMinimum": 0}
+          }
+        },
+        "tips": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["x", "label", "value"], "additionalProperties": false,
+            "properties": {
+              "x": {"type": "number", "minimum": -2000, "maximum": 2000},
+              "label": {"type": "string"},
+              "value": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "settingIcon": {"enum": ["heart", "cake", "ring", "plane", "star", "gift", "flag", "calendar", "coffee", "coin", "sun", "moon"]},
+    "settingColor": {"enum": ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"]},
+    "statusField": {
+      "description": "脚本输出的 status.fields 子项。初始值的长度须符合 max。",
+      "type": "object",
+      "required": ["key", "label", "max"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 28},
+        "value": {"type": ["string", "null"], "maxLength": 200},
+        "max": {"type": "integer", "minimum": 1, "maximum": 200},
+        "multiline": {"type": "boolean", "default": false}
+      }
+    },
+    "setting": {
+      "type": "object",
+      "required": ["key", "label", "type", "default"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,39}$"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 80},
+        "type": {"enum": ["text", "date", "switch", "choice", "number", "time", "weekdays", "list", "timezone", "icon", "color"]},
+        "default": {"type": "string"},
+        "multiline": {"type": "boolean", "default": false},
+        "min": {"type": "number"},
+        "max": {"type": "number"},
+        "step": {"type": "number", "exclusiveMinimum": 0},
+        "unit": {"type": "string", "maxLength": 4},
+        "precision": {"type": "integer", "minimum": 0, "maximum": 3},
+        "choices": {
+          "type": "array", "minItems": 2, "maxItems": 6, "uniqueItems": true,
+          "items": {
+            "type": "object", "required": ["value", "label"], "additionalProperties": false,
+            "properties": {
+              "value": {"type": "string", "minLength": 1, "maxLength": 80},
+              "label": {"type": "string", "minLength": 1, "maxLength": 80}
+            }
+          }
+        },
+        "item": {
+          "type": "array", "minItems": 1, "maxItems": 7,
+          "items": {
+            "$ref": "#/$defs/setting",
+            "properties": {"type": {"enum": ["text", "choice", "number", "date", "time", "switch", "timezone", "icon", "color"]}}
+          }
+        },
+        "maxItems": {"type": "integer", "minimum": 1, "maximum": 20}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "text"}}}, "then": {"properties": {"default": {"minLength": 1, "maxLength": 80}}}, "else": {"not": {"required": ["multiline"]}}},
+        {"if": {"properties": {"type": {"const": "date"}}}, "then": {"properties": {"default": {"format": "date"}}}},
+        {"if": {"properties": {"type": {"const": "switch"}}}, "then": {"properties": {"default": {"enum": ["true", "false"]}}}},
+        {"if": {"properties": {"type": {"const": "time"}}}, "then": {"properties": {"default": {"pattern": "^(?:[01][0-9]|2[0-3]):[0-5][0-9]$"}}}},
+        {"if": {"properties": {"type": {"const": "timezone"}}}, "then": {"properties": {"default": {"pattern": "^[A-Za-z][A-Za-z0-9_+\\-]*(?:/[A-Za-z0-9_+\\-]+)*$"}}}},
+        {"if": {"properties": {"type": {"const": "icon"}}}, "then": {"properties": {"default": {"$ref": "#/$defs/settingIcon"}}}},
+        {"if": {"properties": {"type": {"const": "color"}}}, "then": {"properties": {"default": {"$ref": "#/$defs/settingColor"}}}},
+        {"if": {"properties": {"type": {"const": "weekdays"}}}, "then": {"properties": {"default": {"pattern": "^(?:[1-7](?:,[1-7]){0,6})?$"}}}},
+        {
+          "if": {"properties": {"type": {"const": "number"}}},
+          "then": {
+            "required": ["min", "max", "step"],
+            "properties": {"default": {"pattern": "^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$"}}
+          },
+          "else": {"not": {"anyOf": [{"required": ["min"]}, {"required": ["max"]}, {"required": ["step"]}, {"required": ["unit"]}, {"required": ["precision"]}]}}
+        },
+        {"if": {"properties": {"type": {"const": "choice"}}}, "then": {"required": ["choices"]}, "else": {"not": {"required": ["choices"]}}},
+        {"if": {"properties": {"type": {"const": "list"}}}, "then": {"required": ["item", "maxItems"]}, "else": {"not": {"anyOf": [{"required": ["item"]}, {"required": ["maxItems"]}]}}}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"permissions": {
+          "required": ["source.read"],
+          "properties": {"source.read": {"const": "https"}}
+        }}
+      },
+      "then": {
+        "required": ["network"],
+        "properties": {"runtime": {"const": "js"}, "permissions": {"maxProperties": 1}}
+      },
+      "else": {
+        "not": {"required": ["attribution"]},
+        "if": {"required": ["network"]},
+        "then": {
+          "properties": {
+            "capabilities": {"contains": {"const": "action"}},
+            "network": {"not": {"anyOf": [
+              {"required": ["url"]}, {"required": ["sources"]},
+              {"required": ["credential"]}, {"required": ["minRefreshSeconds"]}
+            ]}}
+          }
+        }
+      }
+    },
+    {
+      "if": {"anyOf": [{"required": ["data"]}, {"required": ["timezones"]}]},
+      "then": {"properties": {"runtime": {"const": "js"}}}
+    },
+    {
+      "if": {"anyOf": [{"required": ["statusLayout"]}, {"required": ["titleAccent"]}]},
+      "then": {"properties": {"capabilities": {"contains": {"const": "status.page"}}}}
+    },
+    {
+      "if": {"required": ["navigationIcon"]},
+      "then": {"properties": {
+        "owner": {"const": "status"},
+        "capabilities": {"contains": {"const": "status.page"}}
+      }}
+    },
+    {
+      "if": {
+        "required": ["statusLayout"],
+        "properties": {"statusLayout": {
+          "required": ["canvasFields"],
+          "properties": {"canvasFields": {"minItems": 1}}
+        }}
+      },
+      "then": {"properties": {
+        "capabilities": {"allOf": [{"contains": {"const": "status.canvas"}}, {"contains": {"const": "action"}}]},
+        "statusLayout": {"properties": {"components": {"contains": {"properties": {"type": {"const": "canvas"}}}}}}
+      }}
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "status.canvas"}}}},
+      "then": {"properties": {
+        "runtime": {"const": "js"},
+        "capabilities": {"contains": {"const": "status.page"}}
+      }},
+      "else": {"properties": {"statusLayout": {"properties": {
+        "components": {"not": {"contains": {"properties": {"type": {"const": "canvas"}}}}}
+      }}}}
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "event"}}}},
+      "then": {"required": ["events"]},
+      "else": {"not": {"required": ["events"]}}
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"enum": ["action", "event", "notice"]}}}},
+      "then": {
+        "properties": {
+          "runtime": {"const": "js"},
+          "owner": {"enum": ["tasks", "calendar", "quota", "status"]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "action"}}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "status.page"}}}},
+      "else": {
+        "properties": {
+          "statusLayout": {
+            "properties": {
+              "components": {"not": {"contains": {"properties": {"type": {"enum": ["actions", "fields"]}}}}}
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {"properties": {"runtime": {"const": "material"}}},
+      "then": {
+        "required": ["entry", "material", "settings"],
+        "properties": {
+          "owner": {"const": "appearance"},
+          "dataVersion": {"const": 1},
+          "entry": {"pattern": "^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.wgsl$"},
+          "capabilities": {
+            "items": {"enum": ["appearance.material", "settings"]},
+            "contains": {"const": "appearance.material"}
+          },
+          "permissions": {
+            "required": ["screen.backdrop"],
+            "maxProperties": 1
+          },
+          "settings": {
+            "items": {
+              "properties": {
+                "type": {"const": "number"},
+                "default": {"type": "string", "pattern": "^[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[eE][+-]?[0-9]+)?$"}
+              },
+              "required": ["min", "max", "step"]
+            }
+          }
+        },
+        "not": {"anyOf": [{"required": ["assets"]}, {"required": ["actions"]}]},
+        "if": {"properties": {"settings": {"minItems": 1}}},
+        "then": {"properties": {"capabilities": {"contains": {"const": "settings"}}}}
+      },
+      "else": {
+        "not": {"required": ["material"]},
+        "properties": {
+          "capabilities": {"not": {"contains": {"const": "appearance.material"}}},
+          "permissions": {"not": {"required": ["screen.backdrop"]}}
+        }
+      }
+    },
+    {
+      "required": ["entry"]
+    },
+    {
+      "if": {
+        "properties": {
+          "capabilities": {"contains": {"enum": ["appearance.skin", "appearance.pet", "appearance.icon", "appearance.font"]}}
+        }
+      },
+      "then": {
+        "required": ["settings"],
+        "properties": {
+          "runtime": {"const": "assets"},
+          "owner": {"const": "appearance"},
+          "capabilities": {"minItems": 1, "maxItems": 1},
+          "dataVersion": {"const": 1},
+          "refreshSeconds": {"const": 60},
+          "permissions": {"maxProperties": 0},
+          "settings": {"maxItems": 0}
+        },
+        "not": {"anyOf": [{"required": ["assets"]}, {"required": ["actions"]}]},
+        "allOf": [
+          {
+            "if": {"properties": {"capabilities": {"const": ["appearance.skin"]}}},
+            "then": {"properties": {"entry": {"const": "theme.json"}}}
+          },
+          {
+            "if": {"properties": {"capabilities": {"const": ["appearance.icon"]}}},
+            "then": {"properties": {"entry": {"const": "icons.json"}}}
+          },
+          {
+            "if": {"properties": {"capabilities": {"const": ["appearance.pet"]}}},
+            "then": {"properties": {"entry": {"const": "expressions.json"}}}
+          },
+          {
+            "if": {"properties": {"capabilities": {"const": ["appearance.font"]}}},
+            "then": {"properties": {"entry": {"const": "fonts.json"}}}
+          }
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"runtime": {"const": "assets"}}},
+      "then": {"properties": {"capabilities": {"contains": {
+        "enum": ["appearance.skin", "appearance.pet", "appearance.icon", "appearance.font", "navigation.shortcuts", "wireless.receivers"]
+      }}}}
+    },
+    {
+      "if": {
+        "anyOf": [
+          {"properties": {"owner": {"const": "pages"}}},
+          {"properties": {"capabilities": {"contains": {"const": "navigation.shortcuts"}}}}
+        ]
+      },
+      "then": {
+        "required": ["entry", "settings"],
+        "properties": {
+          "runtime": {"const": "assets"},
+          "owner": {"const": "pages"},
+          "entry": {"const": "shortcuts.json"},
+          "capabilities": {"const": ["navigation.shortcuts"]},
+          "dataVersion": {"const": 1},
+          "permissions": {"maxProperties": 0},
+          "settings": {"maxItems": 0}
+        },
+        "not": {"anyOf": [{"required": ["assets"]}, {"required": ["actions"]}]}
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {"properties": {"id": {"const": "daozai.wireless-receivers"}}},
+          {"properties": {"owner": {"const": "wireless"}}},
+          {"properties": {"capabilities": {"contains": {"const": "wireless.receivers"}}}}
+        ]
+      },
+      "then": {
+        "required": ["entry", "settings"],
+        "properties": {
+          "id": {"const": "daozai.wireless-receivers"},
+          "runtime": {"const": "assets"},
+          "owner": {"const": "wireless"},
+          "entry": {"const": "wireless-receivers.json"},
+          "capabilities": {"const": ["wireless.receivers"]},
+          "dataVersion": {"const": 1},
+          "refreshSeconds": {"const": 60},
+          "permissions": {"maxProperties": 0},
+          "settings": {"maxItems": 0}
+        },
+        "not": {"anyOf": [{"required": ["assets"]}, {"required": ["actions"]}]}
+      }
+    },
+    {
+      "if": {"properties": {"capabilities": {"contains": {"const": "status.page"}}}},
+      "then": {
+        "required": ["entry", "settings"],
+        "properties": {
+          "runtime": {"const": "js"},
+          "owner": {"enum": ["tasks", "calendar", "quota", "status"]},
+          "dataVersion": {"const": 1},
+          "entry": {"pattern": "^(?:[A-Za-z0-9_-]+/)*[A-Za-z0-9_-]+\\.js$"},
+          "capabilities": {
+            "items": {"enum": ["status.page", "status.canvas", "card", "calendar.marker", "quota.source", "settings", "timer", "storage", "action", "event", "notice", "island.pinned"]},
+            "contains": {"const": "status.page"}
+          },
+          "permissions": {
+            "properties": {"source.read": {"enum": ["file", "loopback", "https"]}},
+            "additionalProperties": false
+          }
+        },
+        "not": {"anyOf": [{"required": ["assets"]}, {"required": ["actions"]}]},
+        "if": {"properties": {"settings": {"minItems": 1}}},
+        "then": {"properties": {"capabilities": {"contains": {"const": "settings"}}}}
+      }
+    },
+    {
+      "if": {"properties": {"owner": {"const": "status"}}},
+      "then": {"properties": {"capabilities": {"contains": {"const": "status.page"}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "owner": {
+            "const": "self"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "capabilities": {
+            "contains": {
+              "const": "module"
+            }
+          }
+        }
+      }
+    }
+  ]
+}

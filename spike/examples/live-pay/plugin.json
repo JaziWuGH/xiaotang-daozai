@@ -1,0 +1,25 @@
+{
+  "id": "example.live-pay",
+  "name": "实时工资",
+  "author": "岛仔",
+  "version": "1.1.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "status",
+  "capabilities": ["status.page", "settings", "timer", "island.pinned"],
+  "refreshSeconds": 300,
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [
+    {"key":"salary","label":"月薪","type":"number","default":"10000","min":0,"max":10000000,"step":100,"unit":"元","precision":2},
+    {"key":"start","label":"上班时间","type":"time","default":"09:00"},
+    {"key":"end","label":"下班时间","type":"time","default":"18:00"},
+    {"key":"days","label":"工作日","type":"weekdays","default":"1,2,3,4,5"}
+  ],
+  "statusLayout": {
+    "components": [{"type":"state"},{"type":"summary"},{"type":"counter"},{"type":"countdown"}],
+    "style": {"density":"compact","emphasis":"strong"}
+  }
+}

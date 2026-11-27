@@ -5,10 +5,19 @@
 //! - `model` / `lyrics` / `smtc` / `icons`：数据、歌词、系统媒体、文件图标
 //! - `native` / `tray`：仅 Windows 的窗口区域、命中穿透与托盘
 
+#[cfg(any(feature="sdk-js",feature="sdk-wasm"))]
+#[path="../spike/mod.rs"]
+pub mod sdk_spike;
 pub mod display_layout;
 pub mod diagnostics_tool;
 pub mod rtl_text;
 mod mail_privacy;
+#[cfg(windows)]
+mod plugin_notice;
+#[cfg(windows)]
+mod plugin_notice_settings;
+#[cfg(windows)]
+mod plugin_notice_ui;
 pub mod poll_clock;
 pub mod resources;
 pub mod timezone;
@@ -20,9 +29,11 @@ pub mod messenger;
 pub mod child_process;
 mod settings_window;
 pub mod bt;
+mod bluetooth_ui;
 pub mod calendar;
 mod calendar_ui;
 mod local_calendar;
+mod lunar_calendar;
 mod calendar_editor;
 pub mod glass;
 pub mod skin_paint;
@@ -39,8 +50,22 @@ pub mod side_dock;
 mod task_picker;
 pub mod model;
 pub mod renderer;
+#[cfg(all(windows, feature = "sdk-material"))]
+pub mod material;
 pub mod otp;
 pub mod quota;
+#[cfg(feature = "sdk-js")]
+mod quota_plugin;
+#[cfg(feature = "sdk-js")]
+mod plugin_canvas;
+#[cfg(feature = "sdk-js")]
+mod plugin_canvas_ui;
+#[cfg(feature = "sdk-js")]
+mod plugin_setting_catalog;
+#[cfg(feature = "sdk-js")]
+mod plugin_status;
+#[cfg(feature = "sdk-js")]
+mod plugin_status_ui;
 mod quota_ui;
 pub mod weather;
 mod weather_ui;
@@ -51,7 +76,10 @@ mod extras;
 mod pet;
 mod pet_expressions;
 mod bar_layout;
+pub mod performance;
+mod performance_ui;
 mod resident_settings;
+mod resident_date;
 mod avoidance;
 mod focus_bar;
 #[cfg(windows)]
@@ -70,11 +98,16 @@ pub mod music_volume;
 pub mod theme;
 pub mod settings_theme;
 mod updates;
+mod supporters;
 #[cfg(windows)]
 pub use updates::record_install_size;
 
 #[cfg(windows)]
 pub mod native;
+#[cfg(windows)]
+mod window_bounds;
+#[cfg(windows)]
+mod crop_front_buffer;
 #[cfg(windows)]
 pub mod wechat;
 #[cfg(windows)]

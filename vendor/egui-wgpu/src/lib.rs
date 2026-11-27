@@ -57,6 +57,10 @@ pub enum WgpuError {
     #[cfg(feature = "winit")]
     #[error(transparent)]
     HandleError(#[from] ::winit::raw_window_handle::HandleError),
+
+    #[cfg(all(windows, feature = "direct-composition"))]
+    #[error("DirectComposition 交换链错误：{0}")]
+    DirectComposition(String),
 }
 
 /// Access to the render state for egui.
@@ -297,6 +301,10 @@ pub struct WgpuConfiguration {
     /// How to create the wgpu adapter & device
     pub wgpu_setup: WgpuSetup,
 
+    /// 为根窗口启用 DirectComposition 预乘 alpha 交换链。
+    #[cfg(all(windows, feature = "direct-composition"))]
+    pub direct_composition: bool,
+
     /// Callback for surface errors.
     pub on_surface_error: Arc<dyn Fn(wgpu::SurfaceError) -> SurfaceErrorAction + Send + Sync>,
 }
@@ -313,6 +321,8 @@ impl std::fmt::Debug for WgpuConfiguration {
             present_mode,
             desired_maximum_frame_latency,
             wgpu_setup,
+            #[cfg(all(windows, feature = "direct-composition"))]
+            direct_composition: _,
             on_surface_error: _,
         } = self;
         f.debug_struct("WgpuConfiguration")
@@ -332,6 +342,8 @@ impl Default for WgpuConfiguration {
             present_mode: wgpu::PresentMode::AutoVsync,
             desired_maximum_frame_latency: None,
             wgpu_setup: Default::default(),
+            #[cfg(all(windows, feature = "direct-composition"))]
+            direct_composition: false,
             on_surface_error: Arc::new(|err| {
                 if err == wgpu::SurfaceError::Outdated {
                     // This error occurs when the app is minimized on Windows.

@@ -131,6 +131,7 @@ default = [
     "egui-wgpu?/fragile-send-sync-non-atomic-wasm",
 ]
 default_fonts = ["egui/default_fonts"]
+direct-composition = ["wgpu", "egui-wgpu/direct-composition", "egui-winit/direct-composition"]
 glow = [
     "dep:egui_glow",
     "dep:glow",

@@ -2,6 +2,8 @@
 
 欢迎反馈兼容性问题、修复 bug 或完善使用说明。提交较大的功能前，先开 Issue 说明具体场景与预期行为。
 
+有新功能、已有分支或 PR 想迁成插件，可从[插件作者入门与 PR 迁移](docs/plugins/author-guide.md)开始。
+
 ## 本地开发
 
 安装 Rust stable、Visual Studio C++ 构建工具和 Windows SDK，克隆仓库后运行：

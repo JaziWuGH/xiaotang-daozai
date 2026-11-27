@@ -1,6 +1,6 @@
 [package]
 name = "daozai"
-version = "0.6.66"
+version = "0.6.70"
 edition = "2021"
 license = "MIT"
 description = "岛仔：Windows 顶部的桌面伙伴与信息岛"
@@ -23,6 +23,16 @@ required-features = ["record"]
 
 [features]
 record = []
+sdk-js = ["dep:ab_glyph"]
+sdk-material = [
+  "dep:bytemuck", "dep:pollster",
+  "eframe/direct-composition",
+  "windows/Graphics", "windows/Graphics_Capture", "windows/Graphics_DirectX", "windows/Graphics_DirectX_Direct3D11",
+  "windows/Win32_Graphics_Direct3D", "windows/Win32_Graphics_Direct3D11",
+  "windows/Win32_Graphics_Dxgi", "windows/Win32_Graphics_Dxgi_Common",
+  "windows/Win32_System_WinRT_Direct3D11", "windows/Win32_System_WinRT_Graphics_Capture",
+]
+sdk-wasm = ["dep:wasmi"]
 
 [patch.crates-io]
 imap = { path = "vendor/imap" }
@@ -30,11 +40,15 @@ imap-proto = { path = "vendor/imap-proto" }
 eframe = { path = "vendor/eframe" }
 egui = { path = "vendor/egui" }
 egui-wgpu = { path = "vendor/egui-wgpu" }
+egui-winit = { path = "vendor/egui-winit" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
 ureq = { path = "vendor/ureq" }
 
 [dependencies]
+ab_glyph = { version = "0.2", optional = true }
 eframe = { version = "0.31", default-features = false, features = ["glow", "wgpu", "default_fonts"] }
 egui_extras = { version = "0.31", default-features = false, features = ["svg", "image"] }
+svgtypes = "0.13"
 ureq = { version = "2.12", default-features = false, features = ["tls", "gzip"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -47,17 +61,23 @@ raw-window-handle = "0.6"
 # v0.5.5 邮件：MIME 解析与验证码打分是纯逻辑，保持跨平台。
 mailparse = "0.18"
 regex = "1"
+roxmltree = "0.19"
 url = "2"
 chrono = "0.4"
-chrono-tz = "0.10"
+chrono-tz = { version = "0.10", features = ["serde"] }
+iana-time-zone = "0.1"
 rrule = "0.14.0"
 rquickjs = "0.8"
+wasmi = { version = "=0.46.0", optional = true, default-features = false, features = ["std"] }
 
 # Linux 下 winit 至少要一个后端才能编译（只用于开发/录制，正式目标是 Windows）。
 [target.'cfg(target_os = "linux")'.dependencies]
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts", "x11"] }
 
 [target.'cfg(windows)'.dependencies]
+bytemuck = { version = "1", features = ["derive"], optional = true }
+pollster = { version = "0.4", optional = true }
+zip = { version = "9.7", default-features = false, features = ["deflate-flate2"] }
 ureq = { version = "2.12", default-features = false, features = ["native-tls"] }
 tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
 clipboard-win = "5.4.3"
@@ -69,14 +89,21 @@ windows = { version = "0.58", features = [
   "Win32_Graphics_Dwm",
   "Win32_System_LibraryLoader",
   "Win32_System_Memory",
+  "Wdk_Graphics_Direct3D", "Win32_Graphics_Dxgi", "Win32_System_Performance", "Wdk_System_SystemInformation", "Win32_System_ProcessStatus",
+  "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock",
   "Win32_System_Com",
   "Win32_System_DataExchange",
   "Win32_Security",
   "Win32_Security_Cryptography",
+  "Win32_Security_Cryptography_Catalog",
+  "Win32_Security_Cryptography_Sip",
+  "Win32_Security_WinTrust",
   "Win32_System_Power",
   "Win32_System_Registry",
   "Win32_System_SystemInformation",
   "Win32_System_Threading",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
   "Win32_System_RemoteDesktop",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Diagnostics_Debug",
@@ -102,8 +129,9 @@ windows = { version = "0.58", features = [
   "Win32_Devices_DeviceAndDriverInstallation",
   "Win32_Devices_Properties",
   "Win32_Devices_Bluetooth",
-  "Devices_Bluetooth", "Devices_Enumeration",
+  "Devices_Bluetooth", "Devices_Enumeration", "Devices_Bluetooth_GenericAttributeProfile",
 ] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_System_EventLog", "Win32_System_ProcessStatus"] }
 # v0.5.5 邮件：IMAP 走系统 TLS，凭据进 Windows 凭据管理器。
 imap = "2.4"
 imap-proto = "0.10.2"

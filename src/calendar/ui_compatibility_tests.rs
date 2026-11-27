@@ -1,6 +1,91 @@
 use super::*;
 use crate::calendar::{Config,Event,Provider};
 
+#[cfg(windows)]
+#[test]
+fn caldav_login_page_blocks_saving_but_empty_calendar_can_be_saved() {
+    use crate::calendar::{compatibility_tests::mock_caldav_connection, load_configs, secrets};
+
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cases = [
+        (200, "text/html", "<!DOCTYPE html><html><body><form>登录</form></body></html>", false),
+        (200, "application/xml", r#"<html><body><multistatus xmlns="DAV:"/></body></html>"#, false),
+        (200, "application/xml", "", false),
+        (200, "application/xml", r#"<multistatus xmlns="urn:other"/>"#, false),
+        (207, "application/xml", r#"<?xml version="1.0"?><d:multistatus xmlns:d="DAV:"/>"#, true),
+        (200, "application/xml", r#"<multistatus xmlns="DAV:"></multistatus>"#, true),
+    ];
+    for (status, content_type, body, expected_saved) in cases {
+        let mut h = H::new();
+        let cfg = Config {
+            provider: Provider::Custom,
+            username: format!("caldav-xml-test-{}-{}@example.invalid", std::process::id(), rand_id()),
+            href: None,
+            server: None,
+        };
+        h.app.calendar.test_password = "test-password".into();
+        h.app.calendar.testing = true;
+        let result = mock_caldav_connection(cfg.provider, &cfg.username, status, content_type, body);
+        h.app.calendar_event(result);
+        let saved = load_configs();
+        let password = secrets::load(&cfg);
+        secrets::delete(&cfg);
+
+        assert_eq!(h.app.calendar.connected, expected_saved, "{status} {body}");
+        assert_eq!(h.app.calendar.note_error, !expected_saved);
+        if expected_saved {
+            assert_eq!(saved.len(), 1);
+            assert_eq!(saved[0].username, cfg.username);
+            assert_eq!(saved[0].href, Some(format!("{}calendar/", saved[0].base())));
+            assert_eq!(password.as_deref(), Ok("test-password"));
+            assert!(h.app.calendar.note.contains("0 个日程"));
+        } else {
+            assert!(saved.is_empty());
+            assert!(password.is_err());
+            assert!(h.app.calendar.note.contains("服务器未返回有效的 CalDAV"));
+        }
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn calendar_connection_with_parse_warning_is_saved_and_sync_keeps_cached_events() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = H::new();
+    let config = Config {
+        provider: Provider::Custom,
+        username: format!("calendar-test-{}-{}@example.invalid", std::process::id(), rand_id()),
+        href: Some("https://calendar.example.invalid/dav/calendar/".into()),
+        server: Some("https://calendar.example.invalid/dav/".into()),
+    };
+    let warning = "1 条日程无法解析".to_string();
+    h.app.calendar.test_password = "test-password".into();
+    h.app.calendar.testing = true;
+    h.app.calendar_event(Event::Test { ok: true, message: warning.clone(), count: 0, config: Some(config.clone()) });
+    let saved = crate::calendar::load_configs();
+    let password = crate::calendar::secrets::load(&config);
+    crate::calendar::secrets::delete(&config);
+    assert_eq!(saved, [config.clone()]);
+    assert_eq!(password.as_deref(), Ok("test-password"));
+    assert!(h.app.calendar.connected && h.app.calendar.feeds[0].connected);
+    assert!(!h.app.calendar.note_error);
+    assert_eq!(h.app.calendar.warning, warning);
+    assert_eq!(h.app.calendar.feeds[0].warning, warning);
+    assert!(h.app.calendar.last_sync.is_empty());
+
+    let events = vec![crate::mail::Meeting {
+        uid: "cached".into(), title: "已同步的日程".into(), start: 1, end: None, all_day: false, at: String::new(),
+    }];
+    h.app.calendar_event(Event::Synced { config: config.clone(), events, at: "12:00".into() });
+    h.app.calendar_event(Event::Failed { config: config.clone(), message: "上次网络连接失败".into() });
+    h.app.calendar_event(Event::Warning { config, month: None, message: warning.clone() });
+    assert!(h.app.calendar.connected && h.app.calendar.feeds[0].connected);
+    assert!(h.app.calendar.error.is_empty());
+    assert_eq!(h.app.calendar.events[0].uid, "cached");
+    assert_eq!(h.app.calendar.last_sync, "12:00");
+    assert_eq!(h.app.calendar.warning, warning);
+}
+
 #[test]
 fn ics_import_retains_good_records_and_distinguishes_duplicates_and_bad_records(){
     let _guard=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();

@@ -1,0 +1,23 @@
+{
+  "id": "example.holidays",
+  "name": "节假日和调休",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "refreshSeconds": 86400,
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "tasks",
+  "capabilities": [
+    "card",
+    "calendar.marker",
+    "timer"
+  ],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [],
+  "data": [
+    "holidays-2026.json"
+  ]
+}

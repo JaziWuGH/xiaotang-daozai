@@ -41,6 +41,8 @@ pub static TEXTURE_BYTES:AtomicUsize=AtomicUsize::new(0);
 pub static GALLEYS:AtomicUsize=AtomicUsize::new(0);
 /// 主界面画了多少帧（每次采样后清零）：闲置时本应很低，持续接近 60 帧/秒说明有东西在空转重绘。
 pub static FRAMES:AtomicUsize=AtomicUsize::new(0);
+/// 本帧插件定时、结果回收和提醒的耗时（微秒），慢帧记录分段用。
+pub static PLUGIN_FRAME_US:AtomicUsize=AtomicUsize::new(0);
 
 struct Pending { _lease:Lease, ready:Box<dyn Fn()->bool+Send>, after:Instant }
 pub struct PendingRequests(Mutex<Vec<Pending>>);

@@ -6,10 +6,12 @@ const REPOSITORY: &str = "https://github.com/Renly1994/xiaotang-daozai";
 const API: &str = "https://api.github.com/repos/Renly1994/xiaotang-daozai/releases/latest";
 const RELEASES: &str = "https://github.com/Renly1994/xiaotang-daozai/releases/latest";
 const BACKUP_DOWNLOAD: &str = "https://pan.quark.cn/s/0a39b4e1f332";
-const STARTUP_DELAY: Duration = Duration::from_secs(10);
+const STARTUP_WINDOW: Duration = Duration::from_secs(10);
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 3600);
 const RETRY_INTERVAL: Duration = Duration::from_secs(3600);
 const MANUAL_INTERVAL: Duration = Duration::from_secs(30);
+#[cfg(windows)]
+const INSTALL_PREPARE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug)]
 struct Release { version: String, notes: String, page: String, package: Option<Package> }
@@ -27,9 +29,9 @@ pub(crate) struct State {
     dialog_open: bool,
     focus_requested: bool,
     logo: Option<egui::TextureHandle>,
-    next_check: Option<Instant>,
+    startup_check_until: Option<Instant>,
     manual_check_after: Option<Instant>,
-    automatic_check: bool,
+    automatic_check_until: Option<Instant>,
     notified_version: Option<String>,
     history_path: Option<PathBuf>,
 }
@@ -40,13 +42,14 @@ impl Drop for State {
 
 impl State {
     pub(crate) fn load(path: PathBuf) -> Self {
-        let mut state = State::default();
-        if let Some((next, version)) = std::fs::read(&path).ok()
-            .and_then(|bytes| serde_json::from_slice::<(i64, Option<String>)>(&bytes).ok()) {
-            let seconds = next.saturating_sub(chrono::Utc::now().timestamp()).clamp(0, CHECK_INTERVAL.as_secs() as i64);
-            state.next_check = Some(Instant::now() + STARTUP_DELAY.max(Duration::from_secs(seconds as u64)));
-            state.notified_version = version;
+        let mut state = Self::default();
+        let (next, notified_version) = std::fs::read(&path).ok()
+            .and_then(|bytes| serde_json::from_slice::<(i64, Option<String>)>(&bytes).ok())
+            .unwrap_or_default();
+        if option_env!("DAOZAI_TEST_BUILD").is_none() && next <= chrono::Utc::now().timestamp() {
+            state.startup_check_until = Some(Instant::now() + STARTUP_WINDOW);
         }
+        state.notified_version = notified_version;
         state.history_path = Some(path);
         state
     }
@@ -62,18 +65,17 @@ impl State {
         }
     }
 
-    fn should_check(&mut self, now: Instant) -> bool {
-        now >= *self.next_check.get_or_insert(now + STARTUP_DELAY) && self.rx.is_none() && !self.dialog_open
+    fn take_startup_check(&mut self, now: Instant) -> Option<Instant> {
+        self.startup_check_until.take().filter(|until| now < *until)
     }
 
     fn manual_wait(&self) -> Duration {
         self.manual_check_after.map(|t| t.saturating_duration_since(Instant::now())).unwrap_or_default()
     }
 
-    fn begin_check(&mut self, ctx: &egui::Context, automatic: bool, load: impl FnOnce() -> Result<Option<Release>, String> + Send + 'static) -> bool {
-        if self.rx.is_some() || (!automatic && !self.manual_wait().is_zero()) { return false; }
-        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.automatic_check = automatic;
-        self.next_check = Some(Instant::now() + CHECK_INTERVAL);
+    fn begin_check(&mut self, ctx: &egui::Context, automatic_until: Option<Instant>, load: impl FnOnce() -> Result<Option<Release>, String> + Send + 'static) -> bool {
+        if self.rx.is_some() || (automatic_until.is_none() && !self.manual_wait().is_zero()) { return false; }
+        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.automatic_check_until = automatic_until;
         self.message.clear(); self.result = None; self.dialog_open = false; self.focus_requested = false;
         let ctx = ctx.clone();
         std::thread::spawn(move || { let _ = tx.send(Event::Checked(load())); ctx.request_repaint(); });
@@ -86,20 +88,24 @@ impl State {
                 Some(Ok(event)) => event,
                 Some(Err(mpsc::TryRecvError::Disconnected)) => {
                     self.rx = None; self.cancel = None;
-                    self.automatic_check = false; self.next_check = Some(Instant::now() + RETRY_INTERVAL);
+                    if self.automatic_check_until.take().is_some() { self.remember_check(RETRY_INTERVAL); }
                     self.message = "检查或下载已中断，请重试。".into(); break;
                 }
                 _ => break,
             };
             match event {
                 Event::Checked(result) => {
-                    let automatic = std::mem::take(&mut self.automatic_check);
-                    self.manual_check_after = Some(Instant::now() + MANUAL_INTERVAL);
-                    let delay = if result.is_err() { RETRY_INTERVAL } else { CHECK_INTERVAL };
-                    self.next_check = Some(Instant::now() + delay);
-                    self.dialog_open = matches!(&result, Ok(Some(release)) if !automatic || self.notified_version.as_deref() != Some(release.version.as_str()));
+                    let automatic_until = self.automatic_check_until.take();
+                    let now = Instant::now();
+                    self.manual_check_after = Some(now + MANUAL_INTERVAL);
+                    let new_notice = matches!(&result, Ok(Some(release)) if self.notified_version.as_deref() != Some(release.version.as_str()));
+                    self.dialog_open = matches!(&result, Ok(Some(_))) && automatic_until.is_none_or(|until| now < until && new_notice);
                     self.focus_requested = self.dialog_open;
                     if self.dialog_open { if let Ok(Some(release)) = &result { self.notified_version = Some(release.version.clone()); } }
+                    // 错过启动时段的新版留在设置里，下次启动时可以再提醒。
+                    let delay = if result.is_err() { RETRY_INTERVAL }
+                        else if new_notice && !self.dialog_open { Duration::ZERO }
+                        else { CHECK_INTERVAL };
                     self.remember_check(delay);
                     self.result = Some(result); self.rx = None;
                 }
@@ -126,15 +132,16 @@ impl State {
                 }
             }
         }
-        // 复用主界面的低频轮询；只在实际检查时启动线程，不增加常驻计时线程。
-        if !cfg!(test) && self.should_check(Instant::now()) { self.begin_check(ctx, true, check); }
-        if self.rx.is_some() && !self.automatic_check { ctx.request_repaint_after(Duration::from_millis(100)); }
+        if !cfg!(test) {
+            if let Some(until) = self.take_startup_check(Instant::now()) { self.begin_check(ctx, Some(until), check); }
+        }
+        if self.rx.is_some() && self.automatic_check_until.is_none() { ctx.request_repaint_after(Duration::from_millis(100)); }
     }
 
     pub(crate) fn ui(&mut self, ui: &mut egui::Ui) {
         let wait = self.manual_wait();
         if ui.add_enabled(self.rx.is_none() && wait.is_zero(), egui::Button::new("检查更新")).clicked() {
-            self.begin_check(ui.ctx(), false, check);
+            self.begin_check(ui.ctx(), None, check);
         }
         match &self.result {
             Some(Ok(Some(release))) => {
@@ -448,14 +455,24 @@ fn launch_installer(work: &std::path::Path) -> Result<(), String> {
         .arg(work.join("apply.ps1")).arg("-WorkPath").arg(work).arg("-TargetExe").arg(target)
         .arg("-ParentProcessId").arg(std::process::id().to_string()))
         .map_err(|_| "无法启动更新程序，请通过浏览器下载安装")?;
-    // 脚本先确认缓存和安装目录可用，再允许主程序退出。
-    for _ in 0..100 {
-        if work.join("ready").exists() { return Ok(()); }
-        if child.try_wait().ok().flatten().is_some() { break; }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    let _ = child.kill();
-    Err(std::fs::read_to_string(work.join("error.txt")).unwrap_or_else(|_| "无法准备安装，请通过浏览器下载后安装".into()))
+    // 脚本完成二次校验和解压后，才允许主程序退出。
+    let ready = work.join("ready");
+    let deadline = Instant::now() + INSTALL_PREPARE_TIMEOUT;
+    let failure = loop {
+        match child.try_wait() {
+            Ok(None) => {}
+            Ok(Some(status)) => break format!("更新程序在准备安装时退出（退出码 {}），请通过浏览器下载后安装。", status.code().unwrap_or(-1)),
+            Err(error) => break format!("无法读取更新程序状态（{error}），请通过浏览器下载后安装。"),
+        }
+        if ready.is_file() { return Ok(()); }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break "安装准备超时，请稍后重试或通过浏览器下载后安装。".into();
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(50)));
+    };
+    if child.kill().is_ok() { let _ = child.wait(); }
+    Err(std::fs::read_to_string(work.join("error.txt")).unwrap_or(failure))
 }
 #[cfg(not(windows))]
 fn launch_installer(_: &std::path::Path) -> Result<(), String> { Err("仅支持 Windows 应用内更新".into()) }
@@ -501,37 +518,69 @@ mod install_size_tests {
 mod tests {
     use super::*;
     #[test]
-    fn automatic_check_waits_for_startup_and_idle_state() {
-        let mut state = State::default();
-        let start = Instant::now();
-        assert!(!state.should_check(start));
-        let due = start + Duration::from_secs(10);
-        assert!(!state.should_check(due - Duration::from_millis(1)));
-        assert!(state.should_check(due));
-        let (_tx, rx) = mpsc::channel(); state.rx = Some(rx);
-        assert!(!state.should_check(due));
-        state.rx = None; state.dialog_open = true;
-        assert!(!state.should_check(due));
-        state.dismiss();
-        assert!(state.should_check(due));
+    fn automatic_check_does_not_wait_for_cooldown_in_this_session() {
+        let path = std::env::temp_dir().join(format!("daozai-update-cooldown-{}.json", std::process::id()));
+        let next = chrono::Utc::now().timestamp() + 60;
+        std::fs::write(&path, serde_json::to_vec(&(next, Some("v0.6.66"))).unwrap()).unwrap();
+        let mut state = State::load(path.clone());
+        assert!(state.startup_check_until.is_none());
+        assert!(state.take_startup_check(Instant::now() + Duration::from_secs(60)).is_none());
+        std::fs::write(&path, b"[0,null]").unwrap();
+        let state = State::load(path.clone());
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(state.startup_check_until.is_some(), option_env!("DAOZAI_TEST_BUILD").is_none());
     }
 
     #[test]
-    fn automatic_check_reschedules_success_and_silent_failure() {
-        for (result, delay) in [(Ok(None), Duration::from_secs(24 * 3600)), (Err("网络失败".into()), Duration::from_secs(3600))] {
-            let mut state = State::default(); state.automatic_check = true;
+    fn automatic_check_is_consumed_during_startup() {
+        let start = Instant::now();
+        let until = start + STARTUP_WINDOW;
+        let mut state = State::default();
+        state.startup_check_until = Some(until);
+        assert_eq!(state.take_startup_check(start), Some(until));
+        assert!(state.take_startup_check(start).is_none());
+        state.startup_check_until = Some(until);
+        assert!(state.take_startup_check(until).is_none());
+    }
+
+    #[test]
+    fn automatic_check_records_cooldown_for_future_launches() {
+        let path = std::env::temp_dir().join(format!("daozai-update-retry-{}.json", std::process::id()));
+        for (result, delay) in [(Ok(None), 24 * 3600), (Err("网络失败".into()), 3600)] {
+            let mut state = State::default();
+            state.history_path = Some(path.clone());
+            state.automatic_check_until = Some(Instant::now() + STARTUP_WINDOW);
             let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
             tx.send(Event::Checked(result)).unwrap();
-            let before = Instant::now();
+            let before = chrono::Utc::now().timestamp();
             state.poll(&egui::Context::default());
-            let after = Instant::now();
-            let next = state.next_check.unwrap();
-            assert!(next >= before + delay && next <= after + delay);
+            let (next, _): (i64, Option<String>) = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert!((before + delay..=chrono::Utc::now().timestamp() + delay).contains(&next));
             assert!(!state.dialog_open); assert!(!state.focus_requested);
-            assert!(!state.automatic_check); assert!(state.rx.is_none());
-            assert!(!state.should_check(next - Duration::from_millis(1)));
-            assert!(state.should_check(next));
+            assert!(state.automatic_check_until.is_none()); assert!(state.rx.is_none());
+            assert!(state.take_startup_check(Instant::now()).is_none());
         }
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn late_startup_result_stays_available_without_opening_the_dialog() {
+        let path = std::env::temp_dir().join(format!("daozai-update-late-{}.json", std::process::id()));
+        let mut state = State::default();
+        state.history_path = Some(path.clone());
+        state.automatic_check_until = Some(Instant::now());
+        let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
+        tx.send(Event::Checked(Ok(Some(Release {
+            version: "v0.6.67".into(), notes: String::new(), page: RELEASES.into(), package: None,
+        })))).unwrap();
+        state.poll(&egui::Context::default());
+        assert!(!state.dialog_open);
+        assert!(!state.focus_requested);
+        assert!(matches!(&state.result, Some(Ok(Some(release))) if release.version == "v0.6.67"));
+        let (next, notified_version): (i64, Option<String>) = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(next <= chrono::Utc::now().timestamp());
+        assert!(notified_version.is_none());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -541,8 +590,8 @@ mod tests {
         for (automatic, version, expected) in [(true, "v0.6.65", true), (true, "v0.6.65", false),
             (true, "v0.6.66", true), (false, "v0.6.66", true)] {
             let mut state=State::load(path.clone());
-            if path.exists() { assert!(!state.should_check(Instant::now()+Duration::from_secs(3600))); }
-            state.automatic_check = automatic;
+            if path.exists() { assert!(state.startup_check_until.is_none()); }
+            state.automatic_check_until = automatic.then(|| Instant::now() + STARTUP_WINDOW);
             let (tx, rx) = mpsc::channel(); state.rx = Some(rx);
             tx.send(Event::Checked(Ok(Some(Release { version: version.into(), notes: String::new(), page: RELEASES.into(),
                 package: Some(Package { url: String::new(), size: 1, hash: String::new() }) })))).unwrap();
@@ -564,7 +613,7 @@ mod tests {
             state.rx = Some(rx);
             tx.send(Event::Checked(result)).unwrap();
             state.poll(&ctx);
-            assert!(!state.begin_check(&ctx, false, || Ok(None)));
+            assert!(!state.begin_check(&ctx, None, || Ok(None)));
             assert!(state.result.is_some() && state.rx.is_none());
             let page = ctx.run(Default::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| state.ui(ui));
@@ -572,7 +621,7 @@ mod tests {
             assert!(page.shapes.iter().any(|shape| matches!(&shape.shape,
                 egui::Shape::Text(t) if t.galley.text().contains("秒后可重新检查"))));
             state.manual_check_after = Some(Instant::now());
-            assert!(state.begin_check(&ctx, false, || Ok(None)));
+            assert!(state.begin_check(&ctx, None, || Ok(None)));
         }
     }
 
@@ -595,8 +644,8 @@ mod tests {
     fn background_checks_do_not_overlap_active_work() {
         let mut state = State::default();
         let ctx = egui::Context::default();
-        assert!(state.begin_check(&ctx, true, || Ok(None)));
-        assert!(!state.begin_check(&ctx, false, || panic!("已有任务时不应发起检查")));
+        assert!(state.begin_check(&ctx, Some(Instant::now() + STARTUP_WINDOW), || Ok(None)));
+        assert!(!state.begin_check(&ctx, None, || panic!("已有任务时不应发起检查")));
         assert!(matches!(state.rx.as_ref().unwrap().recv_timeout(Duration::from_secs(3)), Ok(Event::Checked(Ok(None)))));
     }
 
@@ -705,25 +754,37 @@ mod tests {
     #[ignore = "需要连接 GitHub"]
     fn live_update_check() { assert!(check().is_ok()); }
 
+    #[cfg(windows)]
     #[test]
-    fn background_result_and_disconnect_allow_retry() {
+    fn installer_accepts_ready_after_five_seconds() {
+        let work = std::env::temp_dir().join(format!("daozai-update-slow-{}", std::process::id()));
+        std::fs::create_dir_all(&work).unwrap();
+        std::fs::write(work.join("apply.ps1"), r#"
+param($WorkPath, $TargetExe, $ParentProcessId)
+Start-Sleep -Seconds 6
+[IO.File]::WriteAllText((Join-Path $WorkPath 'ready'), 'ok')
+$null = (Get-Process -Id $ParentProcessId).WaitForExit(2000)
+"#).unwrap();
+        let result = launch_installer(&work);
+        std::fs::remove_dir_all(work).unwrap();
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn background_result_and_disconnect_clear_in_flight_state() {
         let ctx = egui::Context::default();
         for disconnected in [false, true] {
             let (tx, rx) = mpsc::channel();
             if !disconnected { tx.send(Event::Checked(Ok(None))).unwrap(); }
             drop(tx);
             let mut state = State::default(); state.rx = Some(rx);
-            state.automatic_check = true;
-            let before = Instant::now();
+            state.automatic_check_until = Some(Instant::now() + STARTUP_WINDOW);
             let _ = ctx.run(Default::default(), |ctx| {
                 state.poll(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| state.ui(ui));
             });
             assert!(state.rx.is_none());
-            assert!(!state.automatic_check);
-            let delay = if disconnected { Duration::from_secs(3600) } else { Duration::from_secs(24 * 3600) };
-            let next = state.next_check.unwrap();
-            assert!(next >= before + delay && next <= Instant::now() + delay);
+            assert!(state.automatic_check_until.is_none());
             assert_eq!(!state.message.is_empty(), disconnected);
         }
     }

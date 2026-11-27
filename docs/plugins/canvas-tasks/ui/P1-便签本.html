@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>便签 · 理想版</title>
+
+</head>
+<body>
+
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&amp;family=Inter:wght@400;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+.k{font-size:12px;letter-spacing:.08em;color:#6B6B73;font-weight:700}
+.muted{color:#5D5D66}
+.card{background:#fff;border:1px solid #E2E2DC;border-radius:14px;box-sizing:border-box}
+.desk{background:#1B2333;border-radius:14px;display:flex;justify-content:center;align-items:flex-start;padding-bottom:26px;overflow:hidden}
+.isl{background:#000;color:#fff;border-radius:16px 16px 30px 30px;box-sizing:border-box;font-family:'Noto Sans SC','Inter',sans-serif;position:relative}
+.cap{background:#1C1C1F;border-radius:999px;padding:3px 10px;font-size:11px;display:inline-flex;gap:8px;align-items:center}
+.arrow{position:absolute;top:50%;width:22px;height:22px;border-radius:11px;background:#2A2A2E;display:flex;align-items:center;justify-content:center}
+.pill{background:#000;color:#fff;border-radius:0 0 20px 20px;height:36px;display:flex;align-items:center;gap:10px;padding:0 14px;box-sizing:border-box;font-size:12.5px}
+.grp{font-size:9px;color:#6B6B73;letter-spacing:.06em;padding:4px 2px 2px}
+.ln{display:flex;align-items:center;gap:7px;padding:5px 7px;border-radius:8px;font-size:11px}
+.ln .t{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ln .m{font-size:9.5px;color:#6B6B73}
+.sw{width:4px;height:14px;border-radius:2px;flex:0 0 auto}
+.std{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E3F5E9;color:#1F7A3D;font-weight:700}
+.cvs{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#EEE8FF;color:#5B3FD1;font-weight:700}
+.live{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E6F0FF;color:#1F5FBF;font-weight:700}
+td{padding:7px 8px;font-size:12.5px;border-bottom:1px solid #EEEEE9;vertical-align:top}
+</style>
+
+<div style="width: 1440px; height: 1000px; box-sizing: border-box; padding: 40px 52px; background: #F4F4F1; font-family: 'Noto Sans SC', 'Inter', sans-serif; color: #17171A; display: flex; flex-direction: column; gap: 20px">
+  <div style="display: flex; align-items: flex-end; justify-content: space-between">
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div class="k">理想版 · 1 · 第二稿</div>
+      <h1 style="margin: 0; font-size: 34px">便签本</h1>
+      <p class="muted" style="margin: 0; font-size: 14px">不限条数。左边是一摞纸，最上面那张完整显示；右边是全部便签，按今天、昨天、更早分组，能搜、能置顶。</p>
+    </div>
+    <div style="display: flex; gap: 8px"><span class="std">标准组件</span><span class="cvs">自绘画布</span><span class="live">宿主实时值</span></div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; flex: 1; min-height: 0">
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">展开（1.5 倍显示，实际 419 × 262）</div>
+      <div class="desk" style="padding-bottom: 30px">
+        <div style="zoom: 1.5">
+          <div class="isl" style="width: 419px; height: 262px; padding: 12px 16px 10px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; justify-content: space-between">
+              <span style="font-size: 15px; font-weight: 900">便签<span style="color: #FFD25A">本</span></span>
+              <span class="cap"><span>11月24日 周二</span><b>14:05</b></span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B2B2BA" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="8"></circle></svg>
+            </div>
+            <div style="display: flex; gap: 12px; flex: 1; min-height: 0">
+              <div style="width: 168px; position: relative; flex: 0 0 auto">
+                <div style="position: absolute; left: 10px; right: -2px; top: 8px; bottom: 26px; border-radius: 12px; background: #3A3320; transform: rotate(3deg)"></div>
+                <div style="position: absolute; left: 4px; right: 4px; top: 4px; bottom: 30px; border-radius: 12px; background: #5A4D24; transform: rotate(-2deg)"></div>
+                <div style="position: absolute; left: 0; right: 8px; top: 0; bottom: 34px; border-radius: 12px; background: #FFE58A; color: #2A2410; padding: 11px 12px 10px; box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; box-shadow: 0 6px 16px rgba(0,0,0,.45)">
+                  <span style="display: flex; align-items: center; justify-content: space-between; font-size: 9.5px; color: #7A6A2E"><span>今天 11:20</span><svg width="11" height="11" viewBox="0 0 24 24" fill="#7A6A2E" aria-hidden="true"><path d="M9 3h6l-1 6 3 3H7l3-3z"></path><rect x="11" y="12" width="2" height="9" rx="1"></rect></svg></span>
+                  <span style="font-size: 13px; line-height: 1.45; font-weight: 700">周五前把报价单发给阿杰</span>
+                  <span style="font-size: 11px; line-height: 1.5">记得抄送财务，附上 10 月的对账单和发票号。</span>
+                  <span style="flex: 1"></span>
+                  <span style="display: flex; gap: 6px">
+                    <button type="button" aria-label="复制" style="width: 26px; height: 26px; border-radius: 8px; border: 0; background: rgba(42,36,16,.12); display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2A2410" stroke-width="2" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"></rect><path d="M16 8V5H5v11h3"></path></svg></button>
+                    <button type="button" aria-label="完成" style="width: 26px; height: 26px; border-radius: 8px; border: 0; background: rgba(42,36,16,.12); display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2A2410" stroke-width="2.6" aria-hidden="true"><path d="M5 12l5 5 9-10"></path></svg></button>
+                    <button type="button" aria-label="常驻到岛上" style="width: 26px; height: 26px; border-radius: 8px; border: 0; background: rgba(42,36,16,.12); display: inline-flex; align-items: center; justify-content: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#2A2410" stroke-width="2.2" aria-hidden="true"><rect x="3" y="9" width="18" height="6" rx="3"></rect></svg></button>
+                  </span>
+                </div>
+                <div style="position: absolute; left: 0; right: 8px; bottom: 0; height: 26px; display: flex; align-items: center; gap: 6px; background: #161618; border: 1px solid #2A2A2E; border-radius: 9px; padding: 0 4px 0 9px; box-sizing: border-box">
+                  <label style="flex: 1; display: flex"><span style="position: absolute; left: -9999px">新便签</span><input type="text" placeholder="记一笔…" style="flex: 1; width: 100%; border: 0; background: transparent; color: #fff; font-size: 11px; font-family: inherit; outline: none"></label>
+                  <button type="button" aria-label="添加便签" style="width: 20px; height: 20px; border-radius: 6px; border: 0; background: #FFD25A; display: inline-flex; align-items: center; justify-content: center"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#2A2410" stroke-width="3" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+                </div>
+              </div>
+              <div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+                <label style="display: flex; align-items: center; gap: 6px; background: #161618; border-radius: 8px; padding: 4px 8px"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#8E8E99" stroke-width="2.4" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4-4"></path></svg><span style="position: absolute; left: -9999px">搜索便签</span><input type="text" placeholder="搜索 27 条便签" style="flex: 1; border: 0; background: transparent; color: #fff; font-size: 10.5px; font-family: inherit; outline: none; min-width: 0"></label>
+                <div style="display: flex; flex-direction: column; overflow: hidden; flex: 1">
+                  <span class="grp">置顶 · 3</span>
+                  <div class="ln"><span class="sw" style="background: #FFE58A"></span><span class="t" style="font-weight: 700">周五前把报价单发给阿杰</span><svg width="10" height="10" viewBox="0 0 24 24" fill="#5BC2F2" aria-label="常驻中" role="img"><rect x="3" y="9" width="18" height="6" rx="3"></rect></svg><span class="m">11:20</span></div>
+                  <div class="ln"><span class="sw" style="background: #8FD3F5"></span><span class="t" style="font-weight: 700">Wi-Fi：Office-5G</span><span class="m">昨天</span></div>
+                  <div class="ln"><span class="sw" style="background: #B8E6A0"></span><span class="t" style="font-weight: 700">体检预约 12/03 上午</span><span class="m">周一</span></div>
+                  <span class="grp">今天</span>
+                  <div class="ln"><span class="sw" style="background: #FF8A7A"></span><span class="t">完成一次专注 · 25 分钟</span><span class="m">10:48</span></div>
+                  <div class="ln"><span class="sw" style="background: #8FD3F5"></span><span class="t">会议室 B 改到 3 楼</span><span class="m">09:12</span></div>
+                </div>
+              </div>
+            </div>
+            <span class="arrow" style="left: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg></span>
+            <span class="arrow" style="right: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M9 5l7 7-7 7"></path></svg></span>
+          </div>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px">
+        <div class="card" style="padding: 14px; display: flex; flex-direction: column; gap: 10px">
+          <div class="k">常驻条 · 置顶的那张</div>
+          <div class="desk" style="padding: 0 0 16px"><div class="pill" style="width: 280px"><span style="font-weight: 700">14:05</span><span style="flex: 1; display: flex; align-items: center; gap: 7px; padding: 4px 2px; min-width: 0"><span style="width: 10px; height: 12px; border-radius: 2px; background: #FFE58A; flex: 0 0 auto; transform: rotate(-6deg)"></span><span style="font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">周五前把报价单发给阿杰</span></span></div></div>
+          <span class="muted" style="font-size: 12px">常驻哪张由用户选：卡片上点「常驻」，或在设置里选「指定一张 / 最新一张 / 置顶轮播」。列表里带蓝色小条的就是常驻中的那张。</span>
+        </div>
+        <div class="card" style="padding: 14px; display: flex; flex-direction: column; gap: 10px">
+          <div class="k">完成和找回</div>
+          <div style="background: #000; color: #fff; border-radius: 12px; padding: 10px 12px; font-size: 11px; display: flex; flex-direction: column; gap: 6px">
+            <span style="display: flex; align-items: center; gap: 7px"><span class="sw" style="background: #8FD3F5"></span><span style="text-decoration: line-through; color: #8E8E99; flex: 1">会议室 B 改到 3 楼</span><span style="color: #FFD25A">撤销</span></span>
+            <span style="color: #6B6B73; font-size: 10px">完成的便签划线淡出，3 秒内可撤销，之后进入「已完成」，30 天后清理。</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">设计说明</div>
+      <ul class="muted" style="margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.7">
+        <li>不设条数上限，只受插件私有存储 256 KiB 限制（几千条短便签）；存储快满时在详情里提示导出。</li>
+        <li>左边那摞纸是「当前这张」：完整显示正文，底部三个操作：复制、完成、常驻到岛上。</li>
+        <li>右边列表点哪条，哪条就飞到纸堆最上面；颜色条代表来源（手写黄、专注红、粘贴蓝）。</li>
+        <li>置顶不限条数，置顶组排在最前，组内可拖动排序。</li>
+        <li>搜索在本地即时过滤，不联网。</li>
+        <li>专注结束自动记一条红色便签，写上时长。</li>
+      </ul>
+      <div class="k" style="margin-top: 4px">实现方式</div>
+      <div class="card" style="padding: 6px 14px">
+        <table style="width: 100%; border-collapse: collapse">
+          <tbody>
+            <tr><td>两色标题、日期胶囊、左右箭头</td><td style="text-align: right"><span class="std">宿主统一</span></td></tr>
+            <tr><td>纸堆（倾斜、阴影、正文排版、三个按钮）</td><td style="text-align: right"><span class="cvs">自绘画布</span></td></tr>
+            <tr><td>输入框、搜索框</td><td style="text-align: right"><span class="std">fields</span></td></tr>
+            <tr><td>分组列表、颜色条、置顶、可滚动</td><td style="text-align: right"><span class="cvs">自绘画布 · 滚动区</span></td></tr>
+            <tr><td>点按切换当前便签、完成、撤销</td><td style="text-align: right"><span class="std">action</span></td></tr>
+            <tr><td>专注结束自动记一条</td><td style="text-align: right"><span class="std">event</span></td></tr>
+            <tr><td>常驻条（色块 + 文字）</td><td style="text-align: right"><span class="cvs">常驻小画布</span></td></tr>
+            <tr><td>常驻方式：指定一张 / 最新一张 / 置顶轮播</td><td style="text-align: right"><span class="std">choice 设置</span></td></tr>
+            <tr><td>不限条数、导出</td><td style="text-align: right"><span class="std">storage</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+</body>
+</html>

@@ -1,5 +1,7 @@
 //! 同心额度环、账号选择及账号设置。
-use crate::{app::{App,Cmd},extras::{settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Amount,Config,Provider,Snapshot},theme::{self,W}};
+use crate::{app::{App,Cmd},extras::{settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Amount,Config,Provider,RelayIcon,Snapshot},theme::{self,W}};
+#[cfg(all(windows, feature = "sdk-material"))]
+use crate::material::ControlRole;
 use eframe::egui::{self,Color32};
 use std::collections::{HashMap,HashSet};
 use chrono::Datelike;
@@ -10,6 +12,8 @@ const CLAUDE_LOCAL_NOTICE:&str="由于 Claude 对网络使用环境要求较高�
 pub(crate) struct State {
     cache_path:Option<std::path::PathBuf>,
     pub config:Config,pub rows:HashMap<String,Result<Snapshot,String>>,pub busy:HashSet<String>,
+    #[cfg(feature = "sdk-js")]
+    selected_plugin: Option<(String, String)>,
     pub provider:Provider,pub alias:String,pub source:String,pub note:String,
     pub relay_manual:bool,
     pub relay_user_token:bool,pub relay_user_id:String,
@@ -43,6 +47,10 @@ impl State {
         let cache:serde_json::Value=std::fs::read(path).ok()
             .and_then(|raw|serde_json::from_slice(&raw).ok()).unwrap_or_default();
         for a in &state.config.accounts {
+            if a.provider==Provider::ZCode{
+                state.rows.insert(a.id.clone(),Err(quota::ZCODE_RECONNECT.into()));
+                continue;
+            }
             let Some(snapshot)=a.cached_snapshot(&cache)else{continue;};
             state.rows.insert(a.id.clone(),Ok(snapshot));
             state.stale.insert(a.id.clone(),"上次记录，等待刷新".into());
@@ -54,6 +62,8 @@ impl State {
         let Some(path)=&self.cache_path else{return;};
         let mut entries=serde_json::Map::new();
         for a in &self.config.accounts {
+            // CLI 的额度报告不含账号 ID，跨启动无法确认读数属于当前登录。
+            if a.provider==Provider::Antigravity{continue;}
             if let Some(Ok(snapshot))=self.rows.get(&a.id) {
                 let mut entry=serde_json::json!({"provider":a.provider.name(),"slot":a.slot,"source":a.source,"snapshot":snapshot});
                 if a.provider==Provider::Claude{entry["local_identity_checked"]=a.cache_identity_marker();}
@@ -87,7 +97,8 @@ impl State {
             }
         }
         if let Err(error)=&event.result{
-            if matches!(self.rows.get(&event.id),Some(Ok(_))){
+            let is_antigravity=self.config.accounts.iter().any(|a|a.id==event.id&&a.provider==Provider::Antigravity);
+            if !is_antigravity&&matches!(self.rows.get(&event.id),Some(Ok(_))){
                 self.stale.insert(event.id,error.clone());return;
             }
         }
@@ -146,7 +157,7 @@ fn logo_texture(ctx:&egui::Context,provider:Provider,pixels:u32)->Option<egui::T
         let bitmap=image::load_from_memory(include_bytes!("../assets/ai-icons/doubao.png")).ok()?.resize_exact(pixels,pixels,image::imageops::FilterType::Lanczos3).to_rgba8();
         egui::ColorImage::from_rgba_unmultiplied([pixels as usize,pixels as usize],bitmap.as_raw())
     }else{
-        let bytes:&[u8]=match provider{Provider::ZCode=>include_bytes!("../assets/ai-icons/zcode.svg"),Provider::Codex=>include_bytes!("../assets/ai-icons/codex.svg"),Provider::Claude=>include_bytes!("../assets/ai-icons/claude.svg"),Provider::Kimi=>include_bytes!("../assets/ai-icons/kimi.svg"),Provider::GrokBot=>include_bytes!("../assets/ai-icons/grokbot.svg"),Provider::Gemini=>include_bytes!("../assets/ai-icons/gemini.svg"),Provider::WorkBuddy=>include_bytes!("../assets/ai-icons/workbuddy.svg"),Provider::DeepSeek=>include_bytes!("../assets/ai-icons/deepseek.svg"),Provider::Kiro=>include_bytes!("../assets/ai-icons/kiro.svg"),Provider::OpenCodeGo=>include_bytes!("../assets/ai-icons/opencode.svg"),Provider::MiniMax=>include_bytes!("../assets/ai-icons/minimax.svg"),Provider::Glm=>include_bytes!("../assets/ai-icons/glm.svg"),_=>include_bytes!("../assets/ai-icons/api-key.svg")};
+        let bytes:&[u8]=match provider{Provider::ZCode=>include_bytes!("../assets/ai-icons/zcode.svg"),Provider::Codex=>include_bytes!("../assets/ai-icons/codex.svg"),Provider::Claude=>include_bytes!("../assets/ai-icons/claude.svg"),Provider::Kimi=>include_bytes!("../assets/ai-icons/kimi.svg"),Provider::GrokBot=>include_bytes!("../assets/ai-icons/grokbot.svg"),Provider::Gemini=>include_bytes!("../assets/ai-icons/gemini.svg"),Provider::Antigravity=>include_bytes!("../assets/ai-icons/antigravity.svg"),Provider::WorkBuddy=>include_bytes!("../assets/ai-icons/workbuddy.svg"),Provider::DeepSeek=>include_bytes!("../assets/ai-icons/deepseek.svg"),Provider::Kiro=>include_bytes!("../assets/ai-icons/kiro.svg"),Provider::OpenCodeGo=>include_bytes!("../assets/ai-icons/opencode.svg"),Provider::MiniMax=>include_bytes!("../assets/ai-icons/minimax.svg"),Provider::Glm=>include_bytes!("../assets/ai-icons/glm.svg"),_=>include_bytes!("../assets/ai-icons/api-key.svg")};
         egui_extras::image::load_svg_bytes_with_size(bytes,Some(egui::load::SizeHint::Size(pixels,pixels))).ok()?
     };
     // 白色标识使用矢量覆盖率，避免透明边缘再次变暗。
@@ -155,12 +166,64 @@ fn logo_texture(ctx:&egui::Context,provider:Provider,pixels:u32)->Option<egui::T
     if (!provider.balance()||provider.relay())&&!keeps_brand_color(provider){crate::skin_paint::mark_monochrome(texture.id());}else{crate::skin_paint::mark_colored(texture.id());}
     ctx.data_mut(|data|data.insert_temp(key,texture.clone()));Some(texture)
 }
+fn relay_logo_texture(ctx:&egui::Context,provider:Provider,icon:RelayIcon,pixels:u32)->Option<egui::TextureHandle>{
+    let bytes:&[u8]=match icon{
+        RelayIcon::Key=>return logo_texture(ctx,provider,pixels),
+        RelayIcon::Layers=>include_bytes!("../assets/ai-icons/relay-layers.svg"),
+        RelayIcon::Plane=>include_bytes!("../assets/ai-icons/relay-plane.svg"),
+        RelayIcon::Bolt=>include_bytes!("../assets/ai-icons/relay-bolt.svg"),
+        RelayIcon::Link=>include_bytes!("../assets/ai-icons/relay-link.svg"),
+        RelayIcon::Arrows=>include_bytes!("../assets/ai-icons/relay-arrows.svg"),
+        RelayIcon::Box=>include_bytes!("../assets/ai-icons/relay-box.svg"),
+    };
+    let key=egui::Id::new(("relay-logo",icon.key(),pixels));
+    if let Some(texture)=ctx.data(|data|data.get_temp(key)){return Some(texture);}
+    let image=egui_extras::image::load_svg_bytes_with_size(bytes,Some(egui::load::SizeHint::Size(pixels,pixels))).ok()?;
+    let texture=ctx.load_texture(format!("relay-logo-{}-{pixels}",icon.key()),image,egui::TextureOptions::LINEAR);
+    crate::skin_paint::mark_colored(texture.id());
+    ctx.data_mut(|data|data.insert_temp(key,texture.clone()));
+    Some(texture)
+}
+
 fn logo(c:&Card,provider:Provider,x:f32,y:f32,size:f32){
+    account_logo(c,provider,RelayIcon::Key,x,y,size);
+}
+
+fn account_logo(c:&Card,provider:Provider,icon:RelayIcon,x:f32,y:f32,size:f32){
     let ctx=c.ui.ctx();let ppp=ctx.pixels_per_point();let center=c.pos(x,y);
     let pixels=(size*c.s*ppp).round().max(1.0) as u32;let half=pixels as f32/2.0;
     let min=egui::pos2((center.x*ppp-half).round()/ppp,(center.y*ppp-half).round()/ppp);
     let rect=egui::Rect::from_min_size(min,egui::Vec2::splat(pixels as f32/ppp));
-    if let Some(texture)=logo_texture(ctx,provider,pixels){c.painter.image(texture.id(),rect,egui::Rect::from_min_max(egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)),Color32::WHITE);}
+    if let Some(texture)=relay_logo_texture(ctx,provider,icon,pixels){c.painter.image(texture.id(),rect,egui::Rect::from_min_max(egui::pos2(0.0,0.0),egui::pos2(1.0,1.0)),Color32::WHITE);}
+}
+
+fn relay_icon_image(ui:&egui::Ui,provider:Provider,icon:RelayIcon)->Option<egui::Image<'static>>{
+    let size=18.0;
+    let pixels=(size*ui.ctx().pixels_per_point()).round().max(1.0) as u32;
+    let texture=relay_logo_texture(ui.ctx(),provider,icon,pixels)?;
+    let tint=if icon==RelayIcon::Key{ui.visuals().text_color()}else{Color32::WHITE};
+    Some(egui::Image::from_texture((texture.id(),egui::Vec2::splat(size))).tint(tint))
+}
+
+fn relay_icon_picker(ui:&mut egui::Ui,provider:Provider,icon:&mut RelayIcon){
+    ui.horizontal(|ui|{
+        let label=ui.label(egui::RichText::new("图标").size(12.0));
+        if let Some(image)=relay_icon_image(ui,provider,*icon){ui.add(image);}
+        let _=egui::ComboBox::from_id_salt("relay-icon").width(124.0)
+            .selected_text(icon.label())
+            .show_ui(ui,|ui|{
+                for choice in RelayIcon::ALL{
+                    let button=match relay_icon_image(ui,provider,choice){
+                        Some(image)=>egui::Button::image_and_text(image,choice.label()),
+                        None=>egui::Button::new(choice.label()),
+                    };
+                    if ui.add_sized([ui.available_width(),25.0],button.selected(choice==*icon)).clicked(){
+                        *icon=choice;
+                        ui.close_menu();
+                    }
+                }
+            }).response.labelled_by(label.id);
+    });
 }
 fn deepseek_badge_svg(skin:crate::model::Skin)->String{
     use crate::model::Skin;
@@ -182,31 +245,37 @@ fn deepseek_badge(c:&Card,skin:crate::model::Skin,x:f32,y:f32,size:f32){
         c.painter.image(texture.id(),egui::Rect::from_min_size(min,egui::Vec2::splat(pixels as f32/ppp)),egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),Color32::WHITE);
     }
 }
-fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2]){
-    let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
+fn quota_rings(c:&Card,x:f32,y:f32,size:f32,colors:[Color32;2],remaining:impl ExactSizeIterator<Item=f32>){
+    let dual=remaining.len()>1;
     let stroke=if dual{if size<35.0{2.2}else{6.5}}else{(size*0.102).clamp(3.0,6.5)};
     let radius=size/2.0-stroke/2.0-1.0;
     let gap=if size<35.0{1.5}else{3.0};
     let start=-std::f32::consts::FRAC_PI_2;
-    for i in 0..if dual{2}else{1}{
+    for (i,value) in remaining.take(2).enumerate(){
         let r=radius-i as f32*(stroke+gap);
-        if let Some(w)=windows.get(i){
-            let col=colors[i];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
-            if w.remaining>=100.0{c.ring(x,y,r,stroke,col);}else if w.remaining<=0.0{c.ring(x,y,r,stroke,dark);}else{
-                let end=start+std::f32::consts::TAU*w.remaining/100.0;
-                c.arc(x,y,r,end,start+std::f32::consts::TAU,stroke,dark);
-                c.arc(x,y,r,start,end,stroke,col);
-                for angle in [start,end]{c.circle(x+r*angle.cos(),y+r*angle.sin(),stroke/2.0,col);}
-            }
+        let col=colors[i];let dark=crate::paint::mix(col,Color32::BLACK,0.8);
+        if value>=100.0{c.ring(x,y,r,stroke,col);}else if value<=0.0{c.ring(x,y,r,stroke,dark);}else{
+            let end=start+std::f32::consts::TAU*value/100.0;
+            c.arc(x,y,r,end,start+std::f32::consts::TAU,stroke,dark);
+            c.arc(x,y,r,start,end,stroke,col);
+            for angle in [start,end]{c.circle(x+r*angle.cos(),y+r*angle.sin(),stroke/2.0,col);}
         }
     }
+}
+fn quota_ring_number(c:&Card,x:f32,y:f32,value:&str){
+    let large=if value.len()>2{22.0}else{28.0};
+    let number_width=c.text_w(value,large,W::Bold);let width=number_width+c.text_w("%",11.0,W::Semibold)+2.0;
+    let left=x-width/2.0;c.centered_text(left,y,value,large,W::Bold,theme::WHITE,H::Left);
+    c.centered_text(left+number_width+2.0,y+3.0,"%",11.0,W::Semibold,theme::GRAY,H::Left);
+}
+fn ring(c:&Card,a:&Account,snapshot:Option<&Snapshot>,x:f32,y:f32,size:f32,colors:[Color32;2]){
+    let windows=snapshot.map(Snapshot::rings).unwrap_or_default();let dual=windows.len()>1;
+    quota_rings(c,x,y,size,colors,windows.iter().map(|w|w.remaining));
     if a.provider==Provider::Kiro{logo(c,a.provider,x,y,if size<35.0{if dual{10.0}else{12.0}}else if dual{24.0}else{34.0});}
-    else if a.provider==Provider::ZCode && windows.is_empty(){logo(c,a.provider,x,y,if size<35.0{size-3.0}else{size*0.72});}
+    else if matches!(a.provider,Provider::ZCode|Provider::Antigravity)&&windows.is_empty(){logo(c,a.provider,x,y,if size<35.0{size-3.0}else{size*0.72});}
     else if size<35.0 {logo(c,a.provider,x,y,if dual{10.0}else{12.0});}else if dual {logo(c,a.provider,x,y,24.0);}else if let Some(w)=windows.first(){
-        let value=format!("{:.0}",w.remaining);let large=if value.len()>2{22.0}else{28.0};
-        let number_width=c.text_w(&value,large,W::Bold);let width=number_width+c.text_w("%",11.0,W::Semibold)+2.0;
-        let left=x-width/2.0;c.centered_text(left,y,&value,large,W::Bold,theme::WHITE,H::Left);
-        c.centered_text(left+number_width+2.0,y+3.0,"%",11.0,W::Semibold,theme::GRAY,H::Left);
+        let value=if a.provider==Provider::Antigravity{w.value_text().trim_end_matches('%').to_owned()}else{format!("{:.0}",w.remaining)};
+        quota_ring_number(c,x,y,&value);
     }else{c.centered_text(x,y,"—",24.0,W::Semibold,theme::DIM,H::Center);}
 }
 fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
@@ -216,20 +285,79 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
     at.format(format).to_string()
 }
+#[cfg(feature = "sdk-js")]
+fn plugin_quota_colors()->[Color32;2]{
+    [theme::CYAN,crate::paint::mix(theme::CYAN,Color32::WHITE,0.16)]
+}
+#[cfg(feature = "sdk-js")]
+fn draw_plugin_quota(c:&Card,name:&str,quota:&crate::quota_plugin::PluginQuota){
+    let colors=plugin_quota_colors();
+    let remaining:Vec<_>=quota.windows.iter().filter_map(|window|window.percent()).take(2).collect();
+    quota_rings(c,103.0,105.0,70.0,colors,remaining.iter().copied());
+    if let [percent]=remaining.as_slice(){
+        let value=if *percent>0.0&&*percent<1.0{"<1".into()}else{format!("{percent:.0}")};
+        quota_ring_number(c,103.0,105.0,&value);
+    }else{
+        c.centered_text(103.0,105.0,"额度",12.0,W::Semibold,theme::GRAY,H::Center);
+    }
+    c.text(157.0,64.0,&c.fit(&format!("{name} · 插件"),12.0,W::Semibold,197.0),12.0,W::Semibold,theme::WHITE,H::Left);
+    let now=chrono::Local::now();
+    for (i,window) in quota.windows.iter().enumerate(){
+        let y=83.0+i as f32*23.0;
+        let value=window.value_text();
+        let value_width=112.0;
+        let preferred_size=15.0;
+        let value_size=(preferred_size*(value_width-2.0)/c.text_w(&value,preferred_size,W::Semibold).max(value_width-2.0)).max(11.0);
+        let shown=c.fit(&value,value_size,W::Semibold,value_width);
+        let label_width=190.0-c.text_w(&shown,value_size,W::Semibold);
+        let color=if window.remaining==Some(0.0)||window.percent()==Some(0.0){Color32::from_rgb(255,166,77)}else{theme::WHITE};
+        c.text(157.0,y,&c.fit(&window.label,11.0,W::Semibold,label_width.max(0.0)),11.0,W::Semibold,theme::WHITE,H::Left);
+        c.text(355.0,y,&shown,value_size,W::Semibold,color,H::Right);
+        if window.reset_at.is_some(){
+            c.text(157.0,y+12.0,&c.fit(&reset_text(window.reset_at,&now),9.0,W::Regular,197.0),9.0,W::Regular,theme::GRAY,H::Left);
+        }
+        if shown!=value{
+            c.hit(235.0,y-13.0,122.0,16.0,("plugin-quota-value",i)).on_hover_text(value);
+        }
+    }
+    if let Some(at)=quota.expires_at.and_then(|at|chrono::DateTime::from_timestamp(at,0)){
+        let text=format!("{} 到期",at.with_timezone(&chrono::Local).format("%Y/%-m/%-d %H:%M"));
+        c.text(157.0,154.0,&c.fit(&text,9.0,W::Regular,197.0),9.0,W::Regular,theme::GRAY,H::Left);
+    }
+}
 fn snapshot_details(snapshot:&Snapshot)->String{
     if let Some(relay)=&snapshot.relay{return relay.full();}
     if snapshot.kiro.is_some(){return kiro_details(snapshot);}
     let mut lines=Vec::new();let now=chrono::Local::now();
     for w in snapshot.windows.iter().chain(snapshot.extra.iter()){
-        lines.push(format!("{}：剩余 {:.1}% · {}",w.label,w.remaining,reset_text(w.reset,&now)));
+        let value=if snapshot.antigravity.is_some(){w.value_text()}else{format!("{:.1}%",w.remaining)};
+        lines.push(format!("{}：剩余 {} · {}",w.label,value,reset_text(w.reset,&now)));
+    }
+    if let Some(details)=&snapshot.antigravity{
+        if let Some(mode)=details.mode{lines.push(mode.label().into());}
+        for window in &details.unavailable{
+            let mut line=format!("{}：{}",window.label,if window.disabled{"已停用"}else{"不可用"});
+            if window.reset.is_some(){line.push_str(&format!(" · {}",reset_text(window.reset,&now)));}
+            lines.push(line);
+        }
+        if let Some(credits)=details.credits{
+            let time=details.credits_at.and_then(|at|chrono::DateTime::from_timestamp(at,0))
+                .map(|at|format!(" · {} 查询",at.with_timezone(&chrono::Local).format("%H:%M"))).unwrap_or_default();
+            lines.push(format!("AI 积分：{credits}{time}"));
+        }
+        if lines.is_empty(){lines.push("额度暂不可用".into());}
     }
     lines.join("\n")
 }
+fn antigravity_status(snapshot:&Snapshot)->&'static str{
+    snapshot.antigravity.as_ref().and_then(|details|details.mode).map(|mode|mode.label())
+        .unwrap_or("额度暂不可用")
+}
 fn connection_group(provider:Provider)->Provider{
-    if provider==Provider::Glm{Provider::ZCode}else if provider.relay(){Provider::NewApi}else{provider}
+    if provider==Provider::ZCode{Provider::Glm}else if provider.relay(){Provider::NewApi}else{provider}
 }
 fn connection_name(provider:Provider)->&'static str{
-    match connection_group(provider){Provider::ZCode=>"GLM / ZCode",Provider::NewApi=>"中转站",other=>other.name()}
+    match connection_group(provider){Provider::Glm=>"GLM / ZCode",Provider::NewApi=>"中转站",other=>other.name()}
 }
 fn kiro_details(snapshot:&Snapshot)->String{
     let Some(details)=&snapshot.kiro else{return String::new();};
@@ -254,6 +382,11 @@ fn claude_disclaimer(ui:&mut egui::Ui){
     ui.add(egui::Label::new(egui::RichText::new("岛仔为非官方辅助工具，数据仅供参考，以 Claude 官方显示为准；本地读取不构成账号安全保证。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75)))).wrap());
 }
 impl App {
+    fn quota_badge_skin(&self)->crate::model::Skin {
+        use crate::model::Skin;
+        if !self.glassy() { return self.effective_skin(); }
+        if self.island_palette().is_some_and(|palette|palette.glass_chrome) {Skin::GlassLight}else{Skin::GlassDark}
+    }
     pub(crate) fn quota_close_connection(&mut self){
         if let Some(connect)=&mut self.quota.kiro_connecting{connect.cancel();}
         self.quota.connect_open=false;self.quota.connect_target=None;
@@ -349,13 +482,24 @@ impl App {
         if self.quota.connect_target.is_some()&&target.is_none(){self.quota.note="原账号已移除，请重新添加".into();return;}
         self.quota.note.clear();self.quota.kiro_connecting=Some(quota::kiro::Connect::start(path,self.quota.alias.clone(),target));
     }
+    fn quota_ring_summary(&self,a:&Account,snapshot:Option<&Snapshot>)->String{
+        if let Some(s)=snapshot{
+            let summary=s.rings().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ");
+            if a.provider!=Provider::Antigravity||!summary.is_empty(){return summary;}
+            return antigravity_status(s).into();
+        }
+        if self.quota.busy.contains(&a.id){return "正在更新".into();}
+        if a.provider==Provider::Antigravity{
+            if let Some(Err(error))=self.quota.rows.get(&a.id){return error.clone();}
+        }
+        "额度暂不可用".into()
+    }
     pub fn quota_config(&self)->&Config{&self.quota.config}
-    pub fn quota_initialize(&mut self){if !crate::model::config_dir().join("ai-quota.json").exists(){self.quota.config.discover();self.quota.config.save();}}
-    pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().map(|a|a.id.clone()));}
+    pub fn quota_pending(&mut self,accounts:&[Account]){self.quota.busy.extend(accounts.iter().filter(|a|a.can_refresh()).map(|a|a.id.clone()));}
     pub fn quota_event(&mut self,event:quota::Event){self.quota.receive(event);}
     pub fn quota_set_source(&mut self,path:std::path::PathBuf){self.quota.source=path.to_string_lossy().into_owned();}
     pub(crate) fn quota_bar_indices(&self)->Vec<usize>{
-        if !self.quota.config.enabled || !self.quota.config.compact || !self.settings.visible_pages[6] || self.settings.minimal || self.t<self.notification_bell_until{return vec![];}
+        if !self.quota.config.enabled || !self.quota.config.compact || !self.settings.visible_pages[6] || self.settings.minimal || self.notification_bell().is_some(){return vec![];}
         self.quota.config.pinned_indices()
     }
     /// 常驻胶囊里每个额度槽的实际宽度：图标右侧跟数字的账号需要额外占位。
@@ -377,7 +521,7 @@ impl App {
             let snapshot=self.quota.rows.get(&a.id).and_then(|r|r.as_ref().ok());
             if a.provider.balance(){
                 let wide=true;let extra=if wide{layout.widths[crate::bar_layout::quota_slot(position)]-27.0}else{0.0};let icon_x=x-extra/2.0;
-                if a.provider!=Provider::DeepSeek{logo(c,a.provider,icon_x,15.0,22.0);}else{deepseek_badge(c,self.settings.skin,icon_x,15.0,24.0);}
+                if a.provider!=Provider::DeepSeek{account_logo(c,a.provider,self.quota.config.relay_icon(a),icon_x,15.0,22.0);}else{deepseek_badge(c,self.quota_badge_skin(),icon_x,15.0,24.0);}
                 let loading=self.quota.balance_loading(&a.id);let stale=self.quota.stale.contains_key(&a.id);
                 if stale||(!loading&&snapshot.is_none()){
                     c.circle(icon_x+9.0,24.0,3.8,Color32::BLACK);
@@ -403,24 +547,99 @@ impl App {
             if extra>0.0{let stale=self.quota.stale.contains_key(&a.id);if let Some(text)=self.quota.tail_text(&a.id){c.text(x+15.5,21.0,&text,theme::size::PILL_CLOCK,W::Bold,if stale{theme::GRAY}else{theme::WHITE},H::Left);}}
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(x+10.0,24.0,4.5,Color32::from_gray(225));c.text(x+10.0,26.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
-            let summary=snapshot.map(|s|s.rings().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
+            let summary=self.quota_ring_summary(a,snapshot);
             if bar_tooltip(c.hit(x-14.0,1.0,28.0+extra,28.0,("quota-pin",&a.id)),format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){chosen=Some(a.id.clone());}
         }
-        if let Some(id)=chosen{self.quota.config.selected=id;self.quota.config.save();self.show_page(6);}
+        if let Some(id)=chosen{
+            #[cfg(feature = "sdk-js")]
+            {self.quota.selected_plugin=None;}
+            self.quota.config.selected=id;self.quota.config.save();self.show_page(6);
+        }
     }
-    pub(crate) fn page_quota(&mut self,c:&Card){
-        if c.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){self.pending.push(Cmd::QuotaRefresh);}
-        c.text(319.0,23.0,if self.quota.busy.is_empty(){"刷新"}else{"更新中"},10.5,W::Regular,theme::GRAY,H::Center);
-        let Some(selected)=self.quota.config.selected_index() else{
+    pub(crate) fn page_quota(&mut self,c:&Card,header:&Card){
+        if header.hit(303.0,8.0,32.0,21.0,"quota-refresh").on_hover_text("刷新额度").clicked(){
+            #[cfg(feature = "sdk-js")]
+            self.plugins.refresh_quota();
+            self.pending.push(Cmd::QuotaRefresh);
+        }
+        header.text(319.0,23.0,if self.quota.busy.is_empty(){"刷新"}else{"更新中"},10.5,W::Regular,theme::GRAY,H::Center);
+        #[derive(Clone,Copy)]
+        enum Source {
+            Account(usize),
+            #[cfg(feature = "sdk-js")]
+            Plugin(usize),
+        }
+        let sources:Vec<_>=self.quota.config.ordered_indices(false).into_iter().map(Source::Account).collect();
+        #[cfg(feature = "sdk-js")]
+        let plugin_sources:Vec<_>=self.plugins.quota_sources().collect();
+        let selected_account=self.quota.config.selected_index();
+        let builtin_position=selected_account.and_then(|selected|sources.iter().position(|source|matches!(source,Source::Account(index) if *index==selected)));
+        #[cfg(feature = "sdk-js")]
+        let (sources,position)={
+            let selected=self.quota.selected_plugin.as_ref()
+                .filter(|(_, account)| account == &self.quota.config.selected)
+                .and_then(|(selected, _)| plugin_sources.iter().position(|(id,_,_)|*id==selected));
+            if selected.is_none(){
+                self.quota.selected_plugin=None;
+            }
+            let mut sources=sources;
+            let plugin_start=sources.len();
+            sources.extend((0..plugin_sources.len()).map(Source::Plugin));
+            let position=selected.map(|index|plugin_start+index).or(builtin_position);
+            (sources,position)
+        };
+        #[cfg(not(feature = "sdk-js"))]
+        let position=builtin_position;
+        let Some(pos)=position.or_else(||(!sources.is_empty()).then_some(0)) else{
             c.text(43.0,61.0,"还没有添加 AI 账号",13.0,W::Bold,theme::WHITE,H::Left);
             c.text(43.0,80.0,"连接 AI 账号，查看剩余额度",10.5,W::Regular,theme::GRAY,H::Left);
-            let(r,b)=crate::paint::capsule(c,43.0,92.0,94.0,24.0,"add-quota-account",theme::BTN,theme::BTN_HOVER);b.text(90.0,108.0,"添加账号",10.0,W::Semibold,theme::WHITE,H::Center);if r.clicked(){self.settings_tab=11;self.open_settings();}return;
+            let(r,b)=crate::paint::material_capsule(c,43.0,92.0,94.0,24.0,"add-quota-account",theme::BTN,theme::BTN_HOVER,
+                self.glassy().then_some((self.glass_controls_ready(),0.16,0.42)),
+                #[cfg(all(windows, feature = "sdk-material"))] ControlRole::QuotaAdd);
+            b.text(90.0,108.0,"添加账号",10.0,W::Semibold,theme::WHITE,H::Center);if r.clicked(){self.settings_tab=11;self.open_settings();}return;
         };
-        let indices=self.quota.config.ordered_indices(false);
-        let pos=indices.iter().position(|i|*i==selected).unwrap_or(0);let start=pos/3*3;let mut picked=None;
-        if indices.len()>3{for (x,offset,label)in [(42.0,-1isize,"‹"),(357.0,1,"›")]{if c.hit(x-7.0,30.0,18.0,19.0,("quota-account-next",offset)).clicked(){picked=Some(indices[(pos as isize+offset).rem_euclid(indices.len() as isize) as usize]);}c.text(x+2.0,44.0,label,13.0,W::Regular,theme::GRAY,H::Center);}}
-        for (column,index)in indices.iter().skip(start).take(3).enumerate(){let a=&self.quota.config.accounts[*index];let x=59.0+column as f32*99.0;let on=*index==selected;let colors=accent_colors(&self.quota.config,a);let color=colors[0];let(r,b)=crate::paint::capsule(c,x,30.0,94.0,21.0,&format!("quota-account-{}",a.id),if on{Color32::from_rgb(color.r()/5,color.g()/5,color.b()/5)}else{Color32::BLACK},theme::BTN_HOVER);let text=b.fit(&a.alias,10.5,W::Regular,84.0);b.text(x+47.0,45.0,&text,10.5,W::Regular,if on{colors[1]}else{theme::GRAY},H::Center);if r.on_hover_text(format!("{} · {}",a.provider.name(),a.alias)).clicked(){picked=Some(*index);}}
-        if let Some(i)=picked{self.quota.config.selected=self.quota.config.accounts[i].id.clone();self.quota.config.save();}
+        let start=pos/3*3;
+        let mut picked=None;
+        if sources.len()>3{for (x,offset,label)in [(42.0,-1isize,"‹"),(357.0,1,"›")]{if c.hit(x-7.0,30.0,18.0,19.0,("quota-account-next",offset)).clicked(){picked=Some((pos as isize+offset).rem_euclid(sources.len() as isize) as usize);}c.text(x+2.0,44.0,label,13.0,W::Regular,theme::GRAY,H::Center);}}
+        for (column,source) in sources.iter().skip(start).take(3).enumerate(){
+            let (name,hit,tip,colors)=match *source{
+                Source::Account(index)=>{
+                    let a=&self.quota.config.accounts[index];
+                    (a.alias.as_str(),format!("quota-account-{}",a.id),format!("{} · {}",a.provider.name(),a.alias),accent_colors(&self.quota.config,a))
+                },
+                #[cfg(feature = "sdk-js")]
+                Source::Plugin(index)=>{
+                    let (id,name,_)=plugin_sources[index];
+                    (name,format!("quota-plugin-{id}"),format!("{name} · 插件"),plugin_quota_colors())
+                },
+            };
+            let x=59.0+column as f32*99.0;let on=start+column==pos;let color=colors[0];
+            let(r,b)=crate::paint::capsule(c,x,30.0,94.0,21.0,&hit,if on{Color32::from_rgb(color.r()/5,color.g()/5,color.b()/5)}else{Color32::BLACK},theme::BTN_HOVER);
+            let text=b.fit(name,10.5,W::Regular,84.0);
+            b.text(x+47.0,45.0,&text,10.5,W::Regular,if on{colors[1]}else{theme::GRAY},H::Center);
+            if r.on_hover_text(tip).clicked(){picked=Some(start+column);}
+        }
+        if let Some(index)=picked{
+            match sources[index]{
+                Source::Account(i)=>{
+                    #[cfg(feature = "sdk-js")]
+                    {self.quota.selected_plugin=None;}
+                    self.quota.config.selected=self.quota.config.accounts[i].id.clone();
+                    self.quota.config.save();
+                },
+                #[cfg(feature = "sdk-js")]
+                Source::Plugin(i)=>{self.quota.selected_plugin=Some((plugin_sources[i].0.to_owned(),self.quota.config.selected.clone()));},
+            }
+        }
+        let selected=match sources[pos]{
+            Source::Account(index)=>index,
+            #[cfg(feature = "sdk-js")]
+            Source::Plugin(index)=>{
+                let (_,name,quota)=plugin_sources[index];
+                draw_plugin_quota(c,name,quota);
+                return;
+            },
+        };
         let a=&self.quota.config.accounts[selected];let result=self.quota.rows.get(&a.id);let snapshot=result.and_then(|r|r.as_ref().ok());
         let colors=accent_colors(&self.quota.config,a);
         if let Some(s)=snapshot.filter(|s|s.at>0){
@@ -452,7 +671,7 @@ impl App {
             return;
         }
         if a.provider==Provider::DeepSeek{
-            deepseek_badge(c,self.settings.skin,85.0,105.0,50.0);
+            deepseek_badge(c,self.quota_badge_skin(),85.0,105.0,50.0);
             if let Some(s)=snapshot{
                 if let Some(wallet)=&s.wallet{
                     let b=wallet.primary();
@@ -468,7 +687,7 @@ impl App {
             return;
         }
         if a.provider.relay(){
-            logo(c,a.provider,85.0,105.0,44.0);
+            account_logo(c,a.provider,self.quota.config.relay_icon(a),85.0,105.0,44.0);
             if let Some(q)=snapshot.and_then(|s|s.relay.as_ref()){
                 if let Some(amount)=q.primary(){
                     let exhausted=amount.remaining.is_some_and(|n|n<=0.0)&&!amount.unlimited;
@@ -496,15 +715,30 @@ impl App {
             }
             return;
         }
-        if a.provider.api_key()||a.provider==Provider::Doubao{
+        if a.provider.api_key()||matches!(a.provider,Provider::Doubao|Provider::Antigravity){
+            let antigravity=a.provider==Provider::Antigravity;
             let label=match snapshot.map(|s|s.plan.as_str()).filter(|s|!s.is_empty()){Some(plan)=>format!("{} · {plan}",a.provider.name()),None=>a.provider.name().into()};
             c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
             if let Some(snapshot)=snapshot{
-                let mut main=snapshot.windows.iter().collect::<Vec<_>>();main.sort_by(|a,b|a.remaining.total_cmp(&b.remaining));
-                let meter=Snapshot{windows:main.iter().take(2).map(|w|(**w).clone()).collect(),..Default::default()};
-                ring(c,a,Some(&meter),103.0,105.0,70.0,colors);
-                let displayed=meter.rings();
-                let mut rows=snapshot.windows.iter().chain(snapshot.extra.iter()).take(3).collect::<Vec<_>>();
+                let main=if antigravity{snapshot.antigravity_windows()}else{
+                    let mut main=snapshot.windows.iter().collect::<Vec<_>>();
+                    main.sort_by(|a,b|a.remaining.total_cmp(&b.remaining));main
+                };
+                let meter;
+                let ring_snapshot=if antigravity{snapshot}else{
+                    meter=Snapshot{windows:main.iter().take(2).map(|w|(**w).clone()).collect(),..Default::default()};
+                    &meter
+                };
+                ring(c,a,Some(ring_snapshot),103.0,105.0,70.0,colors);
+                let displayed=ring_snapshot.rings();
+                let mut rows=if antigravity{main.iter().take(3).copied().collect()}
+                    else{snapshot.windows.iter().chain(snapshot.extra.iter()).take(3).collect::<Vec<_>>()};
+                if antigravity&&rows.is_empty(){
+                    let status=antigravity_status(snapshot);
+                    for (i,line) in c.wrap(status,12.0,W::Regular,197.0,2).iter().enumerate(){
+                        c.text(157.0,105.0+i as f32*17.0,line,12.0,W::Regular,theme::GRAY,H::Left);
+                    }
+                }
                 if let Some(limit)=main.first(){
                     if rows.len()==3&&!rows.contains(limit){rows[2]=limit;}
                     let exhausted=limit.remaining<=0.0;
@@ -516,7 +750,8 @@ impl App {
                     let y=83.0+i as f32*23.0;let color=if w.remaining<=0.0{Color32::from_rgb(255,166,77)}else{displayed.iter().position(|v|**v==**w).map(|slot|colors[slot]).unwrap_or(theme::GRAY)};
                     c.circle(159.0,y-4.0,2.5,color);
                     c.text(168.0,y,&c.fit(&w.label,11.0,W::Semibold,114.0),11.0,W::Semibold,theme::WHITE,H::Left);
-                    c.text(355.0,y,&format!("{:.0}%",w.remaining),17.0,W::Semibold,if w.remaining<=0.0{color}else{theme::WHITE},H::Right);
+                    let value=if antigravity{w.value_text()}else{format!("{:.0}%",w.remaining)};
+                    c.text(355.0,y,&value,17.0,W::Semibold,if w.remaining<=0.0{color}else{theme::WHITE},H::Right);
                     c.text(168.0,y+12.0,&c.fit(&reset_text(w.reset,&now),9.0,W::Regular,187.0),9.0,W::Regular,theme::GRAY,H::Left);
                 }
                 let details=c.hit(309.0,51.0,48.0,20.0,("api-quota-details",&a.id)).on_hover_text(snapshot_details(snapshot)).clicked();
@@ -524,8 +759,14 @@ impl App {
                 if details{self.quota.detail_account=Some(a.id.clone());self.settings_tab=11;self.open_settings();}
             }else{
                 logo(c,a.provider,103.0,105.0,40.0);
-                let text=result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度");
+                let text=if antigravity&&self.quota.busy.contains(&a.id){"正在更新额度…"}
+                    else{result.and_then(|r|r.as_ref().err()).map(String::as_str).unwrap_or("等待更新额度")};
                 for(i,line)in c.wrap(text,11.0,W::Regular,197.0,3).iter().enumerate(){c.text(157.0,96.0+i as f32*17.0,line,11.0,W::Regular,theme::GRAY,H::Left);}
+                if antigravity{
+                    let details=c.hit(309.0,51.0,48.0,20.0,("antigravity-details",&a.id)).on_hover_text("打开 Antigravity 额度设置").clicked();
+                    c.text(355.0,64.0,"设置 ›",10.0,W::Regular,theme::GRAY,H::Right);
+                    if details{self.quota.detail_account=Some(a.id.clone());self.settings_tab=11;self.open_settings();}
+                }
             }
             return;
         }
@@ -534,9 +775,7 @@ impl App {
         c.text(157.0,64.0,&c.fit(&label,12.0,W::Semibold,145.0),12.0,W::Semibold,theme::WHITE,H::Left);
         if let Some(s)=snapshot{
             let windows=s.rings();let now=chrono::Local::now();
-            if windows.is_empty() && a.provider==Provider::ZCode{
-                c.text(157.0,104.0,"官网未分配体验额度",11.0,W::Regular,theme::GRAY,H::Left);
-            }else if windows.len()==1{
+            if windows.len()==1{
                 let w=windows[0];c.text(157.0,103.0,&format!("{}剩余",w.label),12.0,W::Semibold,theme::WHITE,H::Left);
                 if let Some(amount)=&w.amount{let text=format!("{} 点",amount.full());let available=355.0-157.0-c.text_w(&format!("{}剩余",w.label),12.0,W::Semibold)-8.0;let size=12.5*(available/c.text_w(&text,12.5,W::Semibold).max(available));c.text(355.0,103.0,&text,size,W::Semibold,theme::WHITE,H::Right);}
                 let reset=quota_reset_text(s,w,&now);c.text(157.0,124.0,&c.fit(&reset,11.0,W::Regular,197.0),11.0,W::Regular,theme::GRAY,H::Left);
@@ -560,7 +799,8 @@ impl App {
         self.quota.relay_user_token=false;self.quota.relay_user_id.clear();
         self.quota.relay_script.clear();self.quota.relay_access_token.clear();
         if let Some(a)=id.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)){
-            self.quota.provider=a.provider;self.quota.alias=a.alias.clone();self.quota.source=a.source.to_string_lossy().into();
+            self.quota.provider=a.provider;self.quota.alias=a.alias.clone();
+            if a.provider==Provider::ZCode{self.quota.provider=Provider::Glm;}else{self.quota.source=a.source.to_string_lossy().into();}
             if let Some(user_id)=quota::api::new_api_user_id(a){self.quota.relay_user_token=true;self.quota.relay_user_id=user_id;}
             if let Some(c)=quota::api::custom_credentials(a){self.quota.relay_script=c.script;self.quota.api_key=c.api_key;self.quota.relay_access_token=c.access_token;self.quota.relay_user_id=c.user_id;}
             if a.provider==Provider::Gemini{self.quota.gemini_email=quota::gemini::address(a).unwrap_or_default();}
@@ -571,7 +811,7 @@ impl App {
     fn quota_remove_account(&mut self,id:&str){
         if let Some(a)=self.quota.config.accounts.iter().find(|a|a.id==id&&(a.provider.api_key()||a.provider==Provider::Doubao)).cloned(){
             if a.provider.api_key(){if let Some(slot)=&a.slot{if let Err(error)=quota::api::queue_cleanup(slot){self.quota.note=error;return;}}}
-            let mut candidate=self.quota.config.clone();candidate.accounts.retain(|a|a.id!=id);candidate.colors.remove(id);
+            let mut candidate=self.quota.config.clone();candidate.accounts.retain(|a|a.id!=id);candidate.colors.remove(id);candidate.relay_icons.remove(id);
             if candidate.selected==id{candidate.selected=candidate.accounts.iter().find(|a|a.enabled).map(|a|a.id.clone()).unwrap_or_default();}
             if let Err(error)=candidate.save_checked(){self.quota.note=error;return;}
             self.quota.config=candidate;self.quota.rows.remove(id);self.quota.stale.remove(id);self.quota.busy.remove(id);self.quota.save_snapshots();
@@ -587,7 +827,11 @@ impl App {
         ui.horizontal_wrapped(|ui|{
             if ui.button("＋ 添加账号").clicked(){self.quota_open_connection(None);}
             if ui.button("识别本机账号").clicked(){self.quota.note=self.quota.config.discover().message();}
-            if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){self.pending.push(Cmd::QuotaRefresh);}
+            if ui.add_enabled(self.quota.busy.is_empty(),egui::Button::new("刷新额度")).clicked(){
+                #[cfg(feature = "sdk-js")]
+                self.plugins.refresh_quota();
+                self.pending.push(Cmd::QuotaRefresh);
+            }
         });ui.add_space(8.0);
         let accounts=self.quota.config.accounts.clone();let mut remove=None;let mut connect=None;let mut reorder=None;
         for mut a in accounts{
@@ -602,14 +846,19 @@ impl App {
                     ui.horizontal(|ui|{
                         ui.add(egui::Label::new("::").sense(egui::Sense::drag())).on_hover_text("拖动调整账号顺序").dnd_set_drag_payload(a.id.clone());
                         let (rect,_)=ui.allocate_exact_size(egui::vec2(26.0,28.0),egui::Sense::hover());let c=Card::new(ui,rect.min,ui.clip_rect());
-                        if a.provider==Provider::DeepSeek{deepseek_badge(&c,if ui.visuals().dark_mode{crate::model::Skin::Classic}else{crate::model::Skin::GlassLight},13.0,14.0,26.0);}else if matches!(a.provider,Provider::ZCode|Provider::Kiro){logo(&c,a.provider,13.0,14.0,26.0);}else{c.circle(13.0,14.0,13.0,crate::paint::mix(accent_colors(&self.quota.config,&a)[0],Color32::BLACK,0.75));logo(&c,a.provider,13.0,14.0,20.0);}
+                        let icon=self.quota.config.relay_icon(&a);
+                        if icon!=RelayIcon::Key{account_logo(&c,a.provider,icon,13.0,14.0,24.0);}
+                        else if a.provider==Provider::DeepSeek{deepseek_badge(&c,if ui.visuals().dark_mode{crate::model::Skin::Classic}else{crate::model::Skin::GlassLight},13.0,14.0,26.0);}
+                        else if matches!(a.provider,Provider::ZCode|Provider::Kiro){logo(&c,a.provider,13.0,14.0,26.0);}
+                        else{c.circle(13.0,14.0,13.0,crate::paint::mix(accent_colors(&self.quota.config,&a)[0],Color32::BLACK,0.75));logo(&c,a.provider,13.0,14.0,20.0);}
                         ui.label(egui::RichText::new(if a.provider.relay(){"中转站"}else{a.provider.name()}).strong());
                         if !a.alias.is_empty(){ui.label(egui::RichText::new(format!("· {}",a.alias)).color(ui.visuals().weak_text_color()));}
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
                             if ui.button(if open{"收起"}else{"详情"}).clicked(){open=!open;}
                             if a.pinned{ui.label(egui::RichText::new("常驻").size(11.0).color(ui.visuals().weak_text_color()));}
                             let warn=crate::settings_theme::color(ui.ctx(),Color32::from_rgb(231,175,108),Color32::from_rgb(151,94,28));
-                            if !a.enabled{ui.label(egui::RichText::new("已暂停").size(11.5).color(ui.visuals().weak_text_color()));}
+                            if a.provider==Provider::ZCode{ui.label(egui::RichText::new("需要重新连接").size(11.5).color(warn));}
+                            else if !a.enabled{ui.label(egui::RichText::new("已暂停").size(11.5).color(ui.visuals().weak_text_color()));}
                             else if error.is_some(){ui.label(egui::RichText::new("需要处理").size(11.5).color(warn));}
                             else if let Some(s)=snapshot{ui.label(egui::RichText::new(quota_summary(s)).size(11.5));}
                             else{ui.label(egui::RichText::new(if self.quota.busy.contains(&a.id){"正在查询…"}else{"等待更新"}).size(11.5).color(ui.visuals().weak_text_color()));}
@@ -622,19 +871,27 @@ impl App {
                         // 从右往左排：按钮先靠右放好，名称输入框占用剩余宽度，按钮再宽也不会顶出卡片。
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
                             if ui.add_enabled(self.quota.api_connecting.is_none()&&self.quota.workbuddy_connecting.is_none()&&self.quota.deepseek_connecting.is_none()&&self.quota.gemini_connecting.is_none()&&self.quota.doubao_connecting.is_none()&&self.quota.login.is_none(),egui::Button::new("移除")).clicked(){remove=Some(a.id.clone());}
-                            if ui.selectable_label(self.quota.config.selected==a.id,"当前").clicked(){self.quota.config.selected=a.id.clone();}
+                            if ui.selectable_label(self.quota.config.selected==a.id,"当前").clicked(){
+                                #[cfg(feature = "sdk-js")]
+                                {self.quota.selected_plugin=None;}
+                                self.quota.config.selected=a.id.clone();
+                            }
                             ui.add_sized([ui.available_width().max(55.0),26.0],egui::TextEdit::singleline(&mut a.alias).hint_text("账号名称")).on_hover_text("直接修改账号名称");
                         });
                     });
+                    if a.provider.relay(){
+                        let previous=self.quota.config.relay_icon(&a);
+                        let mut icon=previous;
+                        relay_icon_picker(ui,a.provider,&mut icon);
+                        if icon!=previous{self.quota.config.set_relay_icon(&a,icon);}
+                    }
                     if let Some(s)=snapshot{
-                        if a.provider.api_key()||a.provider==Provider::Doubao{ui.label(snapshot_details(s));}else if let Some(credits)=&s.credits{ui.horizontal_wrapped(|ui|{ui.label(egui::RichText::new("可用积分").size(11.0).color(ui.visuals().weak_text_color()));ui.label(egui::RichText::new(credits.full()).size(20.0).strong());ui.label(egui::RichText::new(credits.packages.iter().map(|(label,n)|format!("{label} {n}")).collect::<Vec<_>>().join(" · ")).size(11.0).color(ui.visuals().weak_text_color()));});}else if let Some(wallet)=&s.wallet{
+                        if a.provider.api_key()||matches!(a.provider,Provider::Doubao|Provider::Antigravity){ui.label(snapshot_details(s));}else if let Some(credits)=&s.credits{ui.horizontal_wrapped(|ui|{ui.label(egui::RichText::new("可用积分").size(11.0).color(ui.visuals().weak_text_color()));ui.label(egui::RichText::new(credits.full()).size(20.0).strong());ui.label(egui::RichText::new(credits.packages.iter().map(|(label,n)|format!("{label} {n}")).collect::<Vec<_>>().join(" · ")).size(11.0).color(ui.visuals().weak_text_color()));});}else if let Some(wallet)=&s.wallet{
                             ui.horizontal_wrapped(|ui|{
                                 ui.label(egui::RichText::new(if wallet.available{"可用余额"}else{"余额不可用"}).size(11.0).color(ui.visuals().weak_text_color()));
                                 ui.label(egui::RichText::new(wallet.primary().full(wallet.primary().total)).size(20.0).strong());
                                 ui.label(egui::RichText::new(format!("充值 {} · 赠送 {}",wallet.primary().full(wallet.primary().topped_up),wallet.primary().full(wallet.primary().granted))).size(11.0).color(ui.visuals().weak_text_color()));
                             });
-                        }else if a.provider==Provider::ZCode && s.windows.is_empty(){
-                            ui.label("已连接 · 暂无体验额度");
                         }else if let Some(details)=&s.kiro{
                             if details.pools.len()>1{if let Some(window)=s.windows.first(){ui.label(format!("{}：{} 点",window.label,window.value_text()));}}
                             ui.label(egui::RichText::new(kiro_details(s)).size(11.0));
@@ -646,13 +903,21 @@ impl App {
                             });}});
                         }
                     }
-                    if !a.enabled{ui.label(egui::RichText::new("已暂停监控").size(11.0).color(ui.visuals().weak_text_color()));}
+                    if a.provider==Provider::ZCode{ui.add(egui::Label::new(quota::ZCODE_RECONNECT).wrap());}
+                    else if !a.enabled{ui.label(egui::RichText::new("已暂停监控").size(11.0).color(ui.visuals().weak_text_color()));}
                     else if let Some(error)=error{ui.add(egui::Label::new(egui::RichText::new(error).size(11.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_rgb(231,175,108),Color32::from_rgb(151,94,28)))).wrap());}
                     else if snapshot.is_none(){ui.label(egui::RichText::new(if self.quota.busy.contains(&a.id){"正在查询额度…"}else{"等待更新"}).size(11.0).color(ui.visuals().weak_text_color()));}
                     ui.horizontal_wrapped(|ui|{
                         ui.checkbox(&mut a.enabled,"监控");ui.checkbox(&mut a.pinned,"常驻岛上");
-                        if ui.add_enabled(!self.quota.busy.contains(&a.id),egui::Button::new(if error.is_some(){"重试"}else{"刷新"})).clicked(){self.pending.push(Cmd::QuotaRefresh);}
+                        if a.provider!=Provider::ZCode&&ui.add_enabled(!self.quota.busy.contains(&a.id),egui::Button::new(if error.is_some(){"重试"}else{"刷新"})).clicked(){self.pending.push(Cmd::QuotaRefresh);}
                         if ui.button("重新连接").clicked(){connect=Some(a.id.clone());}
+                        if a.provider==Provider::Antigravity{
+                            if let Some(url)=snapshot.and_then(|s|s.antigravity.as_ref()).and_then(|d|d.mode).and_then(|m|m.url()){
+                                if ui.button("查看官方用量").clicked(){self.pending.push(Cmd::OpenUrl(url.into()));}
+                            }else if error.is_some_and(|message|matches!(message.as_str(),quota::antigravity::CLI_MISSING|quota::antigravity::CLI_OLD|quota::antigravity::CLI_UNTRUSTED)){
+                                if ui.button("安装或更新 CLI").clicked(){self.pending.push(Cmd::OpenUrl(quota::antigravity::INSTALL_URL.into()));}
+                            }
+                        }
                         if let Some(s)=snapshot{let time=chrono::DateTime::from_timestamp(s.at,0).map(|at|at.with_timezone(&chrono::Local).format(if a.provider==Provider::Claude{"%m-%d %H:%M 本地记录"}else{"%H:%M 更新"}).to_string()).unwrap_or_default();ui.label(egui::RichText::new(time).size(10.0).color(ui.visuals().weak_text_color()));}
                     });
                     if !a.provider.balance(){
@@ -702,11 +967,7 @@ impl App {
             });
             if group!=connection_group(previous_provider){self.quota.provider=group;}
             ui.add_enabled_ui((self.quota.connect_target.is_none()||group==Provider::NewApi)&&self.quota.api_connecting.is_none()&&self.quota.kiro_connecting.is_none(),|ui|{
-                if group==Provider::ZCode{
-                    let mut use_key=self.quota.provider==Provider::Glm;
-                    ui.horizontal(|ui|{ui.label("连接方式");ui.selectable_value(&mut use_key,false,"本机 ZCode");ui.selectable_value(&mut use_key,true,"套餐 API Key");});
-                    self.quota.provider=if use_key{Provider::Glm}else{Provider::ZCode};
-                }else if group==Provider::NewApi&&!self.quota.relay_user_token{
+                if group==Provider::NewApi&&!self.quota.relay_user_token{
                     ui.collapsing("高级设置",|ui|{
                         settings_control_row(ui,"站点类型",76.0,|ui|{egui::ComboBox::from_id_salt("relay-protocol").selected_text(if self.quota.relay_manual{self.quota.provider.name()}else{"自动识别（推荐）"}).show_ui(ui,|ui|{
                             ui.selectable_value(&mut self.quota.relay_manual,false,"自动识别（推荐）");
@@ -740,7 +1001,7 @@ impl App {
                         if self.quota.connect_target.is_some(){ui.label(format!("使用已保存的 {} 接口",provider.name()));}
                         else if !self.quota.relay_manual&&!user_token{ui.label("自动识别站点类型");}
                         ui.label(if custom{"支持粘贴 CC Switch 的 request / extractor 查询脚本。"}else if user_token{"填写 New API 站点个人设置中的 Access Token 和用户 ID，查询账户余额。"}else{"填写站点网站地址和 API Key，读取站点提供的额度。"});
-                        ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.source).hint_text("https://你的站点地址（可含子目录）"));
+                        ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.source).hint_text(if custom{"HTTPS 站点或本机 HTTP 地址（可含子目录）"}else{"https://你的站点地址（可含子目录）"}));
                         if user_token{settings_control_row(ui,"用户 ID",64.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.relay_user_id).hint_text("站点个人资料中的数字 ID"))});}
                     }else if matches!(provider,Provider::MiniMax|Provider::Glm){
                         if !matches!(self.quota.source.as_str(),"cn"|"global"){self.quota.source="cn".into();}
@@ -751,7 +1012,7 @@ impl App {
                                 self.pending.push(Cmd::OpenUrl(url.into()));
                             }
                         });
-                        ui.label(if provider==Provider::Glm{"请使用 Coding Plan 套餐 Key，非标准 API Key；本机 ZCode 登录无需填写密钥。"}else{"读取 MiniMax Coding Plan；按量 API 余额暂不包含。"});
+                        ui.label(if provider==Provider::Glm{"请填写 Coding Plan 套餐 Key。ZCode 体验额度可在官方客户端查看。"}else{"读取 MiniMax Coding Plan；按量 API 余额暂不包含。"});
                     }else{ui.label("查询 OpenCode Go 套餐使用率，不查询 Zen 按量余额。");}
                     ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.api_key).password(true).hint_text(if custom{"API Key（脚本需要时填写）"}else if user_token{"粘贴用户 Access Token（非 API Key）"}else{"粘贴 API Key"}));
                     if custom{
@@ -830,8 +1091,26 @@ impl App {
                 });
                 ui.collapsing("导入其他登录文件",|ui|{self.quota_file_form(ui);});
                 ui.label(egui::RichText::new("使用 Grok Bot 对应的 Cursor 账号登录，浏览器授权支持自动续期。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
-            }else if self.quota.provider==Provider::ZCode{
-                if ui.button("连接本机 ZCode").clicked(){self.quota.note=match quota::zcode::path().ok_or_else(||"未找到 ZCode 登录目录".to_owned()).and_then(|p|quota::zcode::add(&mut self.quota.config,&p,&self.quota.alias)){Ok(())=>"ZCode 已连接".into(),Err(e)=>e};}
+            }else if self.quota.provider==Provider::Antigravity{
+                ui.add(egui::Label::new("读取当前 Antigravity CLI 登录账号的额度。请先在官方 CLI 中登录。").wrap());
+                ui.horizontal_wrapped(|ui|{
+                    if ui.button("连接本机 CLI").clicked(){
+                        let reconnect=self.quota.connect_target.is_some();
+                        let previous=self.quota.config.clone();
+                        let result=self.quota.config.connect_antigravity(&self.quota.alias)
+                            .and_then(|id|self.quota.config.save_checked().map(|_|id));
+                        match result{
+                            Ok(id)=>{
+                                self.quota.rows.remove(&id);self.quota.stale.remove(&id);self.quota.busy.remove(&id);
+                                self.quota.save_snapshots();
+                                self.quota.note=if reconnect{"已重新连接 Antigravity"}else{"已添加 Antigravity 额度来源"}.into();
+                                self.pending.push(Cmd::QuotaConnected);open=false;
+                            }
+                            Err(error)=>{self.quota.config=previous;self.quota.note=error;}
+                        }
+                    }
+                    if ui.button("安装或更新 CLI").clicked(){self.pending.push(Cmd::OpenUrl(quota::antigravity::INSTALL_URL.into()));}
+                });
             }else if self.quota.provider==Provider::Kiro{
                 if ui.add_enabled(self.quota.kiro_connecting.is_none(),egui::Button::new("连接本机 Kiro")).clicked(){match quota::kiro::path(){Some(path)=>self.quota_start_kiro(path),None=>self.quota.note="未找到 Kiro 登录目录".into()}}
                 ui.collapsing("导入其他登录文件",|ui|{self.quota_file_form(ui);});
@@ -1039,6 +1318,37 @@ mod tests {
         }
     }
     #[test]
+    fn antigravity_quota_details_keep_inactive_windows_and_ai_credits(){
+        let window=|label:&str,remaining:f32,seconds:i64|quota::Window{
+            label:label.into(),seconds:Some(seconds),remaining,reset:None,amount:None,
+        };
+        let snapshot=Snapshot{
+            windows:vec![window("Gemini · 5 小时",76.0,18000),window("Gemini · 每周",0.1,604800)],
+            extra:vec![window("Argon · 每周",0.0,604800)],
+            antigravity:Some(quota::antigravity::Details{
+                credits:Some(12.5),
+                unavailable:vec![
+                    quota::antigravity::UnavailableWindow{label:"Claude / GPT · 5 小时".into(),reset:None,disabled:true},
+                    quota::antigravity::UnavailableWindow{label:"Claude / GPT · 每周".into(),reset:None,disabled:false},
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(snapshot.rings().iter().map(|row|row.label.as_str()).collect::<Vec<_>>(),["Argon · 每周","Gemini · 每周"]);
+        let details=snapshot_details(&snapshot);
+        for row in ["Gemini · 5 小时：剩余 76%","Gemini · 每周：剩余 <1%","Argon · 每周：剩余 0%",
+            "Claude / GPT · 5 小时：已停用","Claude / GPT · 每周：不可用","AI 积分：12.5","重置时间未知"]{
+            assert!(details.contains(row),"缺少额度明细：{row}");
+        }
+        let status=Snapshot{antigravity:Some(quota::antigravity::Details{
+            mode:Some(quota::antigravity::Mode::Enterprise),..Default::default()
+        }),..Default::default()};
+        assert_eq!(quota_summary(&status),"企业共享额度");
+        assert!(status.rings().is_empty());
+    }
+
+    #[test]
     fn quota_reset_uses_local_calendar_dates_and_clock_times(){
         let now=chrono::Local.with_ymd_and_hms(2026,10,31,22,0,0).unwrap();
         for (parts,expected) in [
@@ -1093,7 +1403,7 @@ impl App {
         let summary;
         if a.provider.balance(){
             let icon_y=mid-7.0;
-            if a.provider!=Provider::DeepSeek{logo(c,a.provider,cx,icon_y,20.0);}else{deepseek_badge(c,self.settings.skin,cx,icon_y,22.0);}
+            if a.provider!=Provider::DeepSeek{account_logo(c,a.provider,self.quota.config.relay_icon(&a),cx,icon_y,20.0);}else{deepseek_badge(c,self.quota_badge_skin(),cx,icon_y,22.0);}
             let loading=self.quota.balance_loading(&a.id);let stale=self.quota.stale.contains_key(&a.id);
             if stale||(!loading&&snapshot.is_none()){
                 c.circle(cx+8.0,icon_y+8.0,3.6,Color32::BLACK);
@@ -1119,16 +1429,21 @@ impl App {
             ring(c,&a,snapshot.as_ref(),cx,mid,26.0,accent_colors(&self.quota.config,&a));
             let mut same=self.quota.config.accounts.iter().filter(|other|other.provider==a.provider && other.enabled);
             if same.clone().count()>1{let n=same.position(|other|other.id==a.id).unwrap_or(0)+1;c.circle(cx+10.0,mid+9.0,4.5,Color32::from_gray(225));c.text(cx+10.0,mid+11.8,&n.to_string(),6.5,W::Bold,Color32::BLACK,H::Center);}
-            summary=snapshot.as_ref().map(|s|s.rings().iter().map(|w|w.summary()).collect::<Vec<_>>().join(" · ")).unwrap_or_else(||if self.quota.busy.contains(&a.id){"正在更新".into()}else{"额度暂不可用".into()});
+            summary=self.quota_ring_summary(&a,snapshot.as_ref());
         }
         let hit=c.hit(cx-17.0,mid-height/2.0,34.0,height,("quota-side",&a.id));
         if bar_tooltip(hit,format!("{} · {}\n{}",a.provider.name(),a.alias,summary)).clicked(){
+            #[cfg(feature = "sdk-js")]
+            {self.quota.selected_plugin=None;}
             self.quota.config.selected=a.id.clone();self.quota.config.save();self.show_page(6);
         }
     }
 }
 /// 设置页账号折叠行上的一句额度摘要。
 fn quota_summary(s:&crate::quota::Snapshot)->String{
+    if s.antigravity.is_some(){
+        return s.antigravity_windows().first().map(|w|w.summary()).unwrap_or_else(||antigravity_status(s).into());
+    }
     if let Some(credits)=&s.credits{return format!("积分 {}",credits.full());}
     if let Some(wallet)=&s.wallet{return if wallet.available{format!("余额 {}",wallet.primary().full(wallet.primary().total))}else{"余额不可用".into()};}
     if let Some(window)=s.rings().first(){return format!("{} 剩余 {}",window.label,window.value_text());}

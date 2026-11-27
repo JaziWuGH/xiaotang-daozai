@@ -169,6 +169,10 @@ impl<T: WinitApp> WinitAppWrapper<T> {
 
     fn check_redraw_requests(&mut self, event_loop: &ActiveEventLoop) {
         let now = Instant::now();
+        #[cfg(all(windows, feature = "direct-composition"))]
+        let wait_when_idle = egui_wgpu::winit::has_direct_composition_surface();
+        #[cfg(not(all(windows, feature = "direct-composition")))]
+        let wait_when_idle = false;
 
         self.windows_next_repaint_times
             .retain(|window_id, repaint_time| {
@@ -176,7 +180,9 @@ impl<T: WinitApp> WinitAppWrapper<T> {
                     return true; // not yet ready
                 };
 
-                event_loop.set_control_flow(ControlFlow::Poll);
+                if !wait_when_idle {
+                    event_loop.set_control_flow(ControlFlow::Poll);
+                }
 
                 if let Some(window) = self.winit_app.window(*window_id) {
                     log::trace!("request_redraw for {window_id:?}");
@@ -190,7 +196,10 @@ impl<T: WinitApp> WinitAppWrapper<T> {
         let next_repaint_time = self.windows_next_repaint_times.values().min().copied();
         if let Some(next_repaint_time) = next_repaint_time {
             event_loop.set_control_flow(ControlFlow::WaitUntil(next_repaint_time));
-        };
+        } else if wait_when_idle {
+            // request_redraw 自己唤醒事件循环。材质空闲时沿用请求的刷新间隔。
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 }
 

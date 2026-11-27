@@ -33,6 +33,10 @@ impl Process {
         }
         None
     }
+    fn stamp(&self,base:usize)->Option<u32>{
+        let pe=self.read::<4>(base+60).map(u32::from_le_bytes).filter(|offset|*offset<4096)?;
+        self.read::<4>(base+pe as usize+8).map(u32::from_le_bytes)
+    }
     fn module(&self,base:usize,stamp:u32,size:u32)->bool{
         let Some(pe)=self.read::<4>(base+60).map(u32::from_le_bytes).filter(|offset|*offset<4096)else{return false;};
         self.read::<4>(base+pe as usize+8).map(u32::from_le_bytes)==Some(stamp)
@@ -96,7 +100,15 @@ impl Target {
                 let mut text=[0u16;260];let n=unsafe{K32GetModuleBaseNameW(process.0,base,text.as_mut_ptr(),260)} as usize;
                 match String::from_utf16_lossy(&text[..n]).as_str(){"media_kit_native_event_loop.dll"=>target.events=base,"libmpv-2.dll"=>target.mpv=base,"hotkey_manager_windows_plugin.dll"=>target.keys=base,_=>{}}
             }
-            if target.events!=0 && target.mpv!=0 && target.verified(&process){return Some(target);}
+            if target.events!=0 && target.mpv!=0 && target.verified(&process){
+                super::music_compat::set("bodian_pc.exe",super::music_compat::Item::Reader,super::music_compat::Support::Ok);
+                return Some(target);
+            }
+            // 波点在运行但播放组件不是已适配的版本：歌名仍可来自系统媒体会话，进度和歌词读不到。
+            if target.events!=0 && target.mpv!=0 {
+                super::music_compat::set("bodian_pc.exe",super::music_compat::Item::Reader,super::music_compat::Support::Unavailable("播放组件版本不在适配表里（已适配波点 1.1.7）".into()));
+                if process.stamp(target.events).is_some_and(|stamp|stamp<0x69fea10a) {super::music_compat::outdated("bodian_pc.exe");}
+            }
         }
         None
     }
@@ -108,8 +120,9 @@ fn snapshot(values:&serde_json::Value)->Option<(String,u64,f64,f64,bool)>{
         || !(0.0..86400.0).contains(&duration) || duration<=0.0 || position>duration+0.5{return None;}
     let current=&values["playlist"];
     if current["current"].as_bool()!=Some(true){return None;}
-    let title=current["title"].as_str()?.trim();
-    if title.is_empty() || title.len()>4096{return None;}
+    // 有些歌（实测《明月夜》）播放列表里没有标题：先返回空歌名，由运行日志按时长补齐。
+    let title=current["title"].as_str().unwrap_or_default().trim();
+    if title.len()>4096{return None;}
     let playing=!values["pause"].as_bool()? && !values["core-idle"].as_bool()? && !values["idle-active"].as_bool()?;
     Some((title.into(),current["id"].as_u64()?,position.min(duration),duration,playing))
 }
@@ -166,13 +179,52 @@ struct Statement(*mut c_void);
 impl Drop for Statement {fn drop(&mut self){unsafe{sqlite3_finalize(self.0);}}}
 fn data_root()->Option<PathBuf>{Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("cn.wenyu.bodian/bodian_pc"))}
 fn metadata(value:&serde_json::Value,title:&str,duration:f64)->Option<(NowPlaying,String)>{
-    if value["name"].as_str()?!=title || (value["duration"].as_f64()?-duration).abs()>2.0{return None;}
+    if value["name"].as_str()?!=title || !same_length(duration,value["duration"].as_f64()?){return None;}
     let artist=value["artist"].as_str()?;let album=value["album"].as_str().unwrap_or_default();
     if artist.is_empty() || artist.len()>4096 || album.len()>4096{return None;}
     let song_id=value["id"].as_u64().filter(|id|*id>0)?;
     let cover=value["albumPic120"].as_str().or_else(||value["albumPic"].as_str()).and_then(cover_url).unwrap_or_default();
     Some((NowPlaying{source:"bodian_pc.exe".into(),title:title.into(),artist:artist.into(),album:album.into(),song_id:Some(song_id),
         playback_type:MediaKind::Music,..Default::default()},cover))
+}
+/// 波点要等歌曲播完或被切走才写入本机歌曲库；开始播放时它会在运行日志里记一行完整歌曲信息。
+/// 只读日志末尾，只取歌曲 ID、歌名、专辑、歌手和封面，不读取或保存日志里的其他内容（播放地址、设备号等）。
+fn log_metadata(title:Option<&str>,duration:f64)->Option<(NowPlaying,String)>{
+    use std::io::{Seek,SeekFrom};
+    const TAIL:u64=1024*1024;
+    let mut file=std::fs::File::open(data_root()?.join("bdlog/log_0.log")).ok()?;
+    let size=file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(size.saturating_sub(TAIL))).ok()?;
+    let mut bytes=Vec::new();file.take(TAIL).read_to_end(&mut bytes).ok()?;
+    parse_log_metadata(&String::from_utf8_lossy(&bytes),title,duration)
+}
+/// `title` 为空时（播放列表没有标题）只取日志里最近开播的那一首，且时长要一致。
+fn parse_log_metadata(log:&str,title:Option<&str>,duration:f64)->Option<(NowPlaying,String)>{
+    static LINE:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    let line=LINE.get_or_init(||regex::Regex::new(r"歌曲的完整参数信息:\{id: (\d+), name: (.*?), albumId: -?\d+, album: (.*?), albumPic: [^,]*, albumPic120: ([^,]*), artist: (.*?), artistId: .*?duration: (\d+)").unwrap());
+    // 最近的一条在最后；同名歌按时长区分。
+    let entries=line.captures_iter(log).filter(|c|title.is_none_or(|title|&c[2]==title));
+    let entries:Vec<_>=if title.is_some(){entries.collect()}else{entries.last().into_iter().collect()};
+    entries.into_iter().filter_map(|c|{
+        let (id,name,album,cover,artist,length)=(c[1].parse::<u64>().ok()?,&c[2],&c[3],&c[4],&c[5],c[6].parse::<f64>().ok()?);
+        if name.trim().is_empty() || name.len()>4096 || !same_length(duration,length) || id==0 || artist.is_empty() || artist.len()>4096 || album.len()>4096 {return None;}
+        Some((NowPlaying{source:"bodian_pc.exe".into(),title:name.trim().into(),artist:artist.into(),album:album.into(),song_id:Some(id),
+            playback_type:MediaKind::Music,..Default::default()},cover_url(cover).unwrap_or_default()))
+    }).last()
+}
+/// 播放引擎给的「歌名」像音频文件里的曲目编号（字母前缀 + 下划线分段 + 数字），而不是真正的歌名。
+fn track_code(title:&str)->bool {
+    static CODE:std::sync::OnceLock<regex::Regex>=std::sync::OnceLock::new();
+    CODE.get_or_init(||regex::Regex::new(r"^[A-Za-z]{1,8}_[A-Za-z0-9]+(?:_[A-Za-z0-9]+)*$").unwrap()).is_match(title)
+        && title.chars().any(|c|c.is_ascii_digit())
+}
+/// 播放引擎的时长与歌曲信息的时长是否对得上：相差 2 秒内；或是 VIP 试听片段（引擎只放约 30 秒，最长 60 秒，短于整首）。
+fn same_length(engine:f64,full:f64)->bool {
+    (engine-full).abs()<=2.0 || engine>0.0 && engine<=60.0 && engine+1.0<full
+}
+/// 本机歌曲库还没有这首歌时的临时信息：只有歌名，没有歌手、封面和歌曲 ID。
+fn pending(title:&str)->(NowPlaying,String){
+    (NowPlaying{source:"bodian_pc.exe".into(),title:title.into(),playback_type:MediaKind::Music,..Default::default()},String::new())
 }
 fn read_metadata(title:&str,duration:f64)->Option<(NowPlaying,String)>{
     let path=CString::new(data_root()?.join("database/songDB.db").to_str()?).ok()?;
@@ -220,12 +272,26 @@ impl Reader {
         let process=Process::open(target.pid).filter(|process|target.verified(process));
         let Some(process)=process else{self.target=None;self.key=None;self.metadata=None;return None;};
         let (title,id,position,duration,playing)=playback(&process,target,&mut self.playlist_cursor)?;let sampled_at=Instant::now();
+        if title.is_empty() {
+            // 播放列表没有标题：用运行日志里最近开播、时长一致的那首。
+            let key=(String::new(),id);
+            if self.key.as_ref()!=Some(&key) || self.metadata.is_none() && self.lookup.is_none_or(|at|at.elapsed()>=Duration::from_secs(1)) {
+                self.key=Some(key);self.lookup=Some(Instant::now());self.metadata=log_metadata(None,duration);
+            }
+            let (mut media,url)=self.metadata.clone()?;
+            media.position=position;media.duration=duration;media.playing=playing;media.sampled_at=Some(sampled_at);
+            media.artwork=self.cover.get_with(&url,fetch_cover);return Some(media);
+        }
         let key=(title.clone(),id);
         if self.key.as_ref()!=Some(&key){self.key=Some(key);self.metadata=None;self.lookup=None;}
         if self.metadata.is_none() && self.lookup.is_none_or(|at|at.elapsed()>=Duration::from_secs(1)) {
-            self.lookup=Some(Instant::now());self.metadata=read_metadata(&title,duration);
+            self.lookup=Some(Instant::now());
+            self.metadata=read_metadata(&title,duration).or_else(||log_metadata(Some(&title),duration))
+                // 有些歌的「歌名」是音频文件里的曲目编号（实测 trk_KM0019393_1_6）：按时长取最近开播的那首。
+                .or_else(||track_code(&title).then(||log_metadata(None,duration)).flatten());
         }
-        let (mut media,url)=self.metadata.clone()?;
+        // 波点要播放一会儿才把新歌写进本机歌曲库：查到之前先只显示歌名，查到后补上歌手、封面和歌曲 ID（换歌后不再整段空白）。
+        let (mut media,url)=self.metadata.clone().unwrap_or_else(||pending(&title));
         media.position=position;media.duration=duration;media.playing=playing;media.sampled_at=Some(sampled_at);
         media.artwork=self.cover.get_with(&url,fetch_cover);Some(media)
     }
@@ -288,6 +354,9 @@ mod tests {
         value["pause"]=true.into();assert!(!snapshot(&value).unwrap().4);
         value["time-pos"]=999.into();assert!(snapshot(&value).is_none());
         value["time-pos"]=0.into();value["playlist"]["current"]=false.into();assert!(snapshot(&value).is_none());
+        // 实测《明月夜》：当前项没有标题，仍返回进度，歌名由运行日志补齐。
+        value["playlist"]=serde_json::json!({"id":103,"current":true,"playing":true});
+        assert_eq!(snapshot(&value).map(|t|(t.0,t.1)),Some((String::new(),103)));
     }
     #[test]
     fn long_native_playlist_finds_current_track_after_the_first_64(){
@@ -363,15 +432,18 @@ fn discovery_due(last:Option<Instant>,hint:impl FnOnce()->bool)->bool{
     since.is_none_or(|since|since>=DISCOVER_FALLBACK) || since.is_some_and(|since|since>=DISCOVER_HINTED) && hint()
 }
 
-/// 便宜的线索：波点（Flutter 程序）的主窗口属于 bodian_pc.exe。窗口类名若被改，仍有 30 秒一次的兜底查找。
+/// 便宜的线索：波点主窗口（实测类名 BODIAN_FLUTTER_WIN32_WINDOW，也兼容 Flutter 默认类名）属于 bodian_pc.exe。
+/// 窗口类名若再被改，仍有 30 秒一次的兜底查找。
 fn window_hint()->bool{
     use windows::{core::{w,PCWSTR},Win32::{Foundation::HWND,UI::WindowsAndMessaging::{FindWindowExW,GetWindowThreadProcessId}}};
-    let mut after=HWND::default();
-    for _ in 0..16 {
-        let Ok(window)=(unsafe{FindWindowExW(HWND::default(),after,w!("FLUTTER_RUNNER_WIN32_WINDOW"),PCWSTR::null())})else{return false;};
-        let mut pid=0;unsafe{GetWindowThreadProcessId(window,Some(&mut pid));}
-        if super::player_process::image_is(pid,"bodian_pc.exe"){return true;}
-        after=window;
+    for class in [w!("BODIAN_FLUTTER_WIN32_WINDOW"),w!("FLUTTER_RUNNER_WIN32_WINDOW")] {
+        let mut after=HWND::default();
+        for _ in 0..16 {
+            let Ok(window)=(unsafe{FindWindowExW(HWND::default(),after,class,PCWSTR::null())})else{break;};
+            let mut pid=0;unsafe{GetWindowThreadProcessId(window,Some(&mut pid));}
+            if super::player_process::image_is(pid,"bodian_pc.exe"){return true;}
+            after=window;
+        }
     }
     false
 }
@@ -385,4 +457,107 @@ fn discovery_without_a_window_hint_falls_back_to_a_slow_check(){
     assert!(!discovery_due(ago(4),||false),"没有线索时不做 3 秒一次的进程快照");
     assert!(discovery_due(ago(31),||false),"窗口线索失效也能在 30 秒内找到");
     let mut asked=false;assert!(!discovery_due(ago(1),||{asked=true;true}));assert!(!asked,"未到 3 秒不查窗口");
+}
+
+#[test]
+#[ignore="需要本机波点正在播放：连续读 20 秒，打印每次读到的歌名、进度和是否找到播放器，用于排查切歌后不显示"]
+fn live_bodian_trace(){
+    let mut reader=Reader::default();
+    let started=Instant::now();
+    while started.elapsed()<Duration::from_secs(2) {
+        let media=reader.poll();
+        if let Some(target)=reader.target {
+            if let Some(process)=Process::open(target.pid) {
+                let mut cursor=0;let pb=playback(&process,target,&mut cursor);
+                println!("   播放引擎：{pb:?}");
+                if let Some((title,_,_,duration,_))=&pb {
+                    println!("   本机歌曲库：{}",read_metadata(title,*duration).map_or("没找到".into(),|(m,_)|format!("{} - {}",m.title,m.artist)));
+                    let t=Instant::now();let found=log_metadata(Some(title),*duration);
+                    println!("   运行日志：{} 用时{:?}",found.map_or("没找到".into(),|(m,c)|format!("{} - {} ID={:?} 封面{}",m.title,m.artist,m.song_id,!c.is_empty())),t.elapsed());
+                }
+            }
+        }
+        println!("{:>5.1}s 窗口线索{} 已找到{} → {}",started.elapsed().as_secs_f32(),window_hint(),reader.target.is_some(),
+            media.map_or("无".into(),|m|format!("{} - {} {:.1}/{:.1} 播放{}",m.title,m.artist,m.position,m.duration,m.playing)));
+        std::thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+#[test]
+fn a_song_not_yet_in_the_local_library_still_shows_its_title(){
+    let (media,cover)=pending("一剪梅");
+    assert_eq!((media.title.as_str(),media.artist.as_str(),media.song_id,cover.as_str()),("一剪梅","",None,""));
+    assert!(media.is_music(),"只有歌名也按歌曲显示");
+}
+
+#[test]
+fn song_info_is_taken_from_the_play_log_before_the_library_is_written(){
+    let log="2026-11-21 17:12:16.939 [I] 歌曲的完整参数信息:{id: 1, name: 虞美人听雨, albumId: 2, album: 旧专辑, albumPic: https://img4.kuwo.cn/a.webp, albumPic120: https://img4.kuwo.cn/old.webp, artist: 别人, artistId: 3, artistPic: x, artists: [{id: 3, name: 别人}], duration: 180, releaseDate: 2025-08-09
+        2026-11-21 17:12:17.146 [I] play/getPlayInfo [Song.getPlayInfo:1011] 490335784:虞美人听雨 quality=2 format=ogg bitrate=300 uri: https://bd-api.kuwo.cn/api?devId=secret&sign=secret
+        2026-11-21 17:13:16.939 [I] 歌曲的完整参数信息:{id: 490335784, name: 虞美人听雨, albumId: 67585850, album: 春满未夏, albumPic: https://img4.kuwo.cn/a.webp, albumPic120: http://img4.kuwo.cn/star/albumcover/240/x.webp, artist: 李奕灼, artistId: 16889471, artistPic: x, artists: [{id: 16889471, name: 李奕灼, pic: x}], duration: 229, releaseDate: 2025-08-09
+";
+    let (media,cover)=parse_log_metadata(log,Some("虞美人听雨"),229.4).expect("应从日志里找到");
+    assert_eq!((media.artist.as_str(),media.album.as_str(),media.song_id),("李奕灼","春满未夏",Some(490335784)),"同名歌按时长取对的那条");
+    assert_eq!(cover,"https://img4.kuwo.cn/star/albumcover/240/x.webp","封面只认酷我域名并改为 https");
+    assert!(parse_log_metadata(log,Some("别的歌"),229.0).is_none());
+    assert!(parse_log_metadata(log,Some("虞美人听雨"),300.0).is_none(),"时长对不上不用");
+    // 播放列表没有标题：只认最近开播的那一首，时长一致才用。
+    assert_eq!(parse_log_metadata(log,None,229.0).map(|(m,_)|m.title),Some("虞美人听雨".into()));
+    assert!(parse_log_metadata(log,None,180.0).is_none(),"更早的那首时长虽然一致，也不是正在播的");
+}
+
+#[test]
+#[ignore="需要本机波点正在播放：逐步打印播放引擎读取，定位哪一步失败"]
+fn live_bodian_playback_steps(){
+    let target=Target::discover().expect("需要波点");let process=Process::open(target.pid).unwrap();
+    let head=process.pointer(target.events+0xa1d8).unwrap();let mut node=process.pointer(head).unwrap();
+    for _ in 0..8 {
+        if node==head{println!("链表结束");break;}
+        let client=process.pointer(node+16).unwrap();let name=process.string(client);
+        println!("客户端 {name:?}");
+        if name.as_deref()==Some("main") {
+            let properties=process.pointer(client+0x148).unwrap();
+            let count=u32::from_le_bytes(process.read(client+0x150).unwrap()) as usize;
+            println!("属性 {count} 个");
+            for i in 0..count.min(64) {
+                let property=process.pointer(properties+i*8).unwrap();
+                let pname=process.pointer(property+8).and_then(|p|process.string(p));
+                let bytes=process.read::<104>(property).unwrap();
+                let format=u32::from_le_bytes(bytes[40..44].try_into().unwrap());
+                let extra=if pname.as_deref()==Some("playlist") {
+                    let address=property+88;let node=process.read::<16>(address).unwrap();
+                    let list=u64::from_le_bytes(node[..8].try_into().unwrap()) as usize;
+                    let count=i32::from_le_bytes(process.read(list).unwrap());
+                    let entries=process.pointer(list+8).unwrap();
+                    let current=(0..count.max(0) as usize).find_map(|i|process.node(entries+i*16,0).filter(|e|e["current"].as_bool()==Some(true)).map(|e|(i,e)));
+                    format!(" 列表{count}项 当前{current:?} 前3项{:?}",(0..3.min(count.max(0) as usize)).map(|i|process.node(entries+i*16,0)).collect::<Vec<_>>())
+                } else if format==5 {format!(" 值{}",f64::from_le_bytes(bytes[88..96].try_into().unwrap()))} else if format==3 {format!(" 值{}",u32::from_le_bytes(bytes[88..92].try_into().unwrap()))} else {String::new()};
+                println!("  {pname:?} 有效标记{} 格式{format}{extra}",bytes[80]);
+            }
+        }
+        node=process.pointer(node).unwrap();
+    }
+}
+
+#[test]
+fn vip_preview_clips_still_match_the_full_song_info(){
+    assert!(same_length(229.4,229.0));
+    assert!(same_length(29.05,211.0),"试听片段约 30 秒");
+    assert!(!same_length(120.0,211.0),"正常播放时长差很多是别的版本");
+    let log="2026-11-21 18:01:55.021 [I] 歌曲的完整参数信息:{id: 1245780, name: 幻听, albumId: 114741, album: 梦游计, albumPic: x, albumPic120: x, artist: 许嵩, artistId: 1887, artistPic: x, artists: [{id: 1887, name: 许嵩}], duration: 211, releaseDate: 2009-01-01
+";
+    assert_eq!(parse_log_metadata(log,Some("幻听"),29.05).map(|(m,_)|m.artist),Some("许嵩".into()));
+}
+
+#[test]
+fn track_codes_are_not_taken_as_song_titles(){
+    assert!(track_code("trk_KM0019393_1_6"));
+    for title in ["TRUE","Letting Go","幻听","Track_One","so_what","10%"] {assert!(!track_code(title),"{title}");}
+    // 实测：歌名是曲目编号时，按时长取运行日志最近开播的《TRUE》，专辑名里带逗号和括号也能完整取出。
+    let log="2026-11-21 22:49:55.627 [I] 歌曲的完整参数信息:{id: 336017166, name: TRUE, albumId: 46573218, album: 마이데몬 OST Special All Track (MY DEMON (Original Sound Track) Special), albumPic: x, albumPic120: x, artist: 요아리, artistId: 8686, artistPic: x, artists: [{id: 8686, name: 요아리}], duration: 211, releaseDate: 2024-01-01
+";
+    assert!(parse_log_metadata(log,Some("trk_KM0019393_1_6"),211.3).is_none());
+    let (media,_)=parse_log_metadata(log,None,211.3).unwrap();
+    assert_eq!((media.title.as_str(),media.artist.as_str(),media.song_id),("TRUE","요아리",Some(336017166)));
+    assert_eq!(media.album,"마이데몬 OST Special All Track (MY DEMON (Original Sound Track) Special)");
 }

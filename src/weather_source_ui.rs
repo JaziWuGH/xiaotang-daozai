@@ -342,7 +342,7 @@ impl App {
             input.union(arrow)
         }).inner;
         if ui.is_enabled(){
-            if self.weather_source.search_due(now){self.weather_source.search();}
+            if !ui.ctx().viewport(|viewport|viewport.ime_composing) && self.weather_source.search_due(now){self.weather_source.search();}
             let term_ready=!self.weather_source.query.trim().is_empty()&&(!self.weather_source.query.is_ascii()||self.weather_source.query.trim().len()>=2);
             if term_ready&&(!self.weather_source.search_sent||self.weather_source.search.is_some()){ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));}
             if keys.2 {if let Some(location)=self.weather_source.results.get(self.weather_source.highlighted){selected=Some(location.clone());}else{self.weather_source.search();ui.memory_mut(|m|m.open_popup(popup));}}

@@ -1,0 +1,20 @@
+{
+  "id": "example.sticky-notes",
+  "name": "便签",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "status",
+  "capabilities": ["status.page", "action", "event", "notice", "storage"],
+  "events": ["focus.finished"],
+  "statusLayout": {
+    "components": [{"type":"state"}, {"type":"fields"}, {"type":"actions"}, {"type":"list"}],
+    "style": {"accent":"#38A3CF", "density":"comfortable"}
+  },
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": []
+}

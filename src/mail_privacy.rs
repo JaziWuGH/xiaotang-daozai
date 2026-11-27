@@ -55,13 +55,15 @@ impl Privacy {
         if bodies.len()>=64{bodies.clear();}
         bodies.insert(k,(item.summary.clone(),masked.clone()));masked
     }
-    pub fn observe(&mut self,item:&Item,new:bool,at:f64,unix:i64){
-        let Some(code)=&item.code else{return;};
+    pub fn observe(&mut self,item:&Item,new:bool,at:f64,unix:i64)->bool{
+        let Some(code)=&item.code else{return false;};
         let seen=self.seen.entry(key(item)).or_insert_with(||Seen{
-            at,new,age:item.received_unix.filter(|t|*t>0&&*t<=unix).map(|t|(unix-t) as u64),
+            at,new:false,age:item.received_unix.filter(|t|*t>0&&*t<=unix).map(|t|(unix-t) as u64),
             lifetime:explicit_lifetime(&item.subject,&item.summary,code),
         });
+        let first_new=new&&!seen.new;
         seen.new|=new;
+        first_new
     }
     pub fn hidden(&self,item:&Item,now:f64,fallback:u32)->bool{
         if item.code.is_none(){return false;}

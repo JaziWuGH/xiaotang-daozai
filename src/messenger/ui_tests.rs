@@ -89,6 +89,14 @@ fn five_client_icons_fit_collapsed_and_expand_to_their_own_click_targets(){
     for _ in 0..90{h.frame(vec![]);}
     let compact=h.ctx.read_response(egui::Id::new(("card",true,"messenger-stack"))).unwrap();
     assert!(compact.rect.width()>90.0,"五个来源不能仍只给两个图标留宽度");
+    let left=h.hit.center().x-h.app.w.pos/2.0;
+    assert!(((left+compact.rect.right())/2.0-WIN_W/2.0).abs()<0.1,
+        "主岛与五个常驻未读合并后的中心应对齐停靠点，实际偏移 {}",(left+compact.rect.right())/2.0-WIN_W/2.0);
+    h.quota_accounts(20);
+    for _ in 0..90{h.frame(vec![]);}
+    let stack=h.ctx.read_response(egui::Id::new(("card",true,"messenger-stack"))).unwrap().rect;
+    let left=h.hit.center().x-h.app.w.pos/2.0;
+    assert!(left>=15.9 && (left+stack.right()-WIN_W).abs()<0.2,"超宽常驻内容应和未读入口一起留在画布内");
     h.app.reveal_unread();for _ in 0..90{h.frame(vec![]);}
     let first=h.ctx.read_response(egui::Id::new(("card",true,"微信".to_string()))).unwrap();
     h.hover(first.rect.center(),0.1);for _ in 0..20{h.wheel(-50.0);}h.frame(vec![]);

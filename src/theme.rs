@@ -14,6 +14,9 @@ use std::sync::Arc;
 pub const RED: Color32 = Color32::from_rgb(242, 48, 70);
 pub const RED_TOP: Color32 = Color32::from_rgb(253, 104, 92);
 pub const BLUE: Color32 = Color32::from_rgb(62, 172, 248);
+/// “已连接”蓝：蓝牙连接提醒和无电量设备的连接环共用，不在电量的绿黄橙红里。
+pub const LINK: Color32 = Color32::from_rgb(10, 132, 255);
+pub const LINK_SOFT: Color32 = Color32::from_rgb(90, 169, 255);
 pub const BLUE_DEEP: Color32 = Color32::from_rgb(13, 69, 128);
 pub const CYAN: Color32 = Color32::from_rgb(102, 219, 255);
 pub const SOFT_GREEN: Color32 = Color32::from_rgb(118, 196, 151);
@@ -31,6 +34,8 @@ pub const TRACK: Color32 = Color32::from_rgb(36, 36, 39);
 pub const ARROW_BG: Color32 = Color32::from_rgb(48, 48, 51);
 pub const WATER_TRACK: Color32 = Color32::from_rgb(15, 38, 64);
 pub const YELLOW: Color32 = Color32::from_rgb(255, 196, 61);
+/// 无线设备电量 10–19%：介于黄色“一般”和红色“即将耗尽”之间。
+pub const ORANGE: Color32 = Color32::from_rgb(255, 138, 61);
 
 pub fn alpha_blue(a: f32) -> Color32 {
     Color32::from_rgba_unmultiplied(BLUE.r(), BLUE.g(), BLUE.b(), (255.0 * a) as u8)
@@ -113,6 +118,59 @@ fn font_dirs() -> Vec<PathBuf> {
 /// 装载三档字重。每档 = 拉丁字体 + 中文回退 + 韩文回退；缺哪个就跳过，最后兜底 egui 内置字体。
 pub fn load_fonts(ctx: &egui::Context) {
     ctx.set_fonts(shared_fonts().clone());
+}
+
+#[cfg(feature = "sdk-js")]
+pub(crate) fn sync_canvas_fonts(
+    ctx: &egui::Context,
+    active: std::collections::BTreeMap<String, Arc<FontData>>,
+) {
+    let changed = ctx.data_mut(|data| {
+        let previous = data.get_temp_mut_or_default::<std::collections::BTreeMap<String, Arc<FontData>>>(
+            egui::Id::new("canvas-fonts-active"),
+        );
+        if previous.len() == active.len() && active.iter().all(|(name, font)| {
+            previous.get(name).is_some_and(|installed| Arc::ptr_eq(installed, font))
+        }) {
+            return false;
+        }
+        *previous = active.clone();
+        true
+    });
+    if changed {
+        let mut definitions = ctx.fonts(|fonts| fonts.lock().fonts.definitions().clone());
+        definitions.font_data.retain(|name, _| !name.starts_with("plugin:"));
+        definitions.families.retain(|family, _| !canvas_font_family(family));
+        let fallback = definitions.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+        for (name, font) in active {
+            let mut family = vec![name.clone()];
+            family.extend(fallback.iter().cloned());
+            definitions.families.insert(FontFamily::Name(name.clone().into()), family);
+            definitions.font_data.insert(name, font);
+        }
+        ctx.set_fonts(definitions);
+    }
+}
+
+#[cfg(feature = "sdk-js")]
+pub(crate) fn canvas_font_family(family: &FontFamily) -> bool {
+    matches!(family, FontFamily::Name(name) if name.starts_with("plugin:"))
+}
+
+#[cfg(feature = "sdk-js")]
+pub(crate) fn canvas_font(
+    size: f32,
+    weight: W,
+    name: Option<&str>,
+    installed: &[FontFamily],
+) -> FontId {
+    if let Some(name) = name {
+        let family = FontFamily::Name(format!("plugin:{name}").into());
+        if installed.contains(&family) {
+            return FontId::new(size, family);
+        }
+    }
+    font(size, weight)
 }
 
 /// 测试导出「修复前」对照图：去掉藏文字体后的字体表。

@@ -246,6 +246,11 @@ pub struct ViewportState {
 
     pub input: InputState,
 
+    #[allow(missing_docs)]
+    pub ime_composing: bool,
+    #[allow(missing_docs)]
+    pub ime_owns_keys: bool,
+
     /// State that is collected during a pass and then cleared.
     pub this_pass: PassState,
 
@@ -489,6 +494,24 @@ impl ContextImpl {
 
         let viewport = self.viewports.entry(self.viewport_id()).or_default();
 
+        use crate::{Event, ImeEvent};
+        let events = &mut new_raw_input.events;
+        if viewport.output.num_completed_passes == 0 {
+            viewport.ime_owns_keys = viewport.ime_composing || events.iter().any(|event| matches!(event,
+                Event::Ime(ImeEvent::Enabled | ImeEvent::Preedit(_) | ImeEvent::Commit(_))));
+        }
+        for event in events.iter() {
+            match event {
+                Event::Ime(ImeEvent::Enabled | ImeEvent::Preedit(_)) => viewport.ime_composing = true,
+                Event::Ime(ImeEvent::Commit(_) | ImeEvent::Disabled) | Event::WindowFocused(false) => viewport.ime_composing = false,
+                _ => {}
+            }
+        }
+        if viewport.ime_owns_keys {
+            events.retain(|event| !matches!(event, Event::Key { pressed: true, key:
+                Key::Backspace | Key::Delete | Key::Enter | Key::Escape | Key::ArrowLeft |
+                Key::ArrowRight | Key::ArrowUp | Key::ArrowDown, .. }));
+        }
         self.memory.begin_pass(&new_raw_input, &all_viewport_ids);
 
         viewport.input = std::mem::take(&mut viewport.input).begin_pass(
@@ -983,6 +1006,14 @@ impl Context {
     #[inline]
     pub fn graphics<R>(&self, reader: impl FnOnce(&GraphicLayers) -> R) -> R {
         self.write(move |ctx| reader(&ctx.viewport().graphics))
+    }
+
+    /// 当前已绘制图形的外接矩形，包含各层的裁剪和坐标变换。
+    pub fn paint_bounds(&self) -> Rect {
+        self.read(|ctx| ctx.viewports.get(&ctx.viewport_id()).map_or(
+            Rect::NOTHING,
+            |viewport| viewport.graphics.paint_bounds(&ctx.memory.to_global),
+        ))
     }
 
     /// Read-only access to [`PlatformOutput`].

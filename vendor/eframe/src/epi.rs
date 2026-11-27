@@ -622,6 +622,12 @@ impl std::str::FromStr for Renderer {
 /// It provides methods to inspect the surroundings (are we on the web?),
 /// access to persistent storage, and access to the rendering backend.
 pub struct Frame {
+    /// 主窗口客户区左上角在固定绘制画布内的物理像素坐标。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub root_window_offset: Option<[i32; 2]>,
+    /// 根窗口上一帧已交换，并且当前更新可在原客户区读取该前缓冲。
+    #[cfg(not(target_arch = "wasm32"))]
+    pub root_gl_front_ready: bool,
     /// 原生交互截图已按应用指定的时刻开始这一帧，后续限帧沿用同一起点。
     #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
     pub interactive_frame_start: Option<std::time::Instant>,
@@ -681,6 +687,10 @@ impl Frame {
     #[doc(hidden)]
     pub fn _new_kittest() -> Self {
         Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            root_window_offset: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            root_gl_front_ready: false,
             #[cfg(all(feature = "wgpu", not(target_arch = "wasm32")))]
             interactive_frame_start: None,
             #[cfg(feature = "glow")]

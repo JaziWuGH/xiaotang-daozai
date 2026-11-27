@@ -13,3 +13,5 @@
 *.key
 .DS_Store
 Thumbs.db
+/编译并测试-Claude.cmd
+/编译测试版-Claude.cmd

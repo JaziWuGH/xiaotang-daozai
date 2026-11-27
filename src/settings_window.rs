@@ -61,7 +61,11 @@ impl State {
             Some(Placement{position:(v.outer_rect?.min*ppp).into(),size:v.inner_rect?.size().into()})});
         if let Some(placement)=placement.filter(|p|p.valid()){self.current=Some(placement);}
     }
-    pub(crate) fn close(&mut self){if self.opened{self.opened=false;self.persist();}}
+    pub(crate) fn close(&mut self)->bool{
+        let was_open=std::mem::take(&mut self.opened);
+        if was_open{self.persist();}
+        was_open
+    }
     fn persist(&mut self){
         if self.current==self.saved{return;}
         let (Some(path),Some(current))=(&self.path,self.current)else{return;};

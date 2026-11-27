@@ -1,0 +1,15 @@
+{
+  "id": "example.celadon-skin",
+  "name": "青瓷",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "assets",
+  "entry": "theme.json",
+  "cover": "cover.png",
+  "owner": "appearance",
+  "capabilities": ["appearance.skin"],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": []
+}

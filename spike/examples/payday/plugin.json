@@ -1,0 +1,34 @@
+{
+  "id": "example.payday",
+  "name": "发薪倒计时",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "refreshSeconds": 60,
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "tasks",
+  "capabilities": [
+    "settings",
+    "card",
+    "storage",
+    "timer"
+  ],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [
+    {
+      "key": "title",
+      "label": "倒计时名称",
+      "type": "text",
+      "default": "发薪"
+    },
+    {
+      "key": "target",
+      "label": "目标日期",
+      "type": "date",
+      "default": "2026-12-25"
+    }
+  ]
+}

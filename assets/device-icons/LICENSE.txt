@@ -1,3 +1,6 @@
 Solar Icons by 480 Design: https://www.figma.com/community/file/1166831539721848736
 Licensed under Creative Commons Attribution 4.0 International:
 https://creativecommons.org/licenses/by/4.0/
+
+headphones-round-bold、speaker-bold、keyboard-bold、mouse-bold、gamepad-bold、smartphone-bold、bluetooth-linear 来自 Solar Icons。
+其余设备图标（入耳、带杆入耳、耳夹、骨传导、助听器、麦克风、触控板、触控笔、演示器、遥控器、Joy-Con、平板、手表、手环、健康设备、USB 接收器）为岛仔自绘，只画外形轮廓，不含品牌标志。

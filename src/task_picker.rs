@@ -4,6 +4,46 @@ use eframe::egui::{self,Color32};
 use crate::paint::{capsule,Card,H};
 use crate::theme::{self,W};
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct WheelInput {
+    scroll: f32,
+    drag: f32,
+    last_scroll: f64,
+}
+
+impl WheelInput {
+    pub fn steps(&mut self, c: &Card, response: &egui::Response, row_height: f32) -> (i64, i64) {
+        let ctx = c.ui.ctx();
+        let mut scroll_steps = 0;
+        if response.hovered() {
+            let (delta,now) = ctx.input(|i| {
+                let delta = i.events.iter().filter_map(|event| match event {
+                    egui::Event::MouseWheel {unit,delta,modifiers} if !modifiers.ctrl && !modifiers.command =>
+                        Some(-delta.y * if *unit==egui::MouseWheelUnit::Point {1.0} else {40.0}),
+                    _ => None,
+                }).sum::<f32>();
+                (delta,i.time)
+            });
+            if delta!=0.0 {
+                if now-self.last_scroll>0.25 || self.scroll*delta<0.0 {self.scroll=0.0;}
+                self.last_scroll=now;
+                self.scroll+=delta;
+                scroll_steps=(self.scroll/40.0).trunc() as i64;
+                self.scroll-=scroll_steps as f32*40.0;
+                ctx.input_mut(|i|{i.raw_scroll_delta=egui::Vec2::ZERO;i.smooth_scroll_delta=egui::Vec2::ZERO;});
+            }
+        }
+        if response.drag_started() {self.drag=0.0;}
+        let mut drag_steps = 0;
+        if response.dragged() {
+            self.drag-=response.drag_delta().y/c.s;
+            drag_steps=(self.drag/row_height).trunc() as i64;
+            self.drag-=drag_steps as f32*row_height;
+        }
+        (scroll_steps,drag_steps)
+    }
+}
+
 pub(crate) enum PickerAction { Save, Skip, Cancel }
 pub(crate) struct ReminderPicker {
     pub open:bool,
@@ -12,16 +52,14 @@ pub(crate) struct ReminderPicker {
     pub repeat_note:Option<String>,
     origin:NaiveDate,
     positions:[i64;3],
-    wheel:[f32;3],
-    drag:[f32;3],
-    wheel_at:[f64;3],
+    wheels:[WheelInput;3],
     error:String,
 }
 impl ReminderPicker {
     pub fn new(due:Option<&str>)->Self {
         let selected=due.and_then(|text|NaiveDateTime::parse_from_str(text,"%Y-%m-%d %H:%M").ok())
             .unwrap_or_else(||(Local::now()+Duration::minutes(15)).naive_local());
-        Self{open:false,focus:false,repeat_note:None,origin:selected.date(),positions:[0,selected.hour() as i64,selected.minute() as i64],wheel:[0.0;3],drag:[0.0;3],wheel_at:[0.0;3],error:String::new()}
+        Self{open:false,focus:false,repeat_note:None,origin:selected.date(),positions:[0,selected.hour() as i64,selected.minute() as i64],wheels:[WheelInput::default();3],error:String::new()}
     }
     pub fn show(&mut self){self.open=true;self.focus=true;}
     fn selected(&self)->NaiveDateTime {
@@ -53,28 +91,9 @@ impl ReminderPicker {
         for y in [74.5,80.0]{c.circle(317.0,y,0.9,theme::WHITE);}
         for (column,(x,width)) in [(204.0,62.0),(271.0,38.0),(325.0,42.0)].into_iter().enumerate(){
             let response=c.hit_drag(x,51.0,width,52.0,("reminder-wheel",column));
-            if response.hovered(){
-                let (delta,now)=ctx.input(|i|{
-                    let delta=i.events.iter().filter_map(|event|match event{
-                        egui::Event::MouseWheel{unit,delta,modifiers} if !modifiers.ctrl && !modifiers.command=>Some(-delta.y*if *unit==egui::MouseWheelUnit::Point{1.0}else{40.0}),_=>None,
-                    }).sum::<f32>();(delta,i.time)
-                });
-                if delta!=0.0 {
-                    if now-self.wheel_at[column]>0.25 || self.wheel[column]*delta<0.0{self.wheel[column]=0.0;}
-                    self.wheel_at[column]=now;
-                    self.wheel[column]+=delta;
-                    let steps=(self.wheel[column]/40.0).trunc() as i64;
-                    self.wheel[column]-=steps as f32*40.0;
-                    self.adjust(column,steps);
-                    ctx.input_mut(|i|{i.raw_scroll_delta=egui::Vec2::ZERO;i.smooth_scroll_delta=egui::Vec2::ZERO;});
-                }
-            }
-            if response.drag_started(){self.drag[column]=0.0;}
-            if response.dragged(){
-                self.drag[column]-=response.drag_delta().y/c.s;
-                let steps=(self.drag[column]/18.0).trunc() as i64;
-                self.drag[column]-=steps as f32*18.0;self.adjust(column,steps);
-            }
+            let (scroll,drag)=self.wheels[column].steps(c,&response,18.0);
+            self.adjust(column,scroll);
+            self.adjust(column,drag);
             if response.clicked(){if let Some(pos)=response.interact_pointer_pos(){let y=c.to_local(pos).y;if y<68.0{self.adjust(column,-1);}else if y>88.0{self.adjust(column,1);}}}
             response.on_hover_text(format!("{} · 滚轮、上下拖动或点选调整",["日期","小时","分钟"][column]));
             let position=ctx.animate_value_with_time(egui::Id::new(("reminder-wheel-position",column)),self.positions[column] as f32,if self.focus{0.0}else{0.13});

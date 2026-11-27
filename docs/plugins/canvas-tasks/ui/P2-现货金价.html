@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>金价 · 理想版</title>
+
+</head>
+<body>
+
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&amp;family=Inter:wght@400;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+.k{font-size:12px;letter-spacing:.08em;color:#6B6B73;font-weight:700}
+.muted{color:#5D5D66}
+.card{background:#fff;border:1px solid #E2E2DC;border-radius:14px;box-sizing:border-box}
+.desk{background:#1B2333;border-radius:14px;display:flex;justify-content:center;align-items:flex-start;padding-bottom:26px;overflow:hidden}
+.isl{background:#000;color:#fff;border-radius:16px 16px 30px 30px;box-sizing:border-box;font-family:'Noto Sans SC','Inter',sans-serif;position:relative}
+.cap{background:#1C1C1F;border-radius:999px;padding:3px 10px;font-size:11px;display:inline-flex;gap:8px;align-items:center}
+.arrow{position:absolute;top:50%;width:22px;height:22px;border-radius:11px;background:#2A2A2E;display:flex;align-items:center;justify-content:center}
+.num{font-family:'Inter','Noto Sans SC',sans-serif;font-variant-numeric:tabular-nums}
+.pill{background:#000;color:#fff;border-radius:0 0 20px 20px;height:36px;display:flex;align-items:center;gap:10px;padding:0 14px;box-sizing:border-box;font-size:12.5px}
+.seg{display:inline-flex;background:#161618;border-radius:8px;padding:2px;gap:2px}
+.seg button{border:0;background:transparent;color:#8E8E99;font-size:10px;padding:3px 8px;border-radius:6px;font-family:inherit}
+.std{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E3F5E9;color:#1F7A3D;font-weight:700}
+.cvs{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#EEE8FF;color:#5B3FD1;font-weight:700}
+.live{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E6F0FF;color:#1F5FBF;font-weight:700}
+td{padding:7px 8px;font-size:12.5px;border-bottom:1px solid #EEEEE9;vertical-align:top}
+</style>
+
+<div style="width: 1440px; height: 1000px; box-sizing: border-box; padding: 40px 52px; background: #F4F4F1; font-family: 'Noto Sans SC', 'Inter', sans-serif; color: #17171A; display: flex; flex-direction: column; gap: 20px">
+  <div style="display: flex; align-items: flex-end; justify-content: space-between">
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div class="k">理想版 · 2 · 第二稿</div>
+      <h1 style="margin: 0; font-size: 34px">现货金价</h1>
+      <p class="muted" style="margin: 0; font-size: 14px">主显示可在「美元 / 盎司」和「人民币 / 克」之间切换，走势图、坐标、提醒线和常驻条一起跟着换。只陈述数据，不做任何建议。</p>
+    </div>
+    <div style="display: flex; gap: 8px"><span class="std">标准组件</span><span class="cvs">自绘画布</span><span class="live">宿主实时值</span></div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr); gap: 24px; flex: 1; min-height: 0">
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">展开 · 美元视图（1.5 倍显示，实际 419 × 250）</div>
+      <div class="desk" style="padding-bottom: 30px">
+        <div style="zoom: 1.5">
+          <div class="isl" style="width: 419px; height: 250px; padding: 12px 16px 10px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; justify-content: space-between">
+              <span style="font-size: 15px; font-weight: 900">现货<span style="color: #E8B931">金价</span></span>
+              <span class="cap"><span>11月24日 周二</span><b>14:05</b></span>
+              <span style="display: flex; align-items: center; gap: 10px; font-size: 11px; color: #B2B2BA">刷新<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B2B2BA" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="8"></circle></svg></span>
+            </div>
+            <div style="display: flex; gap: 12px; flex: 1; min-height: 0">
+              <div style="width: 138px; display: flex; flex-direction: column; gap: 4px">
+                <span class="seg" style="align-self: flex-start"><button type="button" style="background: #E8B931; color: #1A1400; font-weight: 700">$ / 盎司</button><button type="button">¥ / 克</button></span>
+                <span class="num" style="font-size: 30px; font-weight: 800; letter-spacing: -.01em; margin-top: 2px">4,118.6</span>
+                <span class="num" style="align-self: flex-start; display: inline-flex; align-items: center; gap: 4px; background: #3A1416; color: #FF6B6B; border-radius: 7px; padding: 3px 7px; font-size: 11.5px; font-weight: 700"><svg width="9" height="9" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 1l4 7H1z" fill="#FF6B6B"></path></svg>12.4 · 0.30%</span>
+                <div style="margin-top: 6px; display: flex; flex-direction: column; gap: 5px; font-size: 10.5px">
+                  <span style="display: flex; justify-content: space-between"><span style="color: #8E8E99">折合</span><span class="num">¥946.2 / 克</span></span>
+                  <span style="display: flex; justify-content: space-between"><span style="color: #8E8E99">今日高</span><span class="num">4,131.0</span></span>
+                  <span style="display: flex; justify-content: space-between"><span style="color: #8E8E99">今日低</span><span class="num">4,092.3</span></span>
+                </div>
+              </div>
+              <div style="flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0">
+                <div style="display: flex; justify-content: flex-end"><span class="seg"><button type="button" style="background: #2E2E33; color: #fff">1日</button><button type="button">1周</button><button type="button">1月</button></span></div>
+                <svg width="235" height="132" viewBox="0 0 235 132" role="img" aria-label="当日金价走势，美元计价，午后上涨并站上提醒价 4100">
+                  <defs><linearGradient id="gf" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#E8B931" stop-opacity="0.42"></stop><stop offset="1" stop-color="#E8B931" stop-opacity="0"></stop></linearGradient></defs>
+                  <line x1="0" y1="20" x2="210" y2="20" stroke="#1F1F23"></line><line x1="0" y1="55" x2="210" y2="55" stroke="#1F1F23"></line><line x1="0" y1="90" x2="210" y2="90" stroke="#1F1F23"></line><line x1="0" y1="118" x2="210" y2="118" stroke="#2A2A2E"></line>
+                  <text x="214" y="23" fill="#6B6B73" font-size="8" font-family="Inter">4,130</text><text x="214" y="58" fill="#6B6B73" font-size="8" font-family="Inter">4,115</text><text x="214" y="93" fill="#6B6B73" font-size="8" font-family="Inter">4,100</text>
+                  <text x="0" y="130" fill="#6B6B73" font-size="8" font-family="Inter">08:00</text><text x="92" y="130" fill="#6B6B73" font-size="8" font-family="Inter">11:00</text><text x="184" y="130" fill="#6B6B73" font-size="8" font-family="Inter">14:00</text>
+                  <line x1="0" y1="78" x2="210" y2="78" stroke="#FF6B6B" stroke-width="1" stroke-dasharray="3 3"></line>
+                  <rect x="4" y="66" width="48" height="12" rx="3" fill="#3A1416"></rect><text x="8" y="75" fill="#FF8A8A" font-size="8" font-family="Noto Sans SC">提醒 $4,100</text>
+                  <path d="M0 98 L14 102 L28 96 L42 100 L56 92 L70 95 L84 88 L98 91 L112 82 L126 86 L140 74 L154 70 L168 62 L182 58 L196 48 L210 44 L210 118 L0 118 Z" fill="url(#gf)"></path>
+                  <path d="M0 98 L14 102 L28 96 L42 100 L56 92 L70 95 L84 88 L98 91 L112 82 L126 86 L140 74 L154 70 L168 62 L182 58 L196 48 L210 44" fill="none" stroke="#E8B931" stroke-width="2" stroke-linejoin="round"></path>
+                  <line x1="140" y1="10" x2="140" y2="118" stroke="#6B6B73" stroke-width="1" stroke-dasharray="2 2"></line>
+                  <circle cx="140" cy="74" r="3.5" fill="#000" stroke="#E8B931" stroke-width="2"></circle>
+                  <rect x="146" y="8" width="58" height="26" rx="6" fill="#1C1C1F" stroke="#2E2E33"></rect><text x="152" y="18" fill="#8E8E99" font-size="8" font-family="Inter">12:40</text><text x="152" y="29" fill="#fff" font-size="10" font-weight="700" font-family="Inter">$4,106.2</text>
+                  <circle cx="210" cy="44" r="7" fill="#E8B931" fill-opacity="0.25"></circle><circle cx="210" cy="44" r="3.5" fill="#E8B931"></circle>
+                </svg>
+              </div>
+            </div>
+            <div style="display: flex; align-items: center; justify-content: space-between; font-size: 10px; color: #6B6B73">
+              <span>数据来源 xaus.com</span>
+              <span style="display: flex; gap: 4px"><span style="width:4px;height:4px;border-radius:2px;background:#555"></span><span style="width:12px;height:4px;border-radius:2px;background:#fff"></span><span style="width:4px;height:4px;border-radius:2px;background:#555"></span></span>
+              <span>更新 14:05</span>
+            </div>
+            <span class="arrow" style="left: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg></span>
+            <span class="arrow" style="right: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M9 5l7 7-7 7"></path></svg></span>
+          </div>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) minmax(0, 1fr); gap: 12px">
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <div class="k">切到 人民币 / 克</div>
+          <div style="background: #000; color: #fff; border-radius: 12px; padding: 10px; display: flex; gap: 10px; align-items: center">
+            <div style="display: flex; flex-direction: column; gap: 3px">
+              <span class="seg"><button type="button">$ / 盎司</button><button type="button" style="background: #E8B931; color: #1A1400; font-weight: 700">¥ / 克</button></span>
+              <span class="num" style="font-size: 22px; font-weight: 800">946.2</span>
+              <span class="num" style="font-size: 10px; color: #FF6B6B">+2.9 · 0.31%</span>
+            </div>
+            <svg width="110" height="58" viewBox="0 0 110 58" aria-hidden="true"><line x1="0" y1="37" x2="96" y2="37" stroke="#FF6B6B" stroke-dasharray="3 3"></line><path d="M0 46 L12 48 L24 44 L36 45 L48 40 L60 41 L72 32 L84 26 L96 20" fill="none" stroke="#E8B931" stroke-width="2"></path><text x="98" y="23" fill="#6B6B73" font-size="7" font-family="Inter">¥948</text><text x="98" y="40" fill="#6B6B73" font-size="7" font-family="Inter">¥942</text></svg>
+          </div>
+          <span class="muted" style="font-size: 11.5px">坐标、读数和提醒线都换成 ¥/克；两种单位各存一份走势，切换不用等下次刷新。</span>
+        </div>
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <div class="k">常驻条（跟随单位）</div>
+          <div class="desk" style="padding: 0 0 12px"><div class="pill" style="width: 196px; gap: 7px; font-size: 11.5px"><span style="color: #E8B931; font-weight: 700">金</span><b class="num">¥946.2</b><svg width="30" height="12" viewBox="0 0 30 12" aria-hidden="true"><path d="M0 10 L6 11 L12 8 L18 9 L24 5 L30 2" fill="none" stroke="#FF6B6B" stroke-width="1.6"></path></svg></div></div>
+        </div>
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <div class="k">突破提醒价</div>
+          <div class="desk" style="padding: 0 0 12px"><div class="pill" style="width: 196px; gap: 7px; font-size: 11.5px"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="10" fill="#E8B931"></circle><path d="M12 6l5 8H7z" fill="#3A1416"></path></svg><b>涨破 $4,100</b></div></div>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">设计说明</div>
+      <ul class="muted" style="margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.7">
+        <li>价格上方的切换钮决定主显示单位，选择会记住；另一种单位以「折合」放在下面。</li>
+        <li>切换后走势图整条换算重画，坐标、悬停读数、提醒线标签同步换单位。</li>
+        <li>两种单位都直接问 xaus.com：美元请求 currency=USD&amp;unit=ounce，人民币请求 currency=CNY&amp;unit=gram，换算由 xaus 完成，不需要第二个汇率来源。xaus 返回 fx_stale（汇率过期）时，人民币视图标「汇率待更新」。</li>
+        <li>涨跌色块默认红涨绿跌，可在设置里改。</li>
+        <li>页脚写数据来源和更新时间，不出现「建议」「看涨」等字样。</li>
+      </ul>
+      <div class="k" style="margin-top: 4px">实现方式</div>
+      <div class="card" style="padding: 6px 14px">
+        <table style="width: 100%; border-collapse: collapse">
+          <tbody>
+            <tr><td>xaus.com 两个来源（美元/盎司、人民币/克）、退避、数据来源</td><td style="text-align: right"><span class="std">source.read · attribution</span></td></tr>
+            <tr><td>单位切换、区间切换（点按）</td><td style="text-align: right"><span class="std">action</span></td></tr>
+            <tr><td>主数字、涨跌色块、折合行</td><td style="text-align: right"><span class="cvs">自绘画布</span></td></tr>
+            <tr><td>走势图、坐标、提醒线</td><td style="text-align: right"><span class="cvs">自绘画布</span></td></tr>
+            <tr><td>悬停十字线和读数</td><td style="text-align: right"><span class="cvs">画布悬停区</span></td></tr>
+            <tr><td>突破提醒</td><td style="text-align: right"><span class="std">notice</span></td></tr>
+            <tr><td>常驻条（单位 + 迷你走势）</td><td style="text-align: right"><span class="cvs">常驻小画布</span></td></tr>
+            <tr><td>最近 48 个价格点、所选单位</td><td style="text-align: right"><span class="std">storage</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+</body>
+</html>

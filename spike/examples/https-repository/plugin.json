@@ -1,0 +1,26 @@
+{
+  "id": "example.https-repository",
+  "name": "Rust 仓库动态",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "tasks",
+  "capabilities": [
+    "card",
+    "timer"
+  ],
+  "dataVersion": 1,
+  "permissions": {
+    "source.read": "https"
+  },
+  "network": {
+    "hosts": [
+      "api.github.com"
+    ],
+    "url": "https://api.github.com/repos/rust-lang/rust"
+  },
+  "settings": []
+}

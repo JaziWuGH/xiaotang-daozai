@@ -40,6 +40,7 @@ impl App{
         self.mail.manage.ready(account,self.mail_physical_folder(folder))&&self.mail.accounts.iter().any(|a|a.email.eq_ignore_ascii_case(account)&&self.mail.manage.identities.get(&crate::mail::key(a))==Some(a))
     }
     pub(crate) fn mail_open_reader(&mut self,item:&Item){
+        if !self.module_on(crate::app::MAIL_PAGE){return;}
         let folder=self.mail.manage.folder();
         self.mail.manage.reader_trash=folder==Folder::Trash;
         let email=item.account.to_ascii_lowercase();
@@ -54,6 +55,21 @@ impl App{
         self.mail_ready(&email,folder) && self.mail.manage.identities.get(&email)==Some(account)
             && self.mail.manage.data.get(&(email,self.mail_physical_folder(folder)))
                 .is_some_and(|s|s.validity==*validity && s.entries.iter().any(|(uid,_)|*uid==item.uid))
+    }
+    pub(crate) fn close_mail_module(&mut self){
+        self.mail.bell_at=None;
+        self.mail.reading=None;
+        self.mail.reader_focus=false;
+        self.mail.open_uid=None;
+        self.mail.testing=None;
+        self.mail.note.clear();
+        self.mail.form=Default::default();
+        self.mail.manage.reader_identity=None;
+        self.mail.manage.auto_read=None;
+        self.mail.manage.pending.clear();
+        self.mail.manage.next_refresh=0.0;
+        self.mail.manage.message.clear();
+        self.pending.retain(|cmd|!matches!(cmd,Cmd::MailTest(..)|Cmd::MailSync|Cmd::MailManage(..)));
     }
     pub(crate) fn mail_manage_mode_changed(&mut self){
         self.mail.manage.trash.clear();self.mail.manage.trash_open=false;self.mail.manage.auto_read=None;
@@ -88,7 +104,7 @@ impl App{
     }
     pub(crate) fn mail_rows(&self)->&[Item]{if self.mail.manage.trash_open{&self.mail.manage.trash}else{&self.mail.recent}}
     pub(crate) fn mail_manage_request(&mut self,account:Option<&str>,folder:Folder,action:Action){
-        if !self.mail.manage.pending.is_empty(){return;}
+        if !self.module_on(crate::app::MAIL_PAGE)||!self.mail.manage.pending.is_empty(){return;}
         if action!=Action::Load&&!self.settings.mail_sync_operations{self.mail_local_action(account,folder,action);return;}
         let folder=self.mail_physical_folder(folder);
         let mut accounts:Vec<Account>=self.mail.accounts.iter().filter(|a|a.enabled&&account.is_none_or(|email|a.email.eq_ignore_ascii_case(email))).cloned().collect();
@@ -199,7 +215,7 @@ impl App{
 }
 #[cfg(test)]mod tests{
     use super::*;
-    fn account()->Account{Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true}}
+    fn account()->Account{Account{email:"test@example.com".into(),provider:crate::mail::Provider::Qq,custom:None,enabled:true,use_windows_proxy:false}}
     #[test]fn failed_server_operation_keeps_the_message_and_reports_error(){
         let ctx=eframe::egui::Context::default();let mut app=App::new(&ctx,Default::default());let a=account();app.mail.accounts=vec![a.clone()];
         app.mail_manage_request(None,Folder::Inbox,Action::Load);

@@ -1,0 +1,15 @@
+{
+  "id": "example.zcool-kuaile",
+  "name": "站酷快乐体",
+  "author": "ZCOOL KuaiLe Project Authors",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "assets",
+  "entry": "fonts.json",
+  "cover": "cover.png",
+  "owner": "appearance",
+  "capabilities": ["appearance.font"],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": []
+}

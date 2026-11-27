@@ -1,0 +1,34 @@
+{
+  "id": "example.printer-status",
+  "name": "打印机状态（模拟）",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "status",
+  "capabilities": ["status.page", "timer", "storage"],
+  "refreshSeconds": 60,
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [],
+  "statusLayout": {
+    "components": [
+      {"type": "state"},
+      {"type": "progress", "variant": "bar"},
+      {"type": "metrics"},
+      {"type": "chart"},
+      {"type": "list"},
+      {"type": "text"},
+      {"type": "badge"},
+      {"type": "alert"}
+    ],
+    "style": {
+      "accent": "#5BADEF",
+      "density": "compact",
+      "emphasis": "strong",
+      "icon": "chart"
+    }
+  }
+}

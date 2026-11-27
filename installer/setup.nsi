@@ -261,7 +261,7 @@ Section "安装"
   File /oname=daozai.exe "${SOURCE_EXE}"
   File "${PROJECT_DIR}\LICENSE"
   File "${PROJECT_DIR}\THIRD_PARTY_NOTICES.txt"
-  ; 诊断脚本已内嵌在程序里（daozai.exe --collect-diagnostics），清掉测试版留下的单独诊断文件。
+  ; 清理旧测试版安装目录中的独立诊断文件。
   Delete "$INSTDIR\收集岛仔诊断.cmd"
   Delete "$INSTDIR\scripts\collect-diagnostics.ps1"
   RMDir "$INSTDIR\scripts"

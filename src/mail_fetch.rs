@@ -88,7 +88,7 @@ mod tests {
         let output=Arc::new(Mutex::new(Vec::new()));
         let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{reply}").into_bytes()),output:output.clone()};
         let mut session=imap::Client::new(wire).login("test","test").unwrap();
-        let account=Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true};
+        let account=Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true,use_windows_proxy:false};
         let item=item(&mut session,42,&account).unwrap().unwrap();
         let commands=String::from_utf8(output.lock().unwrap().clone()).unwrap();(item,commands)
     }
@@ -98,7 +98,7 @@ mod tests {
         let wire=Wire{input:Cursor::new(format!("a1 OK login\r\n{input}").into_bytes()),output:output.clone()};
         (imap::Client::new(wire).login("test","test").unwrap(),output)
     }
-    fn account()->Account{Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true}}
+    fn account()->Account{Account {custom: None, email:"test@example.com".into(),provider:super::super::Provider::Qq,enabled:true,use_windows_proxy:false}}
     #[test]
     fn out_of_sync_response_reports_an_error_instead_of_crashing(){
         // 用户崩溃日志：vendor\imap\src\client.rs:1369 的标签断言。a2 的位置收到上一条命令迟到的 a1 结束行。

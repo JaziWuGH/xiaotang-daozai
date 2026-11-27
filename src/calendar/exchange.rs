@@ -256,7 +256,6 @@ pub(super) fn fetch(cfg: &Config, password: &str, lo: DateTime<Utc>, hi: DateTim
     }
     if report.calendars == 0 { return Err(Failure::text(if cfg.provider == Provider::WeCom {"企业微信未返回可同步的日历，请确认已开启日程同步".to_string()}else{format!("{label}账号下没有可同步的日历")})); }
     if synced == 0 { return Err(first_error.unwrap_or_else(invalid).with_report(report)); }
-    if events.is_empty() && report.invalid>0{return Err(Failure::text(report.warning()).with_report(report));}
     events.sort_by_key(|m| m.start);
     let mut seen = std::collections::HashSet::new();
     events.retain(|m| seen.insert(super::dedupe_key(m)));
@@ -500,6 +499,33 @@ mod tests {
         node(AIR, 5, "", vec![node(AIR, 0x1c, "", vec![node(AIR, 0x0f, "", children)])])
     }
     fn custom(base: &str) -> Config { Config { provider: Provider::Exchange, username: "me@example.com".into(), href: None, server: Some(base.into()) } }
+
+    #[test]
+    fn exchange_connection_test_accepts_unparseable_items() {
+        for provider in [Provider::WeCom, Provider::Exchange] {
+            let (base, worker) = mock(vec![
+                Box::new(|_| (200, Some(folders()))),
+                Box::new(|_| (200, Some(sync_page("1", false)))),
+                Box::new(|_| {
+                    let bad_item = node(AIR, 0x1d, "", vec![node(CAL, 0x27, "invalid", vec![])]);
+                    let add = node(AIR, 7, "", vec![node(AIR, 0x0d, "bad", vec![]), bad_item]);
+                    let collection = node(AIR, 0x0f, "", vec![node(AIR, 0x0e, "1", vec![]),
+                        node(AIR, 0x0b, "2", vec![]), node(AIR, 0x16, "", vec![add])]);
+                    (200, Some(node(AIR, 5, "", vec![node(AIR, 0x1c, "", vec![collection])])))
+                }),
+            ]);
+            let cfg = Config { provider, ..custom(&base) };
+            let service = super::super::Service::start();
+            service.test(cfg, "pw".into());
+            let result = service.ev.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+            worker.join().unwrap();
+            let super::super::Event::Test { ok, message, count, config } = result else { panic!("应返回连接测试结果"); };
+            assert!(ok, "{provider:?} {message}");
+            assert_eq!(count, 0);
+            assert!(message.contains("1 条日程无法解析"));
+            assert_eq!(config.and_then(|cfg| cfg.href), Some(format!("{base}/Microsoft-Server-ActiveSync")));
+        }
+    }
 
     #[test]
     fn custom_exchange_completes_policy_handshake_and_reports_partial_compliance() {

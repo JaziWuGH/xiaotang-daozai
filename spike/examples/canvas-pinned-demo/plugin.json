@@ -1,0 +1,19 @@
+{
+  "id": "example.canvas-pinned-demo",
+  "name": "画布常驻",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "status",
+  "capabilities": ["status.page", "status.canvas", "island.pinned"],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [],
+  "statusLayout": {
+    "components": [{"type":"canvas"}],
+    "style": {"accent":"#4C96FF","surface":"plain"}
+  }
+}

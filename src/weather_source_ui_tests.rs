@@ -117,6 +117,9 @@ fn qweather_city_dropdown_supports_fuzzy_input_keyboard_selection_and_add(){
     assert!(h.ctx.memory(|m|m.is_popup_open(egui::Id::new("qweather-city-options"))));
     assert!(h.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t)if t.galley.text()=="杭州")),"模糊输入应显示匹配候选");
     let key=|key|egui::Event::Key{key,physical_key:None,pressed:true,repeat:false,modifiers:Default::default()};
+    draw(&mut h,vec![egui::Event::Ime(egui::ImeEvent::Enabled),key(egui::Key::ArrowDown)],egui::vec2(740.0,1100.0),1.0);
+    draw(&mut h,vec![egui::Event::Ime(egui::ImeEvent::Disabled),key(egui::Key::Enter)],egui::vec2(740.0,1100.0),1.0);
+    assert_eq!(h.app.weather_source.query,"杭","输入法选词不能选中城市");
     draw(&mut h,vec![key(egui::Key::ArrowDown)],egui::vec2(740.0,1100.0),1.0);
     draw(&mut h,vec![key(egui::Key::Enter)],egui::vec2(740.0,1100.0),1.0);
     assert_eq!(h.app.weather_source.query,"余杭");

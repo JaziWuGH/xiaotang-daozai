@@ -1,0 +1,329 @@
+{
+  "started": "2026-11-19T18:43:01.207990+08:00",
+  "platform": "Windows-11-10.0.26200-SP0",
+  "sha256": "bc3e79ece5319ef4f86471c259196de6d1e72cf10ad68af2b3619ded6e3f7ca5",
+  "runs": [
+    {
+      "mode": "js",
+      "legacy_vsync": true,
+      "redraw_ms": null,
+      "installed": null,
+      "elapsed_s": 20.037,
+      "cpu_ms": 1921.875,
+      "single_core_pct": 9.592,
+      "rss_median_mib": 84.94,
+      "rss_peak_mib": 85.18,
+      "window_samples": {
+        "foreground": 14,
+        "hovered": 0,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 18.6,
+      "samples": 20,
+      "frames": 136,
+      "calls": 12,
+      "callback_us": 234
+    },
+    {
+      "mode": "wasm",
+      "legacy_vsync": true,
+      "redraw_ms": null,
+      "installed": null,
+      "elapsed_s": 20.974,
+      "cpu_ms": 31.25,
+      "single_core_pct": 0.149,
+      "rss_median_mib": 82.52,
+      "rss_peak_mib": 83.15,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 0,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 30.3,
+      "samples": 20,
+      "frames": 22,
+      "calls": 11,
+      "callback_us": 175
+    },
+    {
+      "mode": "wasm",
+      "legacy_vsync": true,
+      "redraw_ms": null,
+      "installed": null,
+      "elapsed_s": 20.553,
+      "cpu_ms": 0.0,
+      "single_core_pct": 0.0,
+      "rss_median_mib": 82.6,
+      "rss_peak_mib": 83.28,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 0,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 26.049999999999997,
+      "samples": 20,
+      "frames": 22,
+      "calls": 11,
+      "callback_us": 173
+    },
+    {
+      "mode": "js",
+      "legacy_vsync": true,
+      "redraw_ms": null,
+      "installed": null,
+      "elapsed_s": 20.611,
+      "cpu_ms": 140.625,
+      "single_core_pct": 0.682,
+      "rss_median_mib": 82.59,
+      "rss_peak_mib": 83.21,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 0,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 40.349999999999994,
+      "samples": 20,
+      "frames": 22,
+      "calls": 11,
+      "callback_us": 254
+    },
+    {
+      "mode": "js",
+      "legacy_vsync": false,
+      "redraw_ms": null,
+      "installed": null,
+      "elapsed_s": 20.801,
+      "cpu_ms": 78.125,
+      "single_core_pct": 0.376,
+      "rss_median_mib": 82.36,
+      "rss_peak_mib": 83.02,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 0,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 36.8,
+      "samples": 20,
+      "frames": 22,
+      "calls": 11,
+      "callback_us": 261
+    },
+    {
+      "mode": "wasm",
+      "legacy_vsync": false,
+      "redraw_ms": null,
+      "installed": null,
+      "elapsed_s": 20.732,
+      "cpu_ms": 62.5,
+      "single_core_pct": 0.301,
+      "rss_median_mib": 82.67,
+      "rss_peak_mib": 83.34,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 20,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 42.95,
+      "samples": 20,
+      "frames": 22,
+      "calls": 11,
+      "callback_us": 206
+    },
+    {
+      "mode": "js",
+      "legacy_vsync": false,
+      "redraw_ms": 16,
+      "installed": null,
+      "elapsed_s": 21.472,
+      "cpu_ms": 27796.875,
+      "single_core_pct": 129.457,
+      "rss_median_mib": 91.24,
+      "rss_peak_mib": 91.71,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 20,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 45.349999999999994,
+      "samples": 20,
+      "frames": 29943,
+      "calls": 21,
+      "callback_us": 423
+    },
+    {
+      "mode": "wasm",
+      "legacy_vsync": false,
+      "redraw_ms": 16,
+      "installed": null,
+      "elapsed_s": 21.855,
+      "cpu_ms": 28312.5,
+      "single_core_pct": 129.546,
+      "rss_median_mib": 91.4,
+      "rss_peak_mib": 91.9,
+      "window_samples": {
+        "foreground": 20,
+        "hovered": 0,
+        "visible": 20
+      },
+      "desktop_cpu_median_pct": 52.35,
+      "samples": 20,
+      "frames": 30841,
+      "calls": 22,
+      "callback_us": 373
+    },
+    {
+      "mode": "island",
+      "legacy_vsync": false,
+      "redraw_ms": null,
+      "installed": 0,
+      "elapsed_s": 72.435,
+      "cpu_ms": 8359.375,
+      "single_core_pct": 11.54,
+      "rss_median_mib": 129.71,
+      "rss_peak_mib": 133.75,
+      "window_samples": {
+        "foreground": 39,
+        "hovered": 27,
+        "visible": 70
+      },
+      "desktop_cpu_median_pct": 25.0,
+      "samples": 70,
+      "calls_before": [],
+      "calls_after": []
+    },
+    {
+      "mode": "island",
+      "legacy_vsync": false,
+      "redraw_ms": null,
+      "installed": 10,
+      "elapsed_s": 70.119,
+      "cpu_ms": 7906.25,
+      "single_core_pct": 11.276,
+      "rss_median_mib": 131.23,
+      "rss_peak_mib": 133.89,
+      "window_samples": {
+        "foreground": 62,
+        "hovered": 70,
+        "visible": 70
+      },
+      "desktop_cpu_median_pct": 21.85,
+      "samples": 70,
+      "calls_before": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "calls_after": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "mode": "island",
+      "legacy_vsync": false,
+      "redraw_ms": null,
+      "installed": 10,
+      "elapsed_s": 71.548,
+      "cpu_ms": 8484.375,
+      "single_core_pct": 11.858,
+      "rss_median_mib": 131.13,
+      "rss_peak_mib": 135.04,
+      "window_samples": {
+        "foreground": 64,
+        "hovered": 70,
+        "visible": 70
+      },
+      "desktop_cpu_median_pct": 21.7,
+      "samples": 70,
+      "calls_before": [
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "calls_after": [
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2
+      ]
+    },
+    {
+      "mode": "island",
+      "legacy_vsync": false,
+      "redraw_ms": null,
+      "installed": 0,
+      "elapsed_s": 70.912,
+      "cpu_ms": 7953.125,
+      "single_core_pct": 11.215,
+      "rss_median_mib": 129.96,
+      "rss_peak_mib": 132.52,
+      "window_samples": {
+        "foreground": 63,
+        "hovered": 70,
+        "visible": 70
+      },
+      "desktop_cpu_median_pct": 21.6,
+      "samples": 70,
+      "calls_before": [],
+      "calls_after": []
+    }
+  ],
+  "legacy_binary_replay": [
+    {
+      "engine": "js",
+      "sha256": "3eb56788b9d71d19f201d1a7a9dd636f3dba36324af121e893263b9ccc144564",
+      "cpu_ms": 78.125,
+      "seconds": 30.00036310008727,
+      "single_core_pct": 0.26041351479433505
+    },
+    {
+      "engine": "wasm",
+      "sha256": "bc08fe76c2f34aaf5ba46816bcca35934cfc75d0e9c40b434a3a6759ead9b682",
+      "cpu_ms": 46.875,
+      "seconds": 30.000602400046773,
+      "single_core_pct": 0.15624686256275613
+    },
+    {
+      "engine": "wasm",
+      "sha256": "bc08fe76c2f34aaf5ba46816bcca35934cfc75d0e9c40b434a3a6759ead9b682",
+      "cpu_ms": 31.25,
+      "seconds": 30.000687499996275,
+      "single_core_pct": 0.10416427956860616
+    },
+    {
+      "engine": "js",
+      "sha256": "3eb56788b9d71d19f201d1a7a9dd636f3dba36324af121e893263b9ccc144564",
+      "cpu_ms": 62.5,
+      "seconds": 30.000656499993056,
+      "single_core_pct": 0.20832877440536832
+    }
+  ]
+}

@@ -31,7 +31,10 @@ mod qqmusic_playmode;
 pub(crate) mod player_process;
 #[cfg(windows)]
 #[path="music_log.rs"]
-mod music_log;
+pub(crate) mod music_log;
+#[cfg(windows)]
+#[path="music_compat.rs"]
+pub(crate) mod music_compat;
 
 #[cfg(windows)]
 #[path="music_gaps.rs"]
@@ -184,6 +187,9 @@ struct ArtworkCache {
     system:Option<(NowPlaying,std::time::Instant)>,
     #[cfg(windows)]
     manager:Option<windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager>,
+    /// 系统事件通知与当前登记状态。
+    #[cfg(windows)]
+    events:Option<MediaEvents>,
     key: String,
     bytes: Vec<u8>,
     image: Option<Arc<eframe::egui::ColorImage>>,
@@ -197,10 +203,10 @@ struct ArtworkCache {
 impl ArtworkCache {
     fn clear(&mut self,keep_manager:bool){
         let worker=self.worker.take();let pending=self.pending;
-        #[cfg(windows)] let manager=if keep_manager{self.manager.take()}else{None};
+        #[cfg(windows)] let (manager,events)=if keep_manager{(self.manager.take(),self.events.take())}else{(None,None)};
         #[cfg(not(windows))] let _=keep_manager;
         *self=Self{worker,pending,..Default::default()};
-        #[cfg(windows)] {self.manager=manager;}
+        #[cfg(windows)] {self.manager=manager;self.events=events;}
     }
     #[cfg(windows)]
     fn system_result(&mut self,result:Result<Option<NowPlaying>,()>,now:std::time::Instant)->Option<NowPlaying>{
@@ -375,6 +381,96 @@ fn choose_media_for_source(system:Option<NowPlaying>,native:Option<NowPlaying>,p
 }
 
 #[cfg(windows)]
+type EventToken=windows::Foundation::EventRegistrationToken;
+#[cfg(windows)]
+type EventRegistration<'a>=(&'a dyn Fn()->windows::core::Result<EventToken>,&'a dyn Fn(EventToken)->windows::core::Result<()>);
+
+/// 同组事件全部成功才保留；中途失败时注销已登记的回调。
+#[cfg(windows)]
+fn register_media_events<const N:usize>(events:[EventRegistration<'_>;N])->windows::core::Result<[EventToken;N]>{
+    let mut tokens=[EventToken::default();N];
+    for (index,(register,_)) in events.iter().enumerate() {
+        match register() {
+            Ok(token)=>tokens[index]=token,
+            Err(error)=>{
+                for ((_,remove),token) in events.iter().zip(&tokens[..index]) {let _=remove(*token);}
+                return Err(error);
+            }
+        }
+    }
+    Ok(tokens)
+}
+
+/// 系统媒体会话切歌、暂停或跳转时提前唤醒采样线程。
+#[cfg(windows)]
+struct MediaEvents {
+    wake:std::thread::Thread,
+    manager:Option<(windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,[EventToken;2])>,
+    sessions:Vec<(windows::Media::Control::GlobalSystemMediaTransportControlsSession,[EventToken;3])>,
+    manager_failed:bool,
+    sessions_complete:bool,
+}
+#[cfg(windows)]
+impl MediaEvents {
+    fn new()->Self {Self{wake:std::thread::current(),manager:None,sessions:Vec::new(),manager_failed:false,sessions_complete:false}}
+    /// 事件已正常登记，可以放慢定时检查。
+    fn active(&self)->bool {self.manager.is_some() && self.sessions_complete}
+    fn sync(&mut self,manager:&windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager,sessions:&[windows::Media::Control::GlobalSystemMediaTransportControlsSession]) {
+        use windows::Foundation::TypedEventHandler;
+        if self.manager_failed {return;}
+        if self.manager.as_ref().is_some_and(|(m,_)|m!=manager) {self.release();}
+        if self.manager.is_none() {
+            let (a,b)=(self.wake.clone(),self.wake.clone());
+            let a=TypedEventHandler::new(move|_,_|{a.unpark();Ok(())});
+            let b=TypedEventHandler::new(move|_,_|{b.unpark();Ok(())});
+            let tokens=register_media_events([
+                (&||manager.SessionsChanged(&a),&|token|manager.RemoveSessionsChanged(token)),
+                (&||manager.CurrentSessionChanged(&b),&|token|manager.RemoveCurrentSessionChanged(token)),
+            ]);
+            match tokens {Ok(tokens)=>self.manager=Some((manager.clone(),tokens)),Err(_)=>{self.manager_failed=true;return;}}
+        }
+        // 已退出的会话注销事件；新出现的会话登记。
+        self.sessions.retain(|(session,tokens)|{
+            let keep=sessions.contains(session);
+            if !keep {let _=session.RemoveMediaPropertiesChanged(tokens[0]);let _=session.RemovePlaybackInfoChanged(tokens[1]);let _=session.RemoveTimelinePropertiesChanged(tokens[2]);}
+            keep
+        });
+        for session in sessions {
+            if self.sessions.iter().any(|(known,_)|known==session) {continue;}
+            let (a,b,c)=(self.wake.clone(),self.wake.clone(),self.wake.clone());
+            let a=TypedEventHandler::new(move|_,_|{a.unpark();Ok(())});
+            let b=TypedEventHandler::new(move|_,_|{b.unpark();Ok(())});
+            let c=TypedEventHandler::new(move|_,_|{c.unpark();Ok(())});
+            let tokens=register_media_events([
+                (&||session.MediaPropertiesChanged(&a),&|token|session.RemoveMediaPropertiesChanged(token)),
+                (&||session.PlaybackInfoChanged(&b),&|token|session.RemovePlaybackInfoChanged(token)),
+                (&||session.TimelinePropertiesChanged(&c),&|token|session.RemoveTimelinePropertiesChanged(token)),
+            ]);
+            if let Ok(tokens)=tokens {self.sessions.push((session.clone(),tokens));}
+        }
+        // 会话登记不完整时沿用原定时间隔，并在下一轮补登记。
+        self.sessions_complete=self.sessions.len()==sessions.len();
+    }
+    fn release(&mut self) {
+        for (session,tokens) in self.sessions.drain(..) {
+            let _=session.RemoveMediaPropertiesChanged(tokens[0]);let _=session.RemovePlaybackInfoChanged(tokens[1]);let _=session.RemoveTimelinePropertiesChanged(tokens[2]);
+        }
+        if let Some((manager,tokens))=self.manager.take() {let _=manager.RemoveSessionsChanged(tokens[0]);let _=manager.RemoveCurrentSessionChanged(tokens[1]);}
+        self.sessions_complete=false;
+    }
+}
+#[cfg(windows)]
+impl Drop for MediaEvents {fn drop(&mut self){self.release();}}
+
+/// 系统事件可用时的定时检查间隔：系统会话的变化由事件即时唤醒，只需低频兜底；
+/// 进度靠读播放器内存的来源（酷狗、网易云、波点、酷我）没有事件，仍按原间隔读取。
+fn event_interval(requested:u32,idle:bool,source:&str)->u32 {
+    if idle {return idle_interval(requested).max(3000);}
+    let memory=matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe"|"cloudmusic.exe"|"bodian_pc.exe"|"kwmusic.exe");
+    if memory {requested}else{requested.max(1000)}
+}
+
+#[cfg(windows)]
 fn query(artwork:&mut ArtworkCache) -> Option<NowPlaying> {
     let result=query_system(artwork);artwork.system_result(result,std::time::Instant::now())
 }
@@ -387,8 +483,9 @@ fn query_system(artwork:&mut ArtworkCache) -> Result<Option<NowPlaying>,()> {
     let mgr=artwork.manager.clone().ok_or(())?;
     let current=mgr.GetCurrentSession().ok();
     let mut sessions=current.iter().cloned().collect::<Vec<_>>();
-    let all=mgr.GetSessions().map_err(|_|{artwork.manager=None;})?;
+    let all=mgr.GetSessions().map_err(|_|{artwork.manager=None;artwork.events=None;})?;
     for session in all{if !sessions.contains(&session){sessions.push(session);}}
+    artwork.events.get_or_insert_with(MediaEvents::new).sync(&mgr,&sessions);
     if sessions.is_empty(){return Ok(None);}
     // 先比较全部会话；视频不能遮挡音乐，封面只为最终选中的会话读取。
     let previous=artwork.system.as_ref().map(|(media,_)|media.source.clone());
@@ -465,8 +562,9 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
     let source=media_text(session.SourceAppUserModelId())?;
     let mut has_position=position>0.0 || duration>0.0 || event_time_ms.is_some();
     if source.eq_ignore_ascii_case("cloudmusic.exe") && duration<=0.0 {
-        if let Some((current,total))=netease_timeline::timeline() {
-            position=current;duration=total;sampled_at=Some(std::time::Instant::now());has_position=true;
+        if let Some((current,total))=netease_timeline::timeline(playing) {
+            // 自动适配的版本只有进度，时长由网易云本机数据补齐。
+            position=current;if total>0.0{duration=total;}sampled_at=Some(std::time::Instant::now());has_position=true;
         }
     }
     if source.to_ascii_lowercase().contains("kugou") {
@@ -474,7 +572,7 @@ fn read_session(session:&windows::Media::Control::GlobalSystemMediaTransportCont
             artist=singer;
             if duration<=0.0{duration=total;}
         }
-        if let Some(current)=netease_timeline::kugou_position() {
+        if let Some(current)=netease_timeline::kugou_position(playing) {
             position=current;sampled_at=Some(std::time::Instant::now());has_position=true;
         }
     }
@@ -949,6 +1047,7 @@ pub fn seek(seconds:f64,source:&str)->bool {
     if matches!(source.to_ascii_lowercase().as_str(),"kugou"|"kugou.exe") {
         let native=kugou_control::seek(seconds);
         music_log::state("酷狗跳转",if native{"本机接口可用"}else{"本机接口不可用，改用系统跳转"});
+        music_compat::set("KuGou.exe",music_compat::Item::Seek,if native{music_compat::Support::Ok}else{music_compat::Support::Unavailable("本机跳转接口不可用（较旧版本），改用系统跳转".into())});
         if native{return true;}
     }
     // 网易云不上报系统时间轴（EndTime 恒为 0），SMTC 的定位调用静默无效，
@@ -1071,6 +1170,49 @@ struct MediaApartment(Option<windows::Win32::System::Com::CO_MTA_USAGE_COOKIE>);
 impl Drop for MediaApartment {fn drop(&mut self){if let Some(cookie)=self.0 {let _=unsafe{windows::Win32::System::Com::CoDecrementMTAUsage(cookie)};}}}
 #[cfg(windows)]
 fn init_winrt()->MediaApartment {MediaApartment(unsafe{windows::Win32::System::Com::CoIncrementMTAUsage().ok()})}
+
+#[cfg(windows)]
+pub(crate) fn diagnostic_sessions() -> Option<Vec<serde_json::Value>> {
+    use windows::Media::{
+        Control::{GlobalSystemMediaTransportControlsSessionManager as Manager,
+            GlobalSystemMediaTransportControlsSessionPlaybackStatus as Status},
+        MediaPlaybackType as Kind,
+    };
+    let _apartment = init_winrt();
+    let manager = media_result(Manager::RequestAsync)?;
+    let sessions = manager.GetSessions().ok()?;
+    Some(sessions.into_iter().map(|session| {
+        let source = session.SourceAppUserModelId().ok().map(|id| id.to_string());
+        let playback = session.GetPlaybackInfo().ok();
+        let status = playback.as_ref().and_then(|info| info.PlaybackStatus().ok())
+            .map(|status| match status {
+                Status::Closed => "Closed",
+                Status::Opened => "Opened",
+                Status::Changing => "Changing",
+                Status::Stopped => "Stopped",
+                Status::Playing => "Playing",
+                Status::Paused => "Paused",
+                _ => "Unknown",
+            });
+        let kind = playback.and_then(|info| info.PlaybackType().ok())
+            .and_then(|kind| kind.Value().ok()).map(|kind| match kind {
+                Kind::Music => "Music",
+                Kind::Video => "Video",
+                Kind::Image => "Image",
+                _ => "Unknown",
+            });
+        let duration = session.GetTimelineProperties().ok()
+            .and_then(|timeline| timeline.EndTime().ok()).is_some_and(|end| end.Duration > 0);
+        let properties = media_result(|| session.TryGetMediaPropertiesAsync());
+        serde_json::json!({
+            "Source": source, "Status": status, "Type": kind, "HasDuration": duration,
+            "HasTitle": properties.as_ref().and_then(|p| p.Title().ok()).is_some_and(|s| !s.is_empty()),
+            "HasArtist": properties.as_ref().and_then(|p| p.Artist().ok()).is_some_and(|s| !s.is_empty()),
+            "HasAlbum": properties.as_ref().and_then(|p| p.AlbumTitle().ok()).is_some_and(|s| !s.is_empty()),
+            "HasThumbnail": properties.is_some_and(|p| p.Thumbnail().is_ok()),
+        })
+    }).collect())
+}
 
 #[cfg(not(windows))]
 fn init_winrt() {}
@@ -1298,15 +1440,21 @@ pub fn spawn_poller(state: Shared,ctx:eframe::egui::Context)->Poller {
             }
             if let Ok(mut cur) = state.lock() {
                 let changed=cur.title!=np.title || cur.artist!=np.artist || cur.playing!=np.playing
-                    || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration
-                    // 播放模式和音量也要算变化，否则改完界面不重绘，图标得等下次别的原因重画才更新。
-                    || cur.play_mode!=np.play_mode || cur.volume!=np.volume
+                    || cur.source!=np.source || cur.song_id!=np.song_id || cur.duration!=np.duration || cur.volume!=np.volume
+                    // 播放模式也要算变化，否则改完界面不重绘，图标得等下次别的原因重画才更新。
+                    || cur.play_mode!=np.play_mode
+                    || cur.sampled_at.is_some()!=np.sampled_at.is_some()
                     || cur.artwork.as_ref().zip(np.artwork.as_ref()).map_or(cur.artwork.is_some()!=np.artwork.is_some(),|(old,new)|!Arc::ptr_eq(old,new));
                 *cur = np;
                 if changed{ctx.request_repaint();}
             }
             let wait=requested.load(std::sync::atomic::Ordering::Relaxed);
-            std::thread::park_timeout(Duration::from_millis(if idle{idle_interval(wait)}else{wait}.into()));
+            #[cfg(windows)]
+            let evented=artwork.events.as_ref().is_some_and(MediaEvents::active);
+            #[cfg(not(windows))]
+            let evented=false;
+            let wait=if evented{event_interval(wait,idle,&selected_source)}else if idle{idle_interval(wait)}else{wait};
+            std::thread::park_timeout(Duration::from_millis(wait.into()));
         }
     });
     Poller{enabled,stop,worker,interval_ms}
@@ -1610,6 +1758,40 @@ mod tests {
         assert_eq!(idle_interval(POLL_LYRICS.as_millis() as u32),2000);
         assert_eq!(idle_interval(POLL_BACKGROUND.as_millis() as u32),2000);
         assert_eq!(idle_interval(u32::MAX),2000);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn idle_cover_reset_preserves_media_events_until_sampling_stops(){
+        let mut cache=ArtworkCache{events:Some(MediaEvents::new()),key:"旧封面".into(),..Default::default()};
+        cache.clear(true);
+        assert!(cache.key.is_empty());
+        assert!(cache.events.is_some(),"空闲时要保留事件监听，才能唤醒采样线程");
+        cache.clear(false);
+        assert!(cache.events.is_none(),"停用采样时应注销事件监听");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_event_registration_removes_preceding_tokens(){
+        let removed=std::cell::RefCell::new(Vec::new());
+        let register=|value|move ||Ok(EventToken{Value:value});
+        let remove=|token:EventToken|{removed.borrow_mut().push(token.Value);Ok(())};
+        let fail=||Err(windows::core::Error::from_hresult(windows::Win32::Foundation::E_FAIL));
+        assert!(register_media_events([(&register(1),&remove),(&register(2),&remove),(&fail,&remove)]).is_err());
+        assert_eq!(*removed.borrow(),[1,2]);
+    }
+
+    #[test]
+    fn event_mode_slows_only_sources_that_send_system_events(){
+        let fast=POLL_FAST.as_millis() as u32;
+        assert_eq!(event_interval(fast,false,"QQMusic.exe"),1000,"系统会话的变化由事件唤醒，定时检查只需兜底");
+        assert_eq!(event_interval(fast,false,"汽水音乐"),1000);
+        for source in ["kugou","cloudmusic.exe","bodian_pc.exe","kwmusic.exe"] {
+            assert_eq!(event_interval(fast,false,source),fast,"{source} 的进度靠读内存，没有事件，保持原间隔");
+        }
+        assert_eq!(event_interval(2000,false,"QQMusic.exe"),2000,"本来就更慢的不变快");
+        assert_eq!(event_interval(fast,true,""),3000,"没在播放时播放器开始放歌也会发事件");
     }
 
     #[test]
@@ -2048,7 +2230,7 @@ mod tests {
             let chosen=choose_media(system.clone(),native.clone());
             println!("round {round}: system[{}] native[{}] chosen[{}]",brief(system.as_ref()),brief(native.as_ref()),brief(chosen.as_ref()));
             if round==0 {
-                println!("memory_timeline={:?}",netease_timeline::timeline());
+                println!("memory_timeline={:?}",netease_timeline::timeline(chosen.as_ref().is_some_and(|m|m.playing)));
                 println!("mode_backend={} play_mode={:?} source={}",MODE_BACKEND.load(std::sync::atomic::Ordering::Relaxed),play_mode(),chosen.as_ref().map(|m|m.source.as_str()).unwrap_or(""));
             }
             std::thread::sleep(Duration::from_millis(400));
@@ -2276,8 +2458,22 @@ mod read_cost {
 #[ignore="本机实测：一次进程快照、一次波点/酷我发现各要多久"]
 fn live_discovery_cost(){
     let t=std::time::Instant::now();for _ in 0..20{let _=player_process::pids_named("bodian_pc.exe");}println!("进程快照: {:?}/次",t.elapsed()/20);
-    let t=std::time::Instant::now();let n=netease_timeline::kugou_position();println!("酷狗进度(含首次发现): {:?} {:?}",t.elapsed(),n);
-    let t=std::time::Instant::now();for _ in 0..20{let _=netease_timeline::kugou_position();}println!("酷狗进度: {:?}/次",t.elapsed()/20);
+    let t=std::time::Instant::now();let n=netease_timeline::kugou_position(true);println!("酷狗进度(含首次发现): {:?} {:?}",t.elapsed(),n);
+    let t=std::time::Instant::now();for _ in 0..20{let _=netease_timeline::kugou_position(true);}println!("酷狗进度: {:?}/次",t.elapsed()/20);
     let mut cache=kugou_metadata::Cache::default();
     let t=std::time::Instant::now();for _ in 0..20{let _=cache.get("x","y",false);}println!("酷狗窗口核对: {:?}/次",t.elapsed()/20);
+}
+#[cfg(all(test,windows))]
+#[test]
+#[ignore="本机实测：同时打印系统会话与各播放器本机读取的结果，以及最终选中的那一路"]
+fn live_media_sources(){
+    let _apartment=init_winrt();
+    let mut artwork=ArtworkCache::default();let mut bodian=bodian::Reader::default();
+    for _ in 0..3 {
+        let system=query(&mut artwork);let native=bodian.poll();
+        let show=|m:&Option<NowPlaying>|m.as_ref().map_or("无".into(),|m|format!("{} · {} - {} ID={:?} 播放{} 类型{:?}",m.source,m.title,m.artist,m.song_id,m.playing,m.playback_type));
+        println!("系统会话：{}",show(&system));println!("波点本机：{}",show(&native));
+        println!("最终选中：{}",show(&choose_media(system.clone(),native.clone())));
+        std::thread::sleep(Duration::from_millis(800));
+    }
 }

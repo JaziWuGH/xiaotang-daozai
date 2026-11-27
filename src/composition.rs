@@ -112,10 +112,13 @@ pub struct Backdrop {
     pool: Vec<(SpriteVisual, CompositionRoundedRectangleGeometry)>,
     shown: Vec<BlurPiece>,
     clip: Option<Vec<(i32, i32, i32, i32)>>,
+    resident_clip: Option<Vec<i32>>,
     visible: bool,
 }
 
 impl Backdrop {
+    pub(crate) fn hwnd(&self) -> HWND { self.hwnd }
+
     pub fn new() -> windows::core::Result<Self> {
         let hwnd = create_backdrop_window()?;
         // Win10 不支持这个 Win32 宿主背景属性。失败时不能继续绘制纯色画刷，
@@ -145,7 +148,7 @@ impl Backdrop {
         let children = root.Children()?;
         let brush: CompositionBrush = compositor.CreateHostBackdropBrush()?.cast()?;
         root.SetIsVisible(false)?;
-        Ok(Self { hwnd, placed: (RECT::default(), false), _queue: queue, compositor, _target: target, root, children, brush, pool: Vec::new(), shown: Vec::new(), clip: None, visible: false })
+        Ok(Self { hwnd, placed: (RECT::default(), false), _queue: queue, compositor, _target: target, root, children, brush, pool: Vec::new(), shown: Vec::new(), clip: None, resident_clip: None, visible: false })
     }
 
     /// 让底板与岛仔窗口重合，并紧贴在它正下方。
@@ -162,9 +165,10 @@ impl Backdrop {
     }
 
     /// 显示并更新模糊块（物理像素，岛仔窗口坐标）。形状不变时不提交任何改动。
-    pub fn show(&mut self, island: HWND, pieces: &[BlurPiece]) -> windows::core::Result<()> {
+    pub fn show(&mut self, island: HWND, pieces: &[BlurPiece], resident_key: Option<&[i32]>) -> windows::core::Result<()> {
         self.follow(island);
-        if pieces != self.shown.as_slice() {
+        let changed=pieces!=self.shown.as_slice();
+        if changed {
             while self.pool.len() < pieces.len() {
                 let visual = self.compositor.CreateSpriteVisual()?;
                 visual.SetBrush(&self.brush)?;
@@ -187,8 +191,15 @@ impl Backdrop {
                     None => visual.SetIsVisible(false)?,
                 }
             }
-            clip_to_pieces(self.hwnd, pieces, &mut self.clip);
             self.shown = pieces.to_vec();
+        }
+        if let Some(key)=resident_key {
+            if self.resident_clip.as_deref()!=Some(key) && crate::native::apply_outline(self.hwnd,key,false) {
+                self.resident_clip=Some(key.to_vec());
+                self.clip=None;
+            }
+        } else if (changed || self.resident_clip.is_some()) && clip_to_pieces(self.hwnd,pieces,&mut self.clip) {
+            self.resident_clip=None;
         }
         if !self.visible {
             self.root.SetIsVisible(true)?;

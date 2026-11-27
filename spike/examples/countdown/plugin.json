@@ -1,0 +1,62 @@
+{
+  "id": "example.countdown",
+  "name": "通用倒计时",
+  "author": "岛仔",
+  "version": "1.0.0",
+  "api": 1,
+  "runtime": "js",
+  "refreshSeconds": 86400,
+  "entry": "main.js",
+  "cover": "cover.png",
+  "owner": "tasks",
+  "capabilities": [
+    "card",
+    "calendar.marker",
+    "timer",
+    "settings"
+  ],
+  "dataVersion": 1,
+  "permissions": {},
+  "settings": [
+    {
+      "key": "title",
+      "label": "名称",
+      "type": "text",
+      "default": "纪念日"
+    },
+    {
+      "key": "target",
+      "label": "日期",
+      "type": "date",
+      "default": "2026-12-31"
+    },
+    {
+      "key": "mode",
+      "label": "方向",
+      "type": "choice",
+      "default": "until",
+      "choices": [
+        {
+          "label": "还有几天",
+          "value": "until"
+        },
+        {
+          "label": "已经几天",
+          "value": "since"
+        }
+      ]
+    },
+    {
+      "key": "yearly",
+      "label": "每年重复",
+      "type": "switch",
+      "default": "false"
+    },
+    {
+      "key": "mark",
+      "label": "日历标注",
+      "type": "switch",
+      "default": "true"
+    }
+  ]
+}

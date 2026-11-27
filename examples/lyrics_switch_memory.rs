@@ -37,7 +37,7 @@ fn main()->eframe::Result<()> {
                 let out=self.app.frame(ui,egui::Rect::from_min_size(ui.max_rect().min,egui::vec2(WIN_W,WIN_H)),&env);
                 if out.hit.width()>280.0{self.active_frames+=1;}
                 let r=|r:egui::Rect|(r.min.x,r.min.y,r.width(),r.height());
-                self.native.update(r(out.region),r(out.hit),out.notice_hit.map(r),out.file_drop_zone.map(r),out.glass.as_deref(),ctx.pixels_per_point(),false,out.expanded);
+                self.native.update(r(out.region),r(out.hit),out.notice_hit.map(r),out.file_drop_zone.map(r),out.glass.as_deref(),out.blur,ctx.pixels_per_point(),false,out.expanded,out.resident_clip.as_deref());
             });
             // 媒体更新先清空旧歌状态，再为当前歌曲注入缓存，下一帧绘制。
             if changed{self.app.set_lyrics(&title,"测试",240.0,self.lyrics[song%self.lyrics.len()].clone());}

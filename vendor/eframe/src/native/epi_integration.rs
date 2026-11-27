@@ -12,6 +12,31 @@ use egui_winit::{EventResponse, WindowSettings};
 
 use crate::epi;
 
+pub fn translate_root_output(
+    platform: &mut egui::PlatformOutput,
+    primitives: &mut [egui::ClippedPrimitive],
+    window_offset: [i32; 2],
+    pixels_per_point: f32,
+) {
+    let delta = -egui::vec2(window_offset[0] as f32, window_offset[1] as f32) / pixels_per_point;
+    if delta == egui::Vec2::ZERO {
+        return;
+    }
+    if let Some(ime) = &mut platform.ime {
+        ime.rect = ime.rect.translate(delta);
+        ime.cursor_rect = ime.cursor_rect.translate(delta);
+    }
+    for clipped in primitives {
+        clipped.clip_rect = clipped.clip_rect.translate(delta);
+        match &mut clipped.primitive {
+            egui::epaint::Primitive::Mesh(mesh) => mesh.translate(delta),
+            egui::epaint::Primitive::Callback(callback) => {
+                callback.rect = callback.rect.translate(delta);
+            }
+        }
+    }
+}
+
 #[cfg_attr(target_os = "ios", allow(dead_code, unused_variables, unused_mut))]
 pub fn viewport_builder(
     egui_zoom_factor: f32,
@@ -183,6 +208,8 @@ impl EpiIntegration {
         #[cfg(feature = "wgpu")] wgpu_render_state: Option<egui_wgpu::RenderState>,
     ) -> Self {
         let frame = epi::Frame {
+            root_window_offset: None,
+            root_gl_front_ready: false,
             #[cfg(feature = "wgpu")]
             interactive_frame_start: None,
             info: epi::IntegrationInfo { cpu_usage: None },
@@ -234,6 +261,7 @@ impl EpiIntegration {
 
     pub fn on_window_event(
         &mut self,
+        viewport_id: ViewportId,
         window: &winit::window::Window,
         egui_winit: &mut egui_winit::State,
         event: &winit::event::WindowEvent,
@@ -251,7 +279,35 @@ impl EpiIntegration {
             self.can_drag_window = true;
         }
 
+        // 在 egui-winit 缓存指针坐标前转换，避免外框调整后点击沿用旧的局部坐标。
+        if let Some([x, y]) = self.root_window_offset(viewport_id) {
+            let translate = |position: winit::dpi::PhysicalPosition<f64>| {
+                winit::dpi::PhysicalPosition::new(position.x + f64::from(x), position.y + f64::from(y))
+            };
+            let translated = match *event {
+                WindowEvent::CursorMoved { device_id, position } => {
+                    Some(WindowEvent::CursorMoved { device_id, position: translate(position) })
+                }
+                WindowEvent::Touch(mut touch) => {
+                    touch.location = translate(touch.location);
+                    Some(WindowEvent::Touch(touch))
+                }
+                _ => None,
+            };
+            if let Some(translated) = translated {
+                return egui_winit.on_window_event(window, &translated);
+            }
+        }
+
         egui_winit.on_window_event(window, event)
+    }
+
+    pub fn root_window_offset(&self, viewport_id: ViewportId) -> Option<[i32; 2]> {
+        if cfg!(windows) && viewport_id == ViewportId::ROOT {
+            self.frame.root_window_offset
+        } else {
+            None
+        }
     }
 
     pub fn pre_update(&mut self) {

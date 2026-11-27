@@ -82,9 +82,13 @@ fn restart_allowed(history: &str, now: u64, uptime: std::time::Duration) -> bool
 
 /// 启动一个新的岛仔：它会先等当前进程退出，再走正常的单实例启动流程。
 pub fn spawn_replacement() -> bool {
+    spawn_replacement_with_args(&[])
+}
+
+pub fn spawn_replacement_with_args(args: &[&str]) -> bool {
     let Ok(exe) = std::env::current_exe() else { return false };
     let mut command = std::process::Command::new(exe);
-    command.arg("--restart-after").arg(std::process::id().to_string()).env_remove("DAOZAI_TEST_CRASH");
+    command.arg("--restart-after").arg(std::process::id().to_string()).args(args).env_remove("DAOZAI_TEST_CRASH");
     if let Some(dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) { command.current_dir(dir); }
     command.spawn().is_ok()
 }

@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>世界时钟 · 理想版</title>
+
+</head>
+<body>
+
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700;900&amp;family=Inter:wght@400;600;700;800&amp;display=swap">
+<style>
+body{margin:0}
+.k{font-size:12px;letter-spacing:.08em;color:#6B6B73;font-weight:700}
+.muted{color:#5D5D66}
+.card{background:#fff;border:1px solid #E2E2DC;border-radius:14px;box-sizing:border-box}
+.desk{background:#1B2333;border-radius:14px;display:flex;justify-content:center;align-items:flex-start;padding-bottom:26px;overflow:hidden}
+.isl{background:#000;color:#fff;border-radius:16px 16px 30px 30px;box-sizing:border-box;font-family:'Noto Sans SC','Inter',sans-serif;position:relative}
+.cap{background:#1C1C1F;border-radius:999px;padding:3px 10px;font-size:11px;display:inline-flex;gap:8px;align-items:center}
+.arrow{position:absolute;top:50%;width:22px;height:22px;border-radius:11px;background:#2A2A2E;display:flex;align-items:center;justify-content:center}
+.num{font-family:'Inter','Noto Sans SC',sans-serif;font-variant-numeric:tabular-nums}
+.cell{display:flex;flex-direction:column;align-items:center;gap:1px;min-width:0}
+.cn{font-size:10px;font-weight:700;margin-top:2px}
+.ctm{font-family:'Inter',sans-serif;font-size:11px;font-weight:700;font-variant-numeric:tabular-nums}
+.cd{font-size:8px;color:#8E8E99}
+.br{display:flex;align-items:center;gap:6px;height:7px}
+.bl{width:30px;font-size:7.5px;color:#8E8E99;text-align:right;line-height:7px}
+.bt{position:relative;flex:1;height:5px;border-radius:3px;background:#2E64B5;overflow:hidden}
+.dy{position:absolute;top:0;bottom:0;background:#FFC43D}
+.pill{background:#000;color:#fff;border-radius:0 0 20px 20px;height:36px;display:flex;align-items:center;gap:10px;padding:0 14px;box-sizing:border-box;font-size:12.5px}
+.std{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E3F5E9;color:#1F7A3D;font-weight:700}
+.cvs{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#EEE8FF;color:#5B3FD1;font-weight:700}
+.live{display:inline-block;font-size:11px;padding:2px 8px;border-radius:999px;background:#E6F0FF;color:#1F5FBF;font-weight:700}
+td{padding:7px 8px;font-size:12.5px;border-bottom:1px solid #EEEEE9;vertical-align:top}
+</style>
+
+<div style="width: 1440px; height: 1000px; box-sizing: border-box; padding: 36px 52px; background: #F4F4F1; font-family: 'Noto Sans SC', 'Inter', sans-serif; color: #17171A; display: flex; flex-direction: column; gap: 16px">
+  <div style="display: flex; align-items: flex-end; justify-content: space-between">
+    <div style="display: flex; flex-direction: column; gap: 4px">
+      <div class="k">理想版 · 4 · 第二稿</div>
+      <h1 style="margin: 0; font-size: 34px">世界时钟</h1>
+      <p class="muted" style="margin: 0; font-size: 14px">最多 10 个城市。表盘白天是浅色、夜里是深色；下面每个城市一条 24 小时色条，当地 9–18 点是黄色白天，其余是蓝色夜晚。</p>
+    </div>
+    <div style="display: flex; gap: 8px"><span class="std">标准组件</span><span class="cvs">自绘画布</span><span class="live">宿主实时值</span></div>
+  </div>
+
+  <div style="display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr); gap: 24px; flex: 1; min-height: 0">
+    <div style="display: flex; flex-direction: column; gap: 12px">
+      <div class="k">展开（1.5 倍显示，实际 419 × 344）</div>
+      <div class="desk" style="padding-bottom: 24px">
+        <div style="zoom: 1.5">
+          <div class="isl" style="width: 419px; height: 344px; padding: 12px 16px 10px; display: flex; flex-direction: column; gap: 8px">
+            <div style="display: flex; align-items: center; justify-content: space-between">
+              <span style="font-size: 15px; font-weight: 900">世界<span style="color: #5AC8FA">时钟</span></span>
+              <span class="cap"><span>北京 11月24日 周二</span><b>14:05</b></span>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B2B2BA" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><circle cx="12" cy="12" r="8"></circle></svg>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px 4px">
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="纽约 01:05 夜晚"><circle cx="23" cy="23" r="21.5" fill="#101626" stroke="#2A3550"></circle><g stroke="#5A6680" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#F2F4F8" stroke-width="2.6" stroke-linecap="round" transform="rotate(32.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#F2F4F8" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#5AC8FA"></circle></svg><span class="cn">纽约</span><span class="ctm">01:05</span><span class="cd">昨天 −13h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="伦敦 06:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(182.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">伦敦</span><span class="ctm">06:05</span><span class="cd">今天 −8h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="巴黎 07:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(212.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">巴黎</span><span class="ctm">07:05</span><span class="cd">今天 −7h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="迪拜 10:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(302.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">迪拜</span><span class="ctm">10:05</span><span class="cd">今天 −4h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="莫斯科 09:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(272.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">莫斯科</span><span class="ctm">09:05</span><span class="cd">今天 −5h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="新加坡 14:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(62.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">新加坡</span><span class="ctm">14:05</span><span class="cd">同一时间</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="东京 15:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(92.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">东京</span><span class="ctm">15:05</span><span class="cd">今天 +1h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="首尔 15:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(92.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">首尔</span><span class="ctm">15:05</span><span class="cd">今天 +1h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="悉尼 17:05 白天"><circle cx="23" cy="23" r="21.5" fill="#F4F1EA" stroke="#D8D2C4"></circle><g stroke="#3A3A40" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#1C1C1F" stroke-width="2.6" stroke-linecap="round" transform="rotate(152.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#1C1C1F" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#FF8A3D"></circle></svg><span class="cn">悉尼</span><span class="ctm">17:05</span><span class="cd">今天 +3h</span></div>
+              <div class="cell"><svg width="46" height="46" viewBox="0 0 46 46" role="img" aria-label="洛杉矶 22:05 夜晚"><circle cx="23" cy="23" r="21.5" fill="#101626" stroke="#2A3550"></circle><g stroke="#5A6680" stroke-linecap="round"><line x1="23" y1="4" x2="23" y2="8" stroke-width="2"></line><line x1="42" y1="23" x2="38" y2="23" stroke-width="2"></line><line x1="23" y1="42" x2="23" y2="38" stroke-width="2"></line><line x1="4" y1="23" x2="8" y2="23" stroke-width="2"></line></g><line x1="23" y1="23" x2="23" y2="12" stroke="#F2F4F8" stroke-width="2.6" stroke-linecap="round" transform="rotate(302.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="7" stroke="#F2F4F8" stroke-width="1.6" stroke-linecap="round" transform="rotate(30 23 23)"></line><circle cx="23" cy="23" r="2" fill="#5AC8FA"></circle></svg><span class="cn">洛杉矶</span><span class="ctm">22:05</span><span class="cd">昨天 −16h</span></div>
+            </div>
+            <div style="display: flex; flex-direction: column; gap: 3px; position: relative; margin-top: 2px">
+              <div class="br"><span class="bl">纽约</span><span class="bt"><span class="dy" style="left: 0; width: 29.2%"></span><span class="dy" style="left: 91.7%; width: 8.3%"></span></span></div>
+              <div class="br"><span class="bl">伦敦</span><span class="bt"><span class="dy" style="left: 0; width: 8.3%"></span><span class="dy" style="left: 70.8%; width: 29.2%"></span></span></div>
+              <div class="br"><span class="bl">巴黎</span><span class="bt"><span class="dy" style="left: 0; width: 4.2%"></span><span class="dy" style="left: 66.7%; width: 33.3%"></span></span></div>
+              <div class="br"><span class="bl">迪拜</span><span class="bt"><span class="dy" style="left: 54.2%; width: 37.5%"></span></span></div>
+              <div class="br"><span class="bl">莫斯科</span><span class="bt"><span class="dy" style="left: 58.3%; width: 37.5%"></span></span></div>
+              <div class="br"><span class="bl">新加坡</span><span class="bt"><span class="dy" style="left: 37.5%; width: 37.5%"></span></span></div>
+              <div class="br"><span class="bl">东京</span><span class="bt"><span class="dy" style="left: 33.3%; width: 37.5%"></span></span></div>
+              <div class="br"><span class="bl">首尔</span><span class="bt"><span class="dy" style="left: 33.3%; width: 37.5%"></span></span></div>
+              <div class="br"><span class="bl">悉尼</span><span class="bt"><span class="dy" style="left: 25%; width: 37.5%"></span></span></div>
+              <div class="br"><span class="bl">洛杉矶</span><span class="bt"><span class="dy" style="left: 4.2%; width: 37.5%"></span></span></div>
+              <span style="position: absolute; left: calc(36px + (100% - 36px) * 0.586); top: -3px; bottom: 9px; width: 2px; background: #fff; border-radius: 1px; box-shadow: 0 0 6px rgba(255,255,255,.7)"></span>
+              <div class="num" style="display: flex; justify-content: space-between; padding-left: 36px; font-size: 7.5px; color: #6B6B73"><span>0</span><span>6</span><span>12</span><span>18</span><span>24 北京</span></div>
+            </div>
+            <span class="arrow" style="left: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M15 5l-7 7 7 7"></path></svg></span>
+            <span class="arrow" style="right: -11px"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" aria-hidden="true"><path d="M9 5l7 7-7 7"></path></svg></span>
+          </div>
+        </div>
+      </div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 8px">
+          <div class="k">常驻条 · 小表盘</div>
+          <div class="desk" style="padding: 0 0 12px"><div class="pill" style="width: 230px; gap: 8px"><span style="font-weight: 700">14:05</span><span style="flex: 1; display: flex; align-items: center; gap: 6px; padding: 4px 2px"><svg width="16" height="16" viewBox="0 0 46 46" aria-hidden="true"><circle cx="23" cy="23" r="21.5" fill="#101626" stroke="#5A6680" stroke-width="3"></circle><line x1="23" y1="23" x2="23" y2="11" stroke="#fff" stroke-width="5" stroke-linecap="round" transform="rotate(32.5 23 23)"></line><line x1="23" y1="23" x2="23" y2="6" stroke="#fff" stroke-width="3.5" stroke-linecap="round" transform="rotate(30 23 23)"></line></svg><span style="color: #B2B2BA; font-size: 11.5px">纽约</span><b class="num">01:05</b></span></div></div>
+        </div>
+        <div class="card" style="padding: 12px; display: flex; flex-direction: column; gap: 6px">
+          <div class="k">城市数量自适应</div>
+          <span class="muted" style="font-size: 12px; line-height: 1.6">1–5 个城市排一行，表盘放大到 64；6–10 个排两行。色条行数跟城市数一致，页面高度随之变化（最矮 236，最高 344）。</span>
+        </div>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 14px">
+      <div class="k">设计说明</div>
+      <ul class="muted" style="margin: 0; padding-left: 18px; font-size: 13.5px; line-height: 1.7">
+        <li>表盘只留 12、3、6、9 四个刻度，时针粗、分针细，圆角端；中心点白天橙、夜里蓝。</li>
+        <li>当地 6–18 点用浅色米白表盘、深色指针；其余时间用深蓝表盘、浅色指针。</li>
+        <li>色条横轴是北京时间 0–24 点：当地 9–18 点画黄色，其余画蓝色；白线是现在，所以能直接看出现在谁在上班。</li>
+        <li>城市最多 10 个，在设置里搜索中文城市名添加、拖动排序。</li>
+        <li>点任一表盘可设为常驻城市。</li>
+      </ul>
+      <div class="k" style="margin-top: 4px">实现方式</div>
+      <div class="card" style="padding: 6px 14px">
+        <table style="width: 100%; border-collapse: collapse">
+          <tbody>
+            <tr><td>各城市时区偏移、夏令时</td><td style="text-align: right"><span class="std">timezones</span></td></tr>
+            <tr><td>指针角度、日夜换色按分钟走</td><td style="text-align: right"><span class="live">时钟绑定</span></td></tr>
+            <tr><td>表盘、刻度、指针、网格排版</td><td style="text-align: right"><span class="cvs">自绘画布</span></td></tr>
+            <tr><td>24 小时色条与「现在」白线</td><td style="text-align: right"><span class="cvs">画布 · 时间绑定</span></td></tr>
+            <tr><td>城市列表（最多 10 个）</td><td style="text-align: right"><span class="std">list 设置</span></td></tr>
+            <tr><td>中文城市搜索带出时区</td><td style="text-align: right"><span class="std">新设置类型 timezone</span></td></tr>
+            <tr><td>点表盘设为常驻</td><td style="text-align: right"><span class="std">action</span></td></tr>
+            <tr><td>常驻条小表盘</td><td style="text-align: right"><span class="cvs">常驻小画布</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+</body>
+</html>

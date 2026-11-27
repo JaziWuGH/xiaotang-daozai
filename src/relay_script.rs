@@ -57,18 +57,40 @@ pub fn parse_result(value:&Value,source:&str)->Result<Snapshot,String>{
     Ok(Snapshot{plan:source.into(),relay:Some(Quota{source:source.into(),amounts,expires_at:None}),windows,at:chrono::Utc::now().timestamp(),..Default::default()})
 }
 
+/// 这份地址表同时用于站点校验和直连解析，localhost 无需查询 DNS。
+pub(super) fn loopback_ips(url:&url::Url)->&'static [std::net::IpAddr] {
+    use std::net::{IpAddr,Ipv4Addr,Ipv6Addr};
+    const V4:IpAddr=IpAddr::V4(Ipv4Addr::LOCALHOST);
+    const V6:IpAddr=IpAddr::V6(Ipv6Addr::LOCALHOST);
+    match url.host() {
+        Some(url::Host::Domain("localhost"))=>&[V4,V6],
+        Some(url::Host::Ipv4(Ipv4Addr::LOCALHOST))=>&[V4],
+        Some(url::Host::Ipv6(Ipv6Addr::LOCALHOST))=>&[V6],
+        _=>&[],
+    }
+}
+
 pub fn request(agent:&ureq::Agent,base:&str,credential:&Credential,cancelled:impl Fn()->bool)->Result<Snapshot,(String,u64)>{
     if cancelled(){return Err(("已取消连接".into(),0));}
-    let base=super::validate_base_url(base).map_err(|e|(e,0))?;
+    let base=super::site_url(base,true).map_err(|e|(e,0))?;
     if credential.script.trim().is_empty()||credential.script.len()>65536{return Err(("请输入 64 KB 以内的查询脚本".into(),0));}
     let mut code=credential.script.clone();
     for (key,value) in [("baseUrl",base.as_str()),("apiKey",credential.api_key.as_str()),("accessToken",credential.access_token.as_str()),("userId",credential.user_id.as_str())]{code=code.replace(&format!("{{{{{key}}}}}"),value);}
     let config=evaluate(&code,None,Duration::from_secs(5)).map_err(|e|(e,0))?;
     let url=url::Url::parse(config["url"].as_str().ok_or(("查询脚本缺少请求地址".into(),0))?).map_err(|_|("查询脚本的请求地址无效".into(),0))?;
     let origin=url::Url::parse(&base).unwrap();
-    if url.scheme()!="https"||url.origin()!=origin.origin()||!url.username().is_empty()||url.password().is_some()||url.fragment().is_some(){return Err(("查询脚本必须请求所填站点的 HTTPS 接口".into(),0));}
+    if url.origin()!=origin.origin()||!url.username().is_empty()||url.password().is_some()||url.fragment().is_some(){return Err(("查询脚本必须请求所填站点的同源接口".into(),0));}
     let method=config["method"].as_str().unwrap_or("GET");
     if !matches!(method,"GET"|"POST"){return Err(("额度查询脚本仅支持 GET 或 POST".into(),0));}
+    let direct;
+    let agent=if url.scheme()=="http" {
+        let ips=loopback_ips(&url);
+        let port=url.port_or_known_default().expect("HTTP 有默认端口");
+        direct=ureq::AgentBuilder::new().try_proxy_from_env(false).redirects(0)
+            .resolver(move |_:&str|Ok(ips.iter().map(|ip|std::net::SocketAddr::new(*ip,port)).collect()))
+            .build();
+        &direct
+    }else{agent};
     let mut request=agent.request(method,url.as_str()).set("Accept","application/json").timeout(Duration::from_secs(15));
     if !config["headers"].is_null(){
         let headers=config["headers"].as_object().ok_or(("查询脚本的 headers 应为对象".into(),0))?;
@@ -100,6 +122,47 @@ mod tests{
         let snapshot=request(&agent,"https://relay.example/tenant",&credential,||false).unwrap();let q=snapshot.relay.unwrap();
         assert_eq!(q.compact(),"1.1 USD");assert_eq!(q.amounts.len(),2);assert_eq!(q.amounts[1].remaining,Some(8.0));assert!(q.full().contains("套餐二"));
     }
+    #[test]
+    fn loopback_http_uses_direct_connections_and_keeps_the_request_on_its_origin(){
+        use std::{io::{BufRead,BufReader,Write},net::TcpListener,thread};
+        let observer=TcpListener::bind("127.0.0.1:0").unwrap();
+        observer.set_nonblocking(true).unwrap();
+        let other=format!("http://{}",observer.local_addr().unwrap());
+        let agent=ureq::AgentBuilder::new().proxy(ureq::Proxy::new(&other).unwrap()).timeout(Duration::from_secs(2)).build();
+        let c=Credential{script:DEFAULT_SCRIPT.replace("return { remaining: response.balance, unit: \"USD\" };","return response.plans;"),api_key:"test-only".into(),access_token:String::new(),user_id:String::new()};
+        for (bind,host) in [("127.0.0.1:0","127.0.0.1"),("127.0.0.1:0","localhost"),("[::1]:0","[::1]"),("[::1]:0","localhost")] {
+            let server=TcpListener::bind(bind).unwrap();
+            let port=server.local_addr().unwrap().port();
+            let base=format!("http://{host}:{port}/gateway");
+            let redirect=format!("HTTP/1.1 302 Found\r\nLocation: {other}/other\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let worker=thread::spawn(move||{
+                let body=r#"{"plans":[{"planName":"甲","remaining":1},{"planName":"乙","remaining":2}]}"#;
+                let ok=format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len());
+                for reply in [ok,redirect] {
+                    let (mut stream,_)=server.accept().unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                    let mut headers=BufReader::new(&stream).lines().map(Result::unwrap);
+                    assert_eq!(headers.next().unwrap(),"GET /gateway/user/balance HTTP/1.1");
+                    let headers:Vec<_>=headers.take_while(|s|!s.is_empty()).collect();
+                    assert!(headers.iter().any(|s|s.eq_ignore_ascii_case("Authorization: Bearer test-only")));
+                    stream.write_all(reply.as_bytes()).unwrap();
+                }
+            });
+            let quota=request(&agent,&base,&c,||false).unwrap().relay.unwrap();
+            assert_eq!(quota.amounts.len(),2);
+            assert_eq!(quota.amounts[1].remaining,Some(2.0));
+            assert!(request(&agent,&base,&c,||false).is_err());
+            worker.join().unwrap();
+            for target in [other.clone(),format!("https://{host}:{port}"),format!("http://other.invalid:{port}")] {
+                let mut changed=c.clone();
+                changed.script=changed.script.replace("{{baseUrl}}",&target);
+                let error=request(&agent,&base,&changed,||false).unwrap_err();
+                assert!(error.0.contains("所填站点"));
+            }
+        }
+        assert_eq!(observer.accept().unwrap_err().kind(),std::io::ErrorKind::WouldBlock);
+    }
+
     #[test]fn invalid_script_and_infinite_loop_do_not_expose_credentials(){
         for code in ["throw new Error('synthetic-secret')","for(;;){}"]{
             let error=evaluate(code,None,Duration::from_millis(20)).unwrap_err();assert!(!error.contains("synthetic-secret"));

@@ -56,7 +56,7 @@ try {
         $own = @('daozai.exe','Uninstall.exe','LICENSE','THIRD_PARTY_NOTICES.txt') | ForEach-Object { Join-Path $targetDir $_ } | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
         $sizeKb = [int][Math]::Ceiling((($own | ForEach-Object { (Get-Item -LiteralPath $_).Length }) | Measure-Object -Sum).Sum / 1KB)
         if ($sizeKb -gt 0) { Set-ItemProperty -LiteralPath $key -Name EstimatedSize -Value $sizeKb -Type DWord -ErrorAction SilentlyContinue }
-        # 开始菜单「收集岛仔诊断」：旧版安装没有，或指向已不再附带的 cmd；统一改为调用程序内嵌的诊断收集。失败不影响更新。
+        # 将旧版诊断快捷方式统一指向程序的诊断入口。失败不影响更新。
         try {
             $link = Join-Path ([Environment]::GetFolderPath('Programs')) '收集岛仔诊断.lnk'
             $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($link)
